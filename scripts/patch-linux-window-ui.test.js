@@ -278,7 +278,11 @@ test("adds Linux tray support including the platform guard", () => {
     patched,
     /this\.trayMenuThreads=e\.trayMenuThreads,process\.platform===`linux`&&!\(typeof codexLinuxIsQuitInProgress===`function`&&codexLinuxIsQuitInProgress\(\)\)&&this\.setLinuxTrayContextMenu\?\.\(\)/,
   );
-  assert.match(patched, /\(E\|\|process\.platform===`linux`&&codexLinuxIsTrayEnabled\(\)\)&&oe\(\);/);
+  assert.match(
+    patched,
+    /\(E\|\|process\.platform===`linux`&&\(typeof codexLinuxIsTrayEnabled!==`function`\|\|codexLinuxIsTrayEnabled\(\)\)\)&&oe\(\);/,
+  );
+  assert.doesNotMatch(patched, /\(E\|\|process\.platform===`linux`&&codexLinuxIsTrayEnabled\(\)\)&&oe\(\);/);
 });
 
 test("adds Linux tray support for current minified window and startup identifiers", () => {
@@ -296,7 +300,10 @@ test("adds Linux tray support for current minified window and startup identifier
     /\(process\.platform===`win32`\|\|process\.platform===`linux`\)&&f===`local`&&!this\.isAppQuitting&&!\(typeof codexLinuxIsQuitInProgress===`function`&&codexLinuxIsQuitInProgress\(\)\)/,
   );
   assert.match(patched, /e\.preventDefault\(\),j\.hide\(\);return/);
-  assert.match(patched, /\(E\|\|process\.platform===`linux`&&codexLinuxIsTrayEnabled\(\)\)&&ce\$\(\);/);
+  assert.match(
+    patched,
+    /\(E\|\|process\.platform===`linux`&&\(typeof codexLinuxIsTrayEnabled!==`function`\|\|codexLinuxIsTrayEnabled\(\)\)\)&&ce\$\(\);/,
+  );
 });
 
 test("scopes dynamic tray startup matching to the tray initializer", () => {
@@ -311,7 +318,25 @@ test("scopes dynamic tray startup matching to the tray initializer", () => {
 
   assert.match(patched, /U&&startOther\(\);/);
   assert.doesNotMatch(patched, /\(U\|\|process\.platform===`linux`&&codexLinuxIsTrayEnabled\(\)\)&&startOther\(\);/);
-  assert.match(patched, /\(E\|\|process\.platform===`linux`&&codexLinuxIsTrayEnabled\(\)\)&&ce\$\(\);/);
+  assert.match(
+    patched,
+    /\(E\|\|process\.platform===`linux`&&\(typeof codexLinuxIsTrayEnabled!==`function`\|\|codexLinuxIsTrayEnabled\(\)\)\)&&ce\$\(\);/,
+  );
+});
+
+test("upgrades the older guardless Linux tray startup patch", () => {
+  const source = [
+    "async function eN(e){let t=await Ww(e.buildFlavor,e.repoRoot),r=new n.Tray(t.defaultIcon);return r}",
+    "let ce$=async()=>{O=!0;try{await eN({buildFlavor:a,repoRoot:j.repoRoot})}catch(e){O=!1}};(E||process.platform===`linux`&&codexLinuxIsTrayEnabled())&&ce$();",
+  ].join("");
+
+  const patched = applyPatchTwice(applyLinuxTrayPatch, source, null);
+
+  assert.match(
+    patched,
+    /\(E\|\|process\.platform===`linux`&&\(typeof codexLinuxIsTrayEnabled!==`function`\|\|codexLinuxIsTrayEnabled\(\)\)\)&&ce\$\(\);/,
+  );
+  assert.doesNotMatch(patched, /\(E\|\|process\.platform===`linux`&&codexLinuxIsTrayEnabled\(\)\)&&ce\$\(\);/);
 });
 
 test("scopes close-to-tray already-patched detection to the handler", () => {

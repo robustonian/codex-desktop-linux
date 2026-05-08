@@ -1045,9 +1045,14 @@ function applyLinuxTrayPatch(currentSource, iconPathExpression) {
 
   const trayStartupNeedle = "E&&oe();";
   const previousTrayStartupPatch = "(E||process.platform===`linux`)&&oe();";
-  const trayStartupPatch = "(E||process.platform===`linux`&&codexLinuxIsTrayEnabled())&&oe();";
+  const oldTrayStartupPatch = "(E||process.platform===`linux`&&codexLinuxIsTrayEnabled())&&oe();";
+  const trayStartupLinuxGate =
+    "process.platform===`linux`&&(typeof codexLinuxIsTrayEnabled!==`function`||codexLinuxIsTrayEnabled())";
+  const trayStartupPatch = `(E||${trayStartupLinuxGate})&&oe();`;
   if (patchedSource.includes(trayStartupPatch)) {
     // Already patched.
+  } else if (patchedSource.includes(oldTrayStartupPatch)) {
+    patchedSource = patchedSource.replace(oldTrayStartupPatch, trayStartupPatch);
   } else if (patchedSource.includes(previousTrayStartupPatch)) {
     patchedSource = patchedSource.replace(previousTrayStartupPatch, trayStartupPatch);
   } else if (patchedSource.includes(trayStartupNeedle)) {
@@ -1057,14 +1062,23 @@ function applyLinuxTrayPatch(currentSource, iconPathExpression) {
     const dynamicTrayStartupMatch = traySetup == null
       ? null
       : findDynamicTrayStartupCall(patchedSource, traySetup.setupFn, traySetup.index);
-    if (
-      traySetup != null &&
-      patchedSource.includes(`process.platform===\`linux\`&&codexLinuxIsTrayEnabled())&&${traySetup.setupFn}();`)
-    ) {
+    const patchedDynamicTrayStartupRegex = traySetup == null
+      ? null
+      : new RegExp(
+        `\\([A-Za-z_$][\\w$]*\\|\\|${escapeRegExp(trayStartupLinuxGate)}\\)&&${escapeRegExp(traySetup.setupFn)}\\(\\);`,
+      );
+    const oldDynamicTrayStartupRegex = traySetup == null
+      ? null
+      : new RegExp(
+        `process\\.platform===\`linux\`&&codexLinuxIsTrayEnabled\\(\\)\\)&&${escapeRegExp(traySetup.setupFn)}\\(\\);`,
+      );
+    if (patchedDynamicTrayStartupRegex?.test(patchedSource)) {
       // Already patched with a newer minifier's tray setup identifier.
+    } else if (oldDynamicTrayStartupRegex?.test(patchedSource)) {
+      patchedSource = patchedSource.replace(oldDynamicTrayStartupRegex, `${trayStartupLinuxGate})&&${traySetup.setupFn}();`);
     } else if (dynamicTrayStartupMatch != null) {
       const isWindowsVar = dynamicTrayStartupMatch[1];
-      patchedSource = `${patchedSource.slice(0, dynamicTrayStartupMatch.index)}(${isWindowsVar}||process.platform===\`linux\`&&codexLinuxIsTrayEnabled())&&${traySetup.setupFn}();${patchedSource.slice(dynamicTrayStartupMatch.index + dynamicTrayStartupMatch[0].length)}`;
+      patchedSource = `${patchedSource.slice(0, dynamicTrayStartupMatch.index)}(${isWindowsVar}||${trayStartupLinuxGate})&&${traySetup.setupFn}();${patchedSource.slice(dynamicTrayStartupMatch.index + dynamicTrayStartupMatch[0].length)}`;
     } else {
       console.warn("WARN: Could not find tray startup call — skipping Linux tray startup patch");
     }
