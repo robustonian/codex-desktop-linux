@@ -8,5 +8,14 @@ Type=Application
 Categories=Development;
 MimeType=x-scheme-handler/codex;x-scheme-handler/codex-browser-sidebar;
 StartupNotify=true
-StartupWMClass=codex-desktop
-X-GNOME-WMClass=codex-desktop
+StartupWMClass=Codex
+X-GNOME-WMClass=Codex
+Actions=CheckForUpdates;InstallReadyUpdate;
+
+[Desktop Action CheckForUpdates]
+Name=Check for Updates
+Exec=/usr/bin/codex-update-manager check-now
+
+[Desktop Action InstallReadyUpdate]
+Name=Install Ready Update
+Exec=/usr/bin/codex-update-manager install-ready

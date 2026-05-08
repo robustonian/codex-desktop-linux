@@ -26,6 +26,7 @@ WEBVIEW_PID_FILE="$APP_STATE_DIR/webview.pid"
 LAUNCH_ACTION_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$APP_STATE_DIR}/$CODEX_LINUX_APP_ID"
 LAUNCH_ACTION_SOCKET="$LAUNCH_ACTION_RUNTIME_DIR/launch-action.sock"
 PACKAGED_RUNTIME_HELPER="$SCRIPT_DIR/.codex-linux/codex-packaged-runtime.sh"
+MANAGED_NODE_BIN_DIR="$SCRIPT_DIR/resources/node-runtime/bin"
 APP_NOTIFICATION_ICON_NAME="$CODEX_LINUX_APP_ID"
 APP_NOTIFICATION_ICON_BUNDLE="$SCRIPT_DIR/.codex-linux/$APP_NOTIFICATION_ICON_NAME.png"
 APP_NOTIFICATION_ICON_SYSTEM="/usr/share/icons/hicolor/256x256/apps/$APP_NOTIFICATION_ICON_NAME.png"
@@ -111,8 +112,13 @@ import_graphical_env_entry() {
 
     [ "$entry" != "$name" ] || return 0
 
+    # SOMMELIER_VERSION / SOMMELIER_VM_IDENTIFIER are imported here so the
+    # ChromeOS / Crostini auto-X11 fallback in set_electron_defaults sees
+    # them on app-launcher paths where they may only be present in the
+    # systemd --user manager environment (and not in the spawned process's
+    # initial env).
     case "$name" in
-        DISPLAY|WAYLAND_DISPLAY|XDG_SESSION_TYPE|XDG_CURRENT_DESKTOP|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|DESKTOP_SESSION|XAUTHORITY)
+        DISPLAY|WAYLAND_DISPLAY|XDG_SESSION_TYPE|XDG_CURRENT_DESKTOP|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|DESKTOP_SESSION|XAUTHORITY|SOMMELIER_VERSION|SOMMELIER_VM_IDENTIFIER)
             if [ -z "${!name:-}" ]; then
                 export "$entry"
             fi
@@ -173,6 +179,16 @@ discover_graphical_env_from_processes() {
 
 hydrate_graphical_session_env() {
     if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        # Display vars are already present, but the ChromeOS / Crostini
+        # auto-X11 fallback in set_electron_defaults also needs
+        # SOMMELIER_VERSION. On some app-launcher paths the spawned
+        # process inherits DISPLAY / WAYLAND_DISPLAY but not the Sommelier
+        # markers (those live only in the systemd --user manager env). Try
+        # one user-manager import in that case so the whitelisted
+        # SOMMELIER_VERSION / SOMMELIER_VM_IDENTIFIER get hydrated.
+        if [ -z "${SOMMELIER_VERSION:-}" ]; then
+            import_graphical_env_from_systemd_user >/dev/null 2>&1 || true
+        fi
         return 0
     fi
 
@@ -265,18 +281,95 @@ export_packaged_runtime_env() {
     fi
 }
 
+prepend_managed_node_runtime_to_path() {
+    [ -x "$MANAGED_NODE_BIN_DIR/node" ] || return 0
+
+    case ":$PATH:" in
+        *":$MANAGED_NODE_BIN_DIR:"*) ;;
+        *) export PATH="$MANAGED_NODE_BIN_DIR:$PATH" ;;
+    esac
+    export CODEX_MANAGED_NODE_RUNTIME_DIR="$SCRIPT_DIR/resources/node-runtime"
+}
+
+browser_use_plugin_version() {
+    local plugin_json="$1"
+
+    python3 - "$plugin_json" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        version = json.load(handle).get("version")
+except (OSError, json.JSONDecodeError):
+    version = None
+
+if not isinstance(version, str) or not version.strip():
+    raise SystemExit(1)
+print(version.strip())
+PY
+}
+
+sync_browser_use_bundled_plugin_cache() {
+    local source_plugin="$SCRIPT_DIR/resources/plugins/openai-bundled/plugins/browser-use"
+    local plugin_json="$source_plugin/.codex-plugin/plugin.json"
+    local source_client="$source_plugin/scripts/browser-client.mjs"
+    local codex_home="${CODEX_HOME:-$HOME/.codex}"
+    local version
+    local cache_root
+    local cache_plugin
+    local cache_client
+    local cache_parent
+    local tmp_plugin
+
+    [ -f "$plugin_json" ] || return 0
+    [ -f "$source_client" ] || return 0
+
+    version="$(browser_use_plugin_version "$plugin_json" 2>/dev/null || true)"
+    [ -n "$version" ] || return 0
+
+    cache_root="$codex_home/plugins/cache/openai-bundled/browser-use"
+    cache_plugin="$cache_root/$version"
+    cache_client="$cache_plugin/scripts/browser-client.mjs"
+
+    if [ -f "$cache_client" ] && cmp -s "$source_client" "$cache_client"; then
+        return 0
+    fi
+
+    cache_parent="$(dirname "$cache_plugin")"
+    tmp_plugin="$cache_parent/.browser-use-$version.tmp.$$"
+    rm -rf "$tmp_plugin"
+    mkdir -p "$cache_parent"
+
+    if cp -R "$source_plugin" "$tmp_plugin"; then
+        find "$tmp_plugin" -type f -name '*:com.apple.*' -delete
+        rm -rf "$cache_plugin"
+        mv "$tmp_plugin" "$cache_plugin"
+        echo "Browser Use plugin cache synced from bundled resources: $cache_plugin"
+    else
+        rm -rf "$tmp_plugin"
+        echo "Browser Use plugin cache sync failed; continuing with existing cache."
+    fi
+}
+
 resolve_browser_use_runtime_env() {
     if [ -z "${CODEX_ELECTRON_RESOURCES_PATH:-}" ]; then
         export CODEX_ELECTRON_RESOURCES_PATH="$SCRIPT_DIR/resources"
     fi
 
     if [ -z "${CODEX_BROWSER_USE_NODE_PATH:-}" ]; then
-        if [ -x "$SCRIPT_DIR/resources/node" ]; then
+        if [ -x "$MANAGED_NODE_BIN_DIR/node" ]; then
+            export CODEX_BROWSER_USE_NODE_PATH="$MANAGED_NODE_BIN_DIR/node"
+        elif [ -x "$SCRIPT_DIR/resources/node" ]; then
             export CODEX_BROWSER_USE_NODE_PATH="$SCRIPT_DIR/resources/node"
         elif command -v node >/dev/null 2>&1; then
             CODEX_BROWSER_USE_NODE_PATH="$(command -v node)"
             export CODEX_BROWSER_USE_NODE_PATH
         fi
+    fi
+
+    if [ -z "${NODE_REPL_NODE_PATH:-}" ] && [ -n "${CODEX_BROWSER_USE_NODE_PATH:-}" ]; then
+        export NODE_REPL_NODE_PATH="$CODEX_BROWSER_USE_NODE_PATH"
     fi
 
     if [ -z "${CODEX_NODE_REPL_PATH:-}" ]; then
@@ -298,7 +391,7 @@ resolve_browser_use_runtime_env() {
 
 run_cli_preflight() {
     local allow_install_missing="${1:-0}"
-    if ! command -v codex-update-manager >/dev/null 2>&1; then
+    if ! has_update_manager; then
         if [ "$allow_install_missing" = "1" ]; then
             return 1
         fi
@@ -315,7 +408,7 @@ run_cli_preflight() {
     fi
 
     local refreshed_path=""
-    if ! refreshed_path="$(codex-update-manager "${preflight_args[@]}")"; then
+    if ! refreshed_path="$(run_update_manager "${preflight_args[@]}")"; then
         if [ "$allow_install_missing" = "1" ]; then
             return 1
         fi
@@ -330,12 +423,12 @@ run_cli_preflight() {
 }
 
 run_cli_preflight_background() {
-    if ! command -v codex-update-manager >/dev/null 2>&1; then
+    if ! has_update_manager; then
         return 0
     fi
 
     (
-        if ! codex-update-manager cli-preflight --cli-path "$CODEX_CLI_PATH" --print-path >/dev/null 2>&1; then
+        if ! run_update_manager cli-preflight --cli-path "$CODEX_CLI_PATH" --print-path >/dev/null 2>&1; then
             echo "Codex CLI background preflight failed. Continuing with the current CLI."
         fi
     ) &
@@ -346,12 +439,12 @@ is_interactive_terminal() {
 }
 
 run_gui_cli_prompt() {
-    if ! command -v codex-update-manager >/dev/null 2>&1; then
+    if ! has_update_manager; then
         return 1
     fi
 
     local refreshed_path=""
-    if ! refreshed_path="$(codex-update-manager prompt-install-cli --cli-path "$CODEX_CLI_PATH" --print-path)"; then
+    if ! refreshed_path="$(run_update_manager prompt-install-cli --cli-path "$CODEX_CLI_PATH" --print-path)"; then
         return 1
     fi
 
@@ -368,7 +461,7 @@ prompt_install_missing_cli() {
         return 1
     fi
 
-    if ! command -v codex-update-manager >/dev/null 2>&1; then
+    if ! has_update_manager; then
         return 1
     fi
 
@@ -457,6 +550,43 @@ canonical_path() {
     readlink -f "$1" 2>/dev/null || echo "$1"
 }
 
+resolve_update_manager_path() {
+    if [ -n "${CODEX_UPDATE_MANAGER_PATH:-}" ] && [ -x "$CODEX_UPDATE_MANAGER_PATH" ]; then
+        return 0
+    fi
+
+    local candidate
+    for candidate in \
+        "$SCRIPT_DIR/../target/release/codex-update-manager" \
+        "$SCRIPT_DIR/codex-update-manager" \
+        "/usr/bin/codex-update-manager" \
+        "/usr/local/bin/codex-update-manager"
+    do
+        if [ -x "$candidate" ]; then
+            CODEX_UPDATE_MANAGER_PATH="$(canonical_path "$candidate")"
+            export CODEX_UPDATE_MANAGER_PATH
+            return 0
+        fi
+    done
+
+    if command -v codex-update-manager >/dev/null 2>&1; then
+        CODEX_UPDATE_MANAGER_PATH="$(command -v codex-update-manager)"
+        export CODEX_UPDATE_MANAGER_PATH
+        return 0
+    fi
+
+    return 1
+}
+
+has_update_manager() {
+    resolve_update_manager_path >/dev/null 2>&1
+}
+
+run_update_manager() {
+    resolve_update_manager_path || return 127
+    "$CODEX_UPDATE_MANAGER_PATH" "$@"
+}
+
 pid_is_current_user() {
     local pid="$1"
     local uid
@@ -495,7 +625,13 @@ find_running_app_pid() {
         fi
     fi
 
+    return 1
+}
+
+discover_running_app_pid() {
+    local pid
     local proc_exe
+
     for proc_exe in /proc/[0-9]*/exe; do
         [ -e "$proc_exe" ] || continue
         pid="${proc_exe#/proc/}"
@@ -522,7 +658,7 @@ needs_cold_start() {
 }
 
 detect_warm_start() {
-    if RUNNING_APP_PID="$(find_running_app_pid)"; then
+    if RUNNING_APP_PID="$(find_running_app_pid)" || { [ -S "$LAUNCH_ACTION_SOCKET" ] && RUNNING_APP_PID="$(discover_running_app_pid)"; }; then
         echo "$RUNNING_APP_PID" > "$APP_PID_FILE"
         if ! linux_setting_enabled "codex-linux-warm-start-enabled" 1; then
             WARM_START=0
@@ -562,6 +698,25 @@ try:
     client.sendall(payload)
 finally:
     client.close()
+PY
+}
+
+webview_origin_is_reachable() {
+    verify_webview_origin "$WEBVIEW_ORIGIN/index.html" >/dev/null 2>&1
+}
+
+webview_port_is_open() {
+    python3 - "$CODEX_LINUX_WEBVIEW_PORT" <<'PY' 2>/dev/null
+import socket
+import sys
+
+port = int(sys.argv[1])
+s = socket.socket()
+s.settimeout(0.2)
+try:
+    s.connect(("127.0.0.1", port))
+finally:
+    s.close()
 PY
 }
 
@@ -610,18 +765,35 @@ if missing:
 PY
 }
 
-pid_is_webview_server() {
+pid_has_webview_server_cmdline() {
     local pid="$1"
     local cmdline
-    local cwd
 
     [[ "$pid" =~ ^[0-9]+$ ]] || return 1
     [ -d "/proc/$pid" ] || return 1
     pid_is_current_user "$pid" || return 1
     cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
-    [[ "$cmdline" == *"http.server $CODEX_LINUX_WEBVIEW_PORT"* ]] || return 1
+    [[ "$cmdline" == *"http.server $CODEX_LINUX_WEBVIEW_PORT"* ]]
+}
+
+pid_is_webview_server() {
+    local pid="$1"
+    local cwd
+
+    pid_has_webview_server_cmdline "$pid" || return 1
     cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
     [ "$cwd" = "$(canonical_path "$WEBVIEW_DIR")" ]
+}
+
+pid_is_stale_webview_server() {
+    local pid="$1"
+    local cwd
+    local deleted_webview_dir
+
+    pid_has_webview_server_cmdline "$pid" || return 1
+    cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+    deleted_webview_dir="$(canonical_path "$WEBVIEW_DIR") (deleted)"
+    [ "$cwd" = "$deleted_webview_dir" ]
 }
 
 stop_owned_webview_server() {
@@ -636,7 +808,7 @@ stop_owned_webview_server() {
         return 0
     fi
 
-    if [ -n "$pid" ] && pid_is_webview_server "$pid"; then
+    if [ -n "$pid" ] && { pid_is_webview_server "$pid" || pid_is_stale_webview_server "$pid"; }; then
         echo "Stopping owned webview server pid=$pid"
         kill "$pid" 2>/dev/null || true
         for _ in $(seq 1 20); do
@@ -684,6 +856,38 @@ discover_webview_server_pid() {
     return 1
 }
 
+stale_webview_server_pid() {
+    local proc_cmdline
+    local pid
+
+    for proc_cmdline in /proc/[0-9]*/cmdline; do
+        [ -e "$proc_cmdline" ] || continue
+        pid="${proc_cmdline#/proc/}"
+        pid="${pid%/cmdline}"
+        if pid_is_stale_webview_server "$pid"; then
+            echo "$pid"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+stop_stale_webview_server() {
+    local pid
+
+    running_app_is_active && return 0
+
+    while pid="$(stale_webview_server_pid)"; do
+        echo "Stopping stale webview server pid=$pid cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+        kill "$pid" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.05
+        done
+    done
+}
+
 adopt_existing_webview_server() {
     local pid
 
@@ -696,6 +900,12 @@ adopt_existing_webview_server() {
         fi
         return 0
     fi
+
+    return 1
+}
+
+adopt_discovered_webview_server() {
+    local pid
 
     if pid="$(discover_webview_server_pid)"; then
         echo "$pid" > "$WEBVIEW_PID_FILE"
@@ -718,7 +928,7 @@ ensure_webview_server() {
     fi
 
     if adopt_existing_webview_server; then
-        if verify_webview_origin "$WEBVIEW_ORIGIN/index.html" >/dev/null 2>&1; then
+        if webview_origin_is_reachable; then
             echo "Reusing existing verified webview server on :$CODEX_LINUX_WEBVIEW_PORT"
             log_phase "webview_reused"
             return 0
@@ -730,9 +940,31 @@ ensure_webview_server() {
         fi
     fi
 
-    if verify_webview_origin "$WEBVIEW_ORIGIN/index.html" >/dev/null 2>&1; then
+    if webview_port_is_open && webview_origin_is_reachable; then
+        if adopt_discovered_webview_server; then
+            echo "Reusing existing verified webview server on :$CODEX_LINUX_WEBVIEW_PORT"
+            log_phase "webview_reused"
+            return 0
+        fi
+
         notify_error "$CODEX_LINUX_APP_DISPLAY_NAME webview port $CODEX_LINUX_WEBVIEW_PORT is already serving Codex content, but it is not owned by this launcher. Stop the other webview server and try again."
         exit 1
+    fi
+
+    if webview_port_is_open; then
+        stop_stale_webview_server
+        if webview_origin_is_reachable; then
+            if adopt_discovered_webview_server; then
+                echo "Reusing existing verified webview server on :$CODEX_LINUX_WEBVIEW_PORT"
+                log_phase "webview_reused"
+                return 0
+            fi
+        fi
+
+        if webview_port_is_open; then
+            notify_error "$CODEX_LINUX_APP_DISPLAY_NAME webview port $CODEX_LINUX_WEBVIEW_PORT is already in use. Stop the other process and try again."
+            exit 1
+        fi
     fi
 
     stop_owned_webview_server
@@ -816,6 +1048,27 @@ set_electron_defaults() {
         esac
         shift
     done
+
+    # ChromeOS / Crostini (Sommelier) auto-fallback to X11.
+    #
+    # On a Crostini Linux container the default Wayland session is provided by
+    # Sommelier (see SOMMELIER_VERSION/SOMMELIER_VM_IDENTIFIER, exported by
+    # cros-garcon for both terminal and app-menu launches). With the default
+    # Electron path (--ozone-platform-hint=auto) Electron picks the Wayland
+    # backend, reaches `window ready-to-show`, but the window never surfaces in
+    # the ChromeOS shell — leaving the launcher icon spinning indefinitely with
+    # no visible app. Forcing X11 (proxied by sommelier-x to ChromeOS) is the
+    # documented workaround. Skip this only when the operator explicitly chose
+    # a platform via --x11 / --wayland / --ozone-platform=*.
+    #
+    # See https://github.com/ilysenko/codex-desktop-linux/issues/95.
+    if [ -z "$ELECTRON_OZONE_PLATFORM" ] \
+        && [ "$ELECTRON_OZONE_HINT" = "auto" ] \
+        && [ -n "${SOMMELIER_VERSION:-}" ]; then
+        ELECTRON_OZONE_PLATFORM="x11"
+        ELECTRON_OZONE_HINT=""
+        echo "Detected Sommelier (SOMMELIER_VERSION=$SOMMELIER_VERSION); forcing --ozone-platform=x11 (Wayland windows are not visible under ChromeOS Crostini)"
+    fi
 }
 
 build_electron_launch_args() {
@@ -911,6 +1164,7 @@ launch_electron() {
 hydrate_graphical_session_env
 configure_side_by_side_app_env
 load_packaged_runtime_helper
+prepend_managed_node_runtime_to_path
 register_url_scheme_handlers
 clear_stale_pid_file
 detect_warm_start
@@ -948,18 +1202,18 @@ if needs_cold_start && [ -z "$CODEX_CLI_PATH" ]; then
     if is_interactive_terminal; then
         if prompt_install_missing_cli; then
             if ! run_cli_preflight 1; then
-                notify_error "Codex CLI automatic installation failed. Install with: npm i -g @openai/codex or npm i -g --prefix ~/.local @openai/codex"
+                notify_error "Codex CLI installation was attempted but did not succeed. Retry by reopening the app, or install it manually with: npm i -g @openai/codex or npm i -g --prefix ~/.local @openai/codex"
                 exit 1
             fi
         fi
     elif ! run_gui_cli_prompt; then
-        notify_error "Codex CLI not found. Install with: npm i -g @openai/codex or npm i -g --prefix ~/.local @openai/codex"
+        notify_error "Codex CLI is required but is not installed. Reopen the app to retry the automatic install flow, or install it manually with: npm i -g @openai/codex or npm i -g --prefix ~/.local @openai/codex"
         exit 1
     fi
 fi
 
 if needs_cold_start && [ -z "$CODEX_CLI_PATH" ]; then
-    notify_error "Codex CLI not found. Install with: npm i -g @openai/codex or npm i -g --prefix ~/.local @openai/codex"
+    notify_error "Codex CLI is required but is not installed. Reopen the app to retry the automatic install flow, or install it manually with: npm i -g @openai/codex or npm i -g --prefix ~/.local @openai/codex"
     exit 1
 fi
 
@@ -974,8 +1228,12 @@ if needs_cold_start; then
 fi
 
 export_packaged_runtime_env
+if needs_cold_start; then
+    sync_browser_use_bundled_plugin_cache
+fi
 resolve_browser_use_runtime_env
 
 echo "Using CODEX_CLI_PATH=${CODEX_CLI_PATH:-warm-start-skip}"
+echo "Using managed Node.js runtime=${CODEX_MANAGED_NODE_RUNTIME_DIR:-$SCRIPT_DIR/resources/node-runtime}"
 
 launch_electron "$@"

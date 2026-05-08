@@ -6,10 +6,14 @@ mod cli;
 mod codex_cli;
 mod config;
 mod install;
+mod install_rollback;
 mod liveness;
 mod logging;
 mod notify;
+mod rollback;
 mod state;
+#[cfg(test)]
+mod test_util;
 mod upstream;
 
 use anyhow::Result;

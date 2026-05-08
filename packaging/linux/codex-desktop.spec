@@ -4,8 +4,9 @@ Release:        __RPM_RELEASE__%{?dist}
 Summary:        Codex Desktop for Linux
 License:        Proprietary
 ExclusiveArch:  __ARCH__
+%global __requires_exclude_from ^/opt/__PACKAGE_NAME__/(resources|update-builder)/node-runtime/.*$
 
-Requires:       nodejs >= 20, npm, python3, p7zip, polkit, curl, unzip, gcc-c++, make
+Requires:       python3, /usr/bin/7z, polkit, curl, unzip, gcc-c++, make
 Requires:       alsa-lib, at-spi2-atk, atk, glib2, gtk3, libdrm
 Requires:       nspr, nss, pango, libstdc++, libX11, libxcb
 Requires:       libXcomposite, libXdamage, libXext, libXfixes, libxkbcommon, libXrandr
@@ -16,7 +17,7 @@ Recommends:     zenity, kdialog
 Community-built Linux package for Codex Desktop generated from the macOS DMG.
 Requires the Codex CLI to be available in PATH or CODEX_CLI_PATH.
 Local auto-updates rebuild a Linux package from the upstream Codex.dmg and therefore
-require the local packaging toolchain listed in Requires.
+use the bundled managed Node.js runtime plus the local packaging toolchain listed in Requires.
 
 %install
 # Files are staged by build-rpm.sh outside of BUILDROOT and copied here.

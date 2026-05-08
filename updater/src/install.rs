@@ -74,16 +74,6 @@ fn detect_package_kind(
     rpm_installed: bool,
     os_release: Option<(String, String)>,
 ) -> PackageKind {
-    if pacman_installed {
-        return PackageKind::Pacman;
-    }
-    if deb_installed {
-        return PackageKind::Deb;
-    }
-    if rpm_installed {
-        return PackageKind::Rpm;
-    }
-
     if let Some((id, id_like)) = os_release {
         let fields = [id.as_str(), id_like.as_str()];
         if os_release_matches(
@@ -121,6 +111,16 @@ fn detect_package_kind(
         ) {
             return PackageKind::Rpm;
         }
+    }
+
+    if pacman_installed {
+        return PackageKind::Pacman;
+    }
+    if deb_installed {
+        return PackageKind::Deb;
+    }
+    if rpm_installed {
+        return PackageKind::Rpm;
     }
 
     if has_dpkg {
@@ -752,7 +752,7 @@ mod tests {
     }
 
     #[test]
-    fn detection_prefers_installed_pacman_package_even_if_rpm_exists() {
+    fn detection_prefers_arch_os_release_even_if_rpm_command_exists() {
         assert_eq!(
             detect_package_kind(
                 true,
@@ -764,6 +764,22 @@ mod tests {
                 Some(("arch".to_string(), "".to_string())),
             ),
             PackageKind::Pacman
+        );
+    }
+
+    #[test]
+    fn detection_prefers_fedora_os_release_even_if_deb_package_is_installed() {
+        assert_eq!(
+            detect_package_kind(
+                false,
+                true,
+                true,
+                false,
+                true,
+                false,
+                Some(("fedora".to_string(), "rhel".to_string())),
+            ),
+            PackageKind::Rpm
         );
     }
 

@@ -19,13 +19,12 @@ Run the helper to install them automatically:
   bash scripts/install-deps.sh
 
 Or install manually:
-  # Debian/Ubuntu: install Node.js 20+ with npm/npx from NodeSource, nvm, or another compatible source, then:
   sudo apt install python3 p7zip-full curl unzip build-essential                   # Debian/Ubuntu
-  sudo dnf install nodejs npm python3 7zip curl unzip @development-tools            # Fedora 41+ (dnf5)
+  sudo dnf install python3 7zip curl unzip @development-tools                       # Fedora 41+ (dnf5)
   sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip                # Fedora <41 (dnf)
     && sudo dnf groupinstall 'Development Tools'
-  sudo pacman -S nodejs npm python p7zip curl unzip zstd base-devel                 # Arch
-  sudo zypper install nodejs-default npm-default python3 p7zip-full curl unzip      # openSUSE
+  sudo pacman -S python p7zip curl unzip zstd base-devel                            # Arch
+  sudo zypper install python3 p7zip-full curl unzip                                 # openSUSE
     && sudo zypper install -t pattern devel_basis
 EOF
 }
@@ -40,6 +39,8 @@ CACHED_DMG_PATH="$SCRIPT_DIR/Codex.dmg"
 FRESH_INSTALL=0
 REUSE_CACHED_DMG=1
 PROVIDED_DMG_PATH=""
+INSPECT_ONLY=0
+REPORT_DIR=""
 
 usage() {
     cat <<'HELP'
@@ -51,6 +52,9 @@ Options:
   -h, --help     Show this help message and exit
   --fresh        Remove existing install directory and cached DMG before building
   --reuse-dmg    Reuse cached Codex.dmg if present (default)
+  --inspect      Inspect the DMG and write patch/rebuild reports without installing
+  --report-dir DIR
+                 Directory for --inspect reports (default: ./dist-next/rebuild)
 
 Environment variables:
   CODEX_INSTALL_DIR   Override the install directory (default: ./codex-app)
@@ -65,6 +69,7 @@ Environment variables:
                       (default: https://artifacts.electronjs.org/headers/dist)
   ELECTRON_MIRROR     Override the Electron runtime download mirror root
                       (example: https://npmmirror.com/mirrors/electron/)
+  REBUILD_REPORT_DIR  Default report directory for --inspect and rebuild reports
 
 After install, launch with:
   ./codex-app/start.sh
@@ -80,6 +85,14 @@ parse_args() {
                 ;;
             --reuse-dmg)
                 REUSE_CACHED_DMG=1
+                ;;
+            --inspect)
+                INSPECT_ONLY=1
+                ;;
+            --report-dir)
+                shift
+                [ $# -gt 0 ] || error "--report-dir requires a directory"
+                REPORT_DIR="$1"
                 ;;
             -h|--help)
                 usage
@@ -135,17 +148,12 @@ prepare_install() {
 # ---- Check dependencies ----
 check_deps() {
     local missing=()
-    for cmd in node npm npx python3 7z curl unzip; do
+    for cmd in python3 7z curl unzip tar; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
     if [ ${#missing[@]} -ne 0 ]; then
         error "Missing dependencies: ${missing[*]}
 $(dependency_help)"
-    fi
-
-    NODE_MAJOR=$(node -v | cut -d. -f1 | tr -d v)
-    if [ "$NODE_MAJOR" -lt 20 ]; then
-        error "Node.js 20+ required (found $(node -v))"
     fi
 
     if ! command -v make &>/dev/null || ! command -v g++ &>/dev/null; then
@@ -171,6 +179,5 @@ If ~/.local/bin is not on your PATH, add it before re-running this script:
 Set SEVENZIP_SYSTEM_INSTALL=1 to install into /usr/local/bin instead."
     fi
 
-    info "All dependencies found (using $SEVEN_ZIP_CMD)"
+    info "All system dependencies found (using $SEVEN_ZIP_CMD)"
 }
-

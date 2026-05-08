@@ -1,12 +1,14 @@
 # Codex Desktop for Linux
 
+Before opening a pull request, please read [CONTRIBUTING.md](CONTRIBUTING.md).
+
 Unofficial Linux build of [OpenAI Codex Desktop](https://openai.com/codex/). The official Codex Desktop app is macOS-only — this project converts the upstream macOS `Codex.dmg` into a runnable Linux Electron app, ships native `.deb` / `.rpm` / `.pkg.tar.zst` packages plus a Nix flake, and includes a local auto-updater that rebuilds future Linux packages from newer upstream DMGs.
 
 ## Supported platforms
 
 | Distro / family | Package manager | Format produced | Notes |
 |---|---|---|---|
-| Debian, Ubuntu, Pop!_OS, Mint, Elementary | `apt` | `.deb` | Node 20+ bootstrapped from NodeSource when distro repo is too old |
+| Debian, Ubuntu, Pop!_OS, Mint, Elementary | `apt` | `.deb` | Managed Node.js runtime is bundled; no distro Node.js package is required |
 | Fedora 41+ | `dnf5` | `.rpm` | |
 | Fedora < 41 | `dnf` | `.rpm` | |
 | openSUSE Tumbleweed / Leap | `zypper` | `.rpm` | Uses `zypper --no-gpg-checks install` for the local rebuild |
@@ -27,6 +29,27 @@ Anything systemd-based should work for the optional auto-updater service (`syste
 | Linux browser annotations | ✅ always | Stored-anchor screenshots, isolated marker rendering |
 | Linux Computer Use | ⚠️ opt-in | Linux Computer Use backend with screen capture, accessibility, and input synthesis. The MCP server registers by default; the in-app UI surface is enabled at your discretion — see "Enabling Computer Use UI" below. Validated on Ubuntu/GNOME. |
 | Server-gated features (e.g. `gpt-5.5`) | 🟡 server-side | OpenAI rolls per-account, not project-controlled. Building a fresh package does not unlock these. |
+
+## Before you install
+
+Codex Desktop for Linux now bundles a managed Linux Node.js runtime in the generated app and native packages. You do **not** need a distro `nodejs` / `npm` package for normal installs, Browser Use, Codex CLI install/update, or local auto-update rebuilds.
+
+Existing `nvm`, asdf, Volta, NodeSource, or nodejs.org tarball installs are still fine. They are optional user tooling now, not required package dependencies.
+
+The Codex CLI is still required at runtime, but the first launch can install or update `@openai/codex` automatically using the bundled managed `npm`. You can also pre-install and manage the CLI yourself if you prefer.
+
+On some systems (e.g. hardened Linux setups), `/tmp` may be mounted with `noexec`, preventing the rust installer and bundled Node.js runtime from executing.
+
+Workaround:
+
+```bash
+mkdir -p ~/tmp/codex-work ~/tmp/codex-cache
+
+export TMPDIR=~/tmp/codex-work
+export XDG_CACHE_HOME=~/tmp/codex-cache
+
+# run install steps in this shell
+```
 
 ## Quick install
 
@@ -55,7 +78,9 @@ make package        # auto-detects deb / rpm / pacman
 make install        # installs the newest package from dist/
 ```
 
-The first launch can auto-install the Codex CLI (`@openai/codex`) for you when `npm` is available; you can also pre-install with `npm i -g @openai/codex` (or `npm i -g --prefix ~/.local @openai/codex` if you don't want a root-level install).
+`make package` picks the format that matches your distro. `make install` then runs the right `dpkg -i` / `dnf install` / `zypper install` / `pacman -U` against the freshly built artifact.
+
+The first launch can auto-install the Codex CLI (`@openai/codex`) using the bundled managed Node.js runtime. You can still pre-install the CLI yourself, but a system `node` / `npm` install is no longer required for the packaged app.
 
 ### NixOS / Nix one-liner
 
@@ -162,8 +187,9 @@ The package installs a companion service named `codex-update-manager`.
 - On openSUSE, that final install step is `zypper --non-interactive --no-gpg-checks install` against the locally rebuilt `.rpm` (the package is unsigned because it is built locally).
 - A failed or dismissed `pkexec` prompt (exit `126` / `127`) keeps the candidate `ReadyToInstall` and retries on the next app exit, instead of moving to a permanent `Failed` state.
 - An `Installing` state interrupted by a crash or restart is automatically recovered.
-- Before Electron launches, the launcher only resolves a usable Codex CLI path. If the CLI is missing and the launcher was started from an interactive terminal, it prompts before attempting an automatic install. The updater CLI preflight then runs in the background by default so npm registry checks and follow-up updates do not block the first window. Set `CODEX_SYNC_CLI_PREFLIGHT=1` to restore the synchronous preflight for debugging.
-- That CLI preflight is best-effort: 1-hour cooldown for registry checks, falls back to `npm install -g --prefix ~/.local` if a global install fails, and keeps the app launch on the current CLI when the automatic refresh does not succeed.
+- Before Electron launches, the launcher only resolves a usable Codex CLI path. If the CLI is missing and the launcher was started from an interactive terminal, it prompts before attempting an automatic install. GUI launches use the updater prompt flow for the same recovery path. The updater CLI preflight then runs in the background by default so npm registry checks and follow-up updates do not block the first window. Set `CODEX_SYNC_CLI_PREFLIGHT=1` to restore the synchronous preflight for debugging.
+- That CLI preflight is best-effort: it uses the bundled managed `npm`, applies a 1-hour cooldown for registry checks, falls back to a user-local `~/.local` npm prefix when a global install fails, and keeps the app launch on the current CLI when the automatic refresh does not succeed.
+- Automatic installation of a missing CLI is launcher-scoped. The daemon and `codex-update-manager status` report a missing dependency as `cli_status: NotInstalled` and may notify, but they do not install the CLI on their own.
 
 Inspect the live service and runtime files with:
 
@@ -173,6 +199,16 @@ codex-update-manager status --json
 sed -n '1,160p' ~/.local/state/codex-update-manager/state.json
 sed -n '1,160p' ~/.local/state/codex-update-manager/service.log
 ```
+
+If a rebuilt update installs but the previous retained package was better, close
+Codex Desktop and run:
+
+```bash
+codex-update-manager rollback
+```
+
+Rollback uses the last retained known-good package and refuses to run when no
+rollback package is available.
 
 Runtime files live in standard XDG locations:
 
@@ -191,9 +227,10 @@ Runtime files live in standard XDG locations:
 
 You need:
 
-- **Node.js 20+** with `npm` and `npx`
 - `python3`, `7z` (or `7zz`), `curl`, `unzip`, `make`, `g++`
 - **Rust toolchain** (`cargo`) for the `codex-update-manager` and `codex-computer-use-linux` crates
+
+The installer downloads a managed Linux Node.js runtime into `codex-app/resources/node-runtime` and uses it for `node`, `npm`, and `npx` during the build. Existing `nvm`, asdf, Volta, NodeSource, or nodejs.org tarball installs are still fine, but they are no longer required for this project.
 
 The easiest setup is the bundled bootstrap:
 
@@ -205,14 +242,12 @@ It auto-detects `apt`, `dnf5`, `dnf`, `pacman`, or `zypper`, installs system pac
 
 #### Apt-specific (Debian / Ubuntu / Pop!_OS / Mint)
 
-Stock `apt install nodejs` on Ubuntu 22.04, 24.04, and Debian 12 ships Node.js 18, which is too old. `install-deps.sh` first tries the distro `nodejs` candidate; if it's < Node 20 it bootstraps Node.js 22 from NodeSource:
+`install-deps.sh` can still bootstrap NodeSource Node.js for users who want a system Node.js toolchain, but `install.sh`, native packages, Browser Use, and the Codex CLI install/update flow use the bundled managed runtime:
 
 ```bash
-bash scripts/install-deps.sh                       # bootstraps Node 22 if needed
-NODEJS_MAJOR=24 bash scripts/install-deps.sh       # bootstrap a different maintained line
+bash scripts/install-deps.sh                       # full host bootstrap
+NODEJS_MAJOR=24 bash scripts/install-deps.sh       # choose a different optional system Node line
 ```
-
-If you install dependencies manually on Debian or Ubuntu, install Node.js 20+ with `npm` and `npx` from NodeSource, `nvm`, or another compatible source before running `./install.sh`. Do not rely on plain distro `apt install nodejs npm` unless your repos provide Node.js 20 or newer.
 
 Ubuntu-family `p7zip-full` can be too old for newer APFS DMGs. `install-deps.sh` bootstraps `7zz` into `~/.local/bin` (set `SEVENZIP_SYSTEM_INSTALL=1` to install to `/usr/local/bin` instead).
 
@@ -220,18 +255,18 @@ Ubuntu-family `p7zip-full` can be too old for newer APFS DMGs. `install-deps.sh`
 
 ```bash
 # Fedora 41+
-sudo dnf install nodejs npm python3 7zip curl unzip @development-tools
+sudo dnf install python3 7zip curl unzip @development-tools
 
 # Fedora < 41
-sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip
+sudo dnf install python3 p7zip p7zip-plugins curl unzip
 sudo dnf groupinstall 'Development Tools'
 
 # openSUSE
-sudo zypper install nodejs-default npm-default python3 p7zip-full curl unzip
+sudo zypper install python3 p7zip-full curl unzip
 sudo zypper install -t pattern devel_basis
 
 # Arch / Manjaro
-sudo pacman -S --needed nodejs npm python p7zip curl unzip zstd base-devel
+sudo pacman -S --needed python p7zip curl unzip zstd base-devel
 
 # Rust toolchain (any distro)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -256,7 +291,7 @@ Equivalent direct commands:
 ./codex-app/start.sh                        # run after build
 ```
 
-If `npm i -g` needs elevated privileges on your system:
+Manual Codex CLI installation is optional. If you choose to manage the CLI yourself and `npm i -g` needs elevated privileges on your system:
 
 ```bash
 npm i -g --prefix ~/.local @openai/codex
@@ -298,7 +333,7 @@ Override the package version with `PACKAGE_VERSION=YYYY.MM.DD.HHMMSS+commitish .
 
 The packaging scripts only repackage what's already in `codex-app/`. They do not download or extract the DMG themselves.
 
-Native packages declare `nodejs (>= 20)` because the bundled update manager rebuilds future packages locally. They also pull in `polkit` (or `policykit-1` on older Debian/Ubuntu) plus `pkexec` so the privileged install flow works out of the box.
+Native packages bundle the managed Node.js runtime used by the launcher, Browser Use, Codex CLI install/update flow, and local auto-update rebuilds. They do not hard-depend on distro `nodejs` / `npm`, so installs also work when Node.js comes from `nvm`, asdf, Volta, or the nodejs.org tarball. Packages still pull in `polkit` (or `policykit-1` on older Debian/Ubuntu) plus `pkexec` so the privileged install flow works out of the box.
 
 ### Updater service controls
 
@@ -342,7 +377,7 @@ make clean-state
 | Blank window | Check whether the configured webview port is already in use: `ss -tlnp \| grep -E '5175\|5176'` |
 | `ERR_CONNECTION_REFUSED` on the webview port | The webview HTTP server failed to start. Ensure `python3` works and the configured port is free |
 | Stuck on Codex logo splash | Check `~/.cache/codex-desktop/launcher.log`. If webview origin validation failed, another process is probably serving the configured webview port or the extracted `content/webview/` bundle is incomplete |
-| `CODEX_CLI_PATH` error | Install with `npm i -g @openai/codex` or `npm i -g --prefix ~/.local @openai/codex` |
+| `CODEX_CLI_PATH` error | Reopen the app to retry the automatic CLI install flow, or install manually with `npm i -g @openai/codex` / `npm i -g --prefix ~/.local @openai/codex` |
 | Electron hangs while CLI is outdated | Re-run the launcher and check `~/.cache/codex-desktop/launcher.log` plus `~/.local/state/codex-update-manager/service.log`. Best-effort CLI preflight will warn if the automatic refresh fails |
 | GPU / Vulkan / Wayland errors | Under Wayland with `DISPLAY` available, the launcher uses `--ozone-platform=x11` for window-positioning compatibility. Otherwise it uses `--ozone-platform-hint=auto`. GPU sandbox / compositing are disabled by default |
 | Window flickering | GPU compositing is disabled by default. If flickering persists, try `./codex-app/start.sh --disable-gpu` to fully disable GPU acceleration |
@@ -415,7 +450,7 @@ pacman -Qlp dist/codex-desktop-*.pkg.tar.zst | sed -n '1,40p'
 
 ## Versioning
 
-`codex-update-manager` current crate version: `0.6.2`
+`codex-update-manager` current crate version: `0.7.1`
 
 SemVer policy:
 

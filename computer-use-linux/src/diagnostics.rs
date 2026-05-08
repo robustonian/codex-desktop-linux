@@ -64,6 +64,7 @@ pub struct AccessibilityReport {
 pub struct WindowingReport {
     pub gnome_shell_introspect: Check,
     pub codex_gnome_shell_extension: Check,
+    pub hyprland: Check,
     pub can_list_windows: bool,
     pub can_focus_apps: bool,
     pub can_focus_windows: bool,
@@ -355,29 +356,66 @@ fn windowing_report() -> WindowingReport {
         "com.openai.Codex.WindowControl.ListWindows",
         &[],
     );
-    let can_list_windows = gnome_shell_introspect.ok || codex_gnome_shell_extension.ok;
-    let can_focus_apps = gdbus_introspect_contains(
+    let hyprland = hyprland_windowing_check();
+    let can_list_windows =
+        gnome_shell_introspect.ok || codex_gnome_shell_extension.ok || hyprland.ok;
+    let gnome_focus_apps = gdbus_introspect_contains(
         "org.gnome.Shell",
         "/org/gnome/Shell",
         "org.gnome.Shell",
         "FocusApp",
     )
     .ok;
-    let can_focus_windows = codex_gnome_shell_extension.ok;
+    let can_focus_apps = gnome_focus_apps || hyprland.ok;
+    let can_focus_windows = codex_gnome_shell_extension.ok || hyprland.ok;
     let note = if can_list_windows {
-        "A GNOME window listing backend is available for list_windows, focused_window, and targeted input verification."
+        if hyprland.ok {
+            "A Hyprland window backend is available for list_windows, focused_window, and targeted input verification."
+        } else {
+            "A GNOME window listing backend is available for list_windows, focused_window, and targeted input verification."
+        }
     } else {
-        "GNOME window listing is unavailable or denied. Computer Use can still use screenshots, AT-SPI, and global ydotool input, but targeted window input cannot be verified. Run setup_window_targeting to install the optional GNOME Shell extension backend."
+        "Window listing is unavailable or denied. Computer Use can still use screenshots, AT-SPI, and global ydotool input, but targeted window input cannot be verified. On GNOME, run setup_window_targeting to install the optional GNOME Shell extension backend. On Hyprland, ensure hyprctl is available in the session."
     }
     .to_string();
 
     WindowingReport {
         gnome_shell_introspect,
         codex_gnome_shell_extension,
+        hyprland,
         can_list_windows,
         can_focus_apps,
         can_focus_windows,
         note,
+    }
+}
+
+fn hyprland_windowing_check() -> Check {
+    match Command::new("hyprctl").args(["clients", "-j"]).output() {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            match serde_json::from_str::<serde_json::Value>(&stdout) {
+                Ok(serde_json::Value::Array(clients)) => Check::ok(format!(
+                    "hyprctl clients -j returned {} clients",
+                    clients.len()
+                )),
+                Ok(_) => Check::fail("hyprctl clients -j did not return a JSON array"),
+                Err(error) => {
+                    Check::fail(format!("hyprctl clients -j returned invalid JSON: {error}"))
+                }
+            }
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let detail = if !stderr.is_empty() { stderr } else { stdout };
+            Check::fail(if detail.is_empty() {
+                format!("exit status {}", output.status)
+            } else {
+                detail
+            })
+        }
+        Err(error) => Check::fail(error.to_string()),
     }
 }
 
@@ -413,14 +451,14 @@ fn readiness_report(
 
     if !can_query_windows {
         blockers.push(
-            "GNOME Shell window introspection is unavailable; targeted window focus and verification will be disabled."
+            "Window introspection is unavailable; targeted window focus and verification will be disabled."
                 .to_string(),
         );
     }
 
     if can_query_windows && !can_focus_windows {
         blockers.push(
-            "Exact GNOME Shell window activation is unavailable; app-level focus may work, but window_id/title/terminal-targeted input cannot be verified."
+            "Exact window activation is unavailable; app-level focus may work, but window_id/title/terminal-targeted input cannot be verified."
                 .to_string(),
         );
     }
@@ -436,13 +474,13 @@ fn readiness_report(
         "Run setup_accessibility to enable GNOME accessibility before element-aware actions."
             .to_string()
     } else if !can_query_windows {
-        "Run setup_window_targeting to install the Codex GNOME Shell extension backend, or enable GNOME Shell window introspection before using targeted keyboard input.".to_string()
+        "Enable a supported window backend before using targeted keyboard input: GNOME Shell Introspect, the Codex GNOME Shell extension, or Hyprland hyprctl.".to_string()
     } else if !can_focus_windows {
-        "Run setup_window_targeting to install the Codex GNOME Shell extension backend before using exact window_id, title, or terminal-targeted input.".to_string()
+        "Enable an exact-focus window backend before using window_id, title, or terminal-targeted input.".to_string()
     } else if !can_send_development_input {
         "Install and start ydotoold if development input fallback is needed.".to_string()
     } else {
-        "Computer Use is ready: AT-SPI tree support, GNOME window targeting, and ydotool input fallback are available."
+        "Computer Use is ready: AT-SPI tree support, window targeting, and ydotool input fallback are available."
             .to_string()
     };
 
@@ -669,6 +707,7 @@ mod tests {
             } else {
                 Check::fail("missing")
             },
+            hyprland: Check::fail("not a Hyprland session"),
             can_list_windows,
             can_focus_apps: true,
             can_focus_windows,
@@ -741,15 +780,15 @@ mod tests {
         assert!(!readiness.can_focus_windows);
         assert!(readiness
             .recommended_next_step
-            .contains("setup_window_targeting"));
+            .contains("exact-focus window backend"));
         assert!(readiness
             .blockers
             .iter()
-            .any(|blocker| blocker.contains("Exact GNOME Shell window activation")));
+            .any(|blocker| blocker.contains("Exact window activation")));
     }
 
     #[test]
-    fn readiness_message_stays_within_pr1_scope() {
+    fn readiness_message_mentions_generic_window_targeting() {
         let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
         let windowing = windowing_report(true, true);
         let input = input_report(true);
@@ -760,6 +799,9 @@ mod tests {
         assert!(readiness
             .recommended_next_step
             .contains("AT-SPI tree support"));
-        assert!(!readiness.recommended_next_step.contains("action/value"));
+        assert!(readiness.recommended_next_step.contains("window targeting"));
+        assert!(!readiness
+            .recommended_next_step
+            .contains("GNOME window targeting"));
     }
 }

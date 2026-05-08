@@ -37,6 +37,10 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Install the already rebuilt update package, if one is ready.
+    InstallReady,
+    /// Roll back to the last retained known-good package.
+    Rollback,
     /// Install a Debian package (.deb) with elevated privileges.
     InstallDeb {
         #[arg(long)]
@@ -49,6 +53,21 @@ pub enum Commands {
     },
     /// Install a pacman package (.pkg.tar.zst) with elevated privileges.
     InstallPacman {
+        #[arg(long)]
+        path: PathBuf,
+    },
+    /// Install a Debian package as an explicit rollback with elevated privileges.
+    InstallRollbackDeb {
+        #[arg(long)]
+        path: PathBuf,
+    },
+    /// Install an RPM package as an explicit rollback with elevated privileges.
+    InstallRollbackRpm {
+        #[arg(long)]
+        path: PathBuf,
+    },
+    /// Install a pacman package as an explicit rollback with elevated privileges.
+    InstallRollbackPacman {
         #[arg(long)]
         path: PathBuf,
     },
