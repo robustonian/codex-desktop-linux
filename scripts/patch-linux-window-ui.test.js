@@ -88,10 +88,10 @@ function singleInstanceBundleFixture() {
   ].join("");
 }
 
-function computerUseGateBundleFixture() {
+function computerUseGateBundleFixture({ availabilityKey = "isEnabled" } = {}) {
   return [
     "var Qt=`openai-bundled`,$t=`browser-use`,en=`chrome-internal`,tn=`computer-use`,nn=`latex-tectonic`;",
-    "var $n=[{forceReload:!0,installWhenMissing:!0,name:$t,isEnabled:({features:e})=>e.browserAgentAvailable,migrate:cn},{name:en,isEnabled:({buildFlavor:e})=>rn(e)},{name:tn,isEnabled:({features:e,platform:t})=>t===`darwin`&&e.computerUse,migrate:wn},{name:nn,isEnabled:()=>!0}];",
+    `var $n=[{forceReload:!0,installWhenMissing:!0,name:$t,${availabilityKey}:({features:e})=>e.browserAgentAvailable,migrate:cn},{name:en,${availabilityKey}:({buildFlavor:e})=>rn(e)},{name:tn,${availabilityKey}:({features:e,platform:t})=>t===\`darwin\`&&e.computerUse,migrate:wn},{name:nn,${availabilityKey}:()=>!0}];`,
   ].join("");
 }
 
@@ -625,6 +625,19 @@ test("patchLinuxAppUpdaterBridge scans build bundles and stays idempotent", () =
   }
 });
 
+test("allows bundled Computer Use on Linux when upstream uses isAvailable", () => {
+  const patched = applyPatchTwice(
+    applyLinuxComputerUsePluginGatePatch,
+    computerUseGateBundleFixture({ availabilityKey: "isAvailable" }),
+  );
+
+  assert.match(
+    patched,
+    /\{installWhenMissing:!0,name:tn,isAvailable:\(\{features:e,platform:t\}\)=>\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse/,
+  );
+  assert.doesNotMatch(patched, /t===`darwin`&&e\.computerUse/);
+});
+
 test("adds installWhenMissing to an already Linux-enabled Computer Use gate", () => {
   const source = computerUseGateBundleFixture().replace(
     "{name:tn,isEnabled:({features:e,platform:t})=>t===`darwin`&&e.computerUse,migrate:wn}",
@@ -634,6 +647,19 @@ test("adds installWhenMissing to an already Linux-enabled Computer Use gate", ()
   const patched = applyPatchTwice(applyLinuxComputerUsePluginGatePatch, source);
 
   assert.match(patched, /installWhenMissing:!0,name:tn/);
+  assert.equal((patched.match(/installWhenMissing:!0,name:tn/g) || []).length, 1);
+});
+
+test("adds installWhenMissing to an already Linux-enabled isAvailable Computer Use gate", () => {
+  const source = computerUseGateBundleFixture({ availabilityKey: "isAvailable" }).replace(
+    "{name:tn,isAvailable:({features:e,platform:t})=>t===`darwin`&&e.computerUse,migrate:wn}",
+    "{name:tn,isAvailable:({features:e,platform:t})=>(t===`darwin`||t===`linux`)&&e.computerUse,migrate:wn}",
+  );
+
+  const patched = applyPatchTwice(applyLinuxComputerUsePluginGatePatch, source);
+
+  assert.match(patched, /installWhenMissing:!0,name:tn/);
+  assert.match(patched, /isAvailable:\(\{features:e,platform:t\}\)=>\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse/);
   assert.equal((patched.match(/installWhenMissing:!0,name:tn/g) || []).length, 1);
 });
 
@@ -706,12 +732,12 @@ test("handles quoted Computer Use gate names", () => {
 test("patches the current Computer Use gate without touching the Windows-internal descriptor", () => {
   const source = [
     "var Ye=`browser-use`,Xe=`chrome-internal`,Ze=`computer-use`,Qe=`latex-tectonic`;",
-    "var Dr=[{forceReload:!0,installWhenMissing:!0,name:Ye,isEnabled:({features:e})=>e.browserAgentAvailable,migrate:In},{forceReload:!0,name:Xe,isEnabled:({buildFlavor:e})=>Mn(e)},{name:Ze,isEnabled:({features:e,platform:t})=>t===`darwin`&&e.computerUse,migrate:Qn},{installWhenMissing:!0,name:Ze,isEnabled:({buildFlavor:e,features:n,platform:r})=>t.C.isInternal(e)&&r===`win32`&&n.computerUse},{name:Qe,isEnabled:()=>!0}];",
+    "var Dr=[{forceReload:!0,installWhenMissing:!0,name:Ye,isAvailable:({features:e})=>e.browserAgentAvailable,migrate:In},{forceReload:!0,name:Xe,isAvailable:({buildFlavor:e})=>Mn(e)},{name:Ze,isAvailable:({features:e,platform:t})=>t===`darwin`&&e.computerUse,migrate:Qn},{installWhenMissing:!0,name:Ze,isAvailable:({buildFlavor:e,features:n,platform:r})=>t.C.isInternal(e)&&r===`win32`&&n.computerUse},{name:Qe,isAvailable:()=>!0}];",
   ].join("");
 
   const patched = applyPatchTwice(applyLinuxComputerUsePluginGatePatch, source);
 
-  assert.match(patched, /name:Ze,isEnabled:\(\{features:e,platform:t\}\)=>\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse,migrate:Qn/);
+  assert.match(patched, /name:Ze,isAvailable:\(\{features:e,platform:t\}\)=>\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse,migrate:Qn/);
   assert.match(patched, /t\.C\.isInternal\(e\)&&r===`win32`&&n\.computerUse/);
   assert.equal((patched.match(/installWhenMissing:!0,name:Ze/g) || []).length, 2);
 });
@@ -850,7 +876,7 @@ test("patchMainBundleSource skips Computer Use feature patch by default", () => 
     const source = [
       mainBundlePrefix,
       computerUseFeatureBundleFixture(),
-      computerUseGateBundleFixture(),
+      computerUseGateBundleFixture({ availabilityKey: "isAvailable" }),
     ].join("");
 
     const patched = patchMainBundleSource(source, null);
@@ -869,7 +895,7 @@ test("patchMainBundleSource applies Computer Use feature patch when env var is s
     const source = [
       mainBundlePrefix,
       computerUseFeatureBundleFixture(),
-      computerUseGateBundleFixture(),
+      computerUseGateBundleFixture({ availabilityKey: "isAvailable" }),
     ].join("");
 
     const patched = patchMainBundleSource(source, null);
@@ -888,7 +914,7 @@ test("patchMainBundleSource applies Computer Use feature patch when settings.jso
     const source = [
       mainBundlePrefix,
       computerUseFeatureBundleFixture(),
-      computerUseGateBundleFixture(),
+      computerUseGateBundleFixture({ availabilityKey: "isAvailable" }),
     ].join("");
 
     const patched = patchMainBundleSource(source, null);

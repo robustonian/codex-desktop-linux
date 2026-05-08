@@ -67,11 +67,14 @@ node_version_parts() {
 
 node_runtime_compatible() {
     local node_path="$1"
+    local version_parts
     local major
     local minor
     local patch
 
-    read -r major minor patch < <(node_version_parts "$node_path") || return 1
+    version_parts="$(node_version_parts "$node_path" 2>/dev/null || true)"
+    [ -n "$version_parts" ] || return 1
+    read -r major minor patch <<<"$version_parts" || return 1
     if [ "$major" -gt "$MANAGED_NODE_MIN_MAJOR" ]; then
         return 0
     fi
