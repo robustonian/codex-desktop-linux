@@ -3,19 +3,59 @@
 All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+## [0.7.1] - 2026-05-06
+
+### Fixed
+
+- Local auto-update rebuilds and package builds now find the Rust toolchain reliably when `cargo` is installed via `rustup` under `~/.cargo/bin`, even if the `codex-update-manager` user service or packaging scripts inherit a reduced `PATH`.
+
+### Added
+
+- Regression coverage for the build-environment fix: updater path construction now has a unit test for `~/.cargo/bin`, and packaging helpers resolve `cargo` through the same fallback path used by Linux Computer Use staging.
+
+## [0.7.0] - 2026-05-04
+
+### Added
+
+- Linux Computer Use plugin now exposes accessibility actions and editable-value setting via a new `perform_action` MCP tool. `element_index` selections resolve back to cached AT-SPI object references so actions and value writes target the same node as a click.
+- UI-driven Linux app update flow: when an update is rebuilt and ready, the in-app updater control can request install. The app exits, the user service installs the package, and the launcher relaunches `/usr/bin/codex-desktop` after the update lands. Backed by a new `codex-update-manager install-ready` subcommand and a `scripts/rebuild-candidate.sh` helper packaged into the update-builder bundle.
+- NixOS launcher exposes Electron GL/EGL libraries and primary-runtime native libraries via `LD_LIBRARY_PATH`, so the bundled Python/Node payloads (Pillow, NumPy, sharp, canvas) load on stock NixOS.
+- The installer now bundles a managed Linux Node.js 22.22 runtime into `codex-app/resources/node-runtime`; packaged launches and local auto-update rebuilds use it before any system, nvm, asdf, or manually installed Node.js.
+
+### Changed
+
+- `get_app_state(window_id=...)` and `get_app_state(pid=...)` prefer exact PID/window-root matching when resolving the AT-SPI tree.
+- `click(element_index=...)` falls back to the primary AT-SPI action when the element exposes no usable bounds.
+- `app.asar` repack is now reproducible: file ordering is sorted and `node-pty/build/Makefile` (which embeds absolute build paths) is removed before packing.
+- Native packages no longer hard-depend on distro `nodejs`/`npm`; the bundled managed Node.js runtime covers Codex CLI install/update flows, Browser Use, and updater rebuilds. This lets users with `nvm`, asdf, Volta, or nodejs.org tarball installs install the native package cleanly. Fixes #104.
+
+### Fixed
+
+- AT-SPI sentinel bounds no longer trigger bogus portal clicks on hidden or off-screen nodes.
+- Linux quit now bypasses the close-to-tray gate so the app actually exits instead of getting trapped in the tray.
+- Keybinds settings index patch tolerates upstream minified variable-name drift; the route map is detected via a `(0,X.lazy)` lookahead instead of hard-coded `c_e` / `Xge` / `Zge` names.
+- NixOS-installed `start.sh` shebang is patched to a nix-store `bash` so the launcher actually runs on systems without `/bin/bash`.
+- Native packages now always stage `scripts/lib/node-runtime.sh` into `/opt/codex-desktop/update-builder`, so local auto-update rebuilds can source the managed Node runtime helper instead of failing before package generation.
+
 ## [0.6.2] - 2026-05-01
 
 ### Changed
 
-- The three Linux Computer Use UI gate patches added in 0.6.1 (`applyLinuxComputerUseFeaturePatch`, `applyLinuxComputerUseRendererAvailabilityPatch`, `applyLinuxComputerUseInstallFlowPatch`) are now opt-in. The bundled-plugin manifest gate (`applyLinuxComputerUsePluginGatePatch`) still ships on by default — that is pure platform-port glue. The other three reach into upstream's Statsig fallback, so they apply only when the user opts in via either:
-  - `CODEX_LINUX_ENABLE_COMPUTER_USE_UI=1` env var at build time (e.g. `CODEX_LINUX_ENABLE_COMPUTER_USE_UI=1 make build-app`); or
-  - `~/.config/codex-desktop/settings.json` containing `"codex-linux-computer-use-ui-enabled": true`, which is also honoured by the `codex-update-manager` systemd user service when it rebuilds the local package on a new upstream DMG.
-- **Behavioural note for users on 0.6.1:** Computer Use controls in the Codex Desktop UI will disappear after the next auto-updater rebuild unless the persisted settings flag above is set. The MCP backend (plugin manifest gate) still registers; only the UI controls are gated.
+- Missing Codex CLI recovery is now exposed as an explicit `cli_status: NotInstalled` state in updater status output and persisted state, instead of overloading `Unknown`.
+- Automatic installation of a missing Codex CLI is now documented and enforced as launcher-scoped behavior; the daemon and `codex-update-manager status` only report and notify when the dependency is missing.
+- The Computer Use in-app UI surface is now opt-in. The MCP backend still registers by default; the UI controls are enabled when the user sets `CODEX_LINUX_ENABLE_COMPUTER_USE_UI=1` at build time, or persists `"codex-linux-computer-use-ui-enabled": true` in `~/.config/codex-desktop/settings.json` (also honoured by the `codex-update-manager` user service across rebuilds). Existing users who relied on the UI being on by default need to set one of these once.
 
 ### Added
 
 - New `isComputerUseUiEnabled()` helper in `scripts/patch-linux-window-ui.js` that reads both the env var and the persisted settings flag.
 - Smoke test `test_linux_computer_use_ui_opt_in_smoke` covering all three branches (default off, env-var on, settings-flag on).
+
+### Fixed
+
+- Launcher error messages now distinguish between a CLI that is missing versus an automatic installation attempt that failed, clarifying the supported recovery path.
+- Missing-CLI desktop notifications now key off the explicit `NotInstalled` state instead of inferring absence from cleared fields.
 
 ## [0.6.1] - 2026-04-30
 

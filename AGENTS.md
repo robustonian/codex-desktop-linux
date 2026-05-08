@@ -107,7 +107,7 @@ Do not assume `codex-app/` is pristine. If behavior differs from `install.sh`, p
 - Launcher and `nvm`:
   GUI launchers often do not inherit the user's shell `PATH`. The generated `start.sh` explicitly searches for `codex`, including common `nvm` locations.
 - CLI preflight:
-  Before Electron launches, the generated launcher asks `codex-update-manager` to verify the installed Codex CLI, prompt to install it when it is missing, and update it if the npm package is newer. Terminal launches prompt inline; GUI launches prefer `kdialog` on KDE/Plasma, otherwise `zenity`, before falling back to an actionable desktop notification. The check is best-effort: it uses a 1-hour cooldown for npm registry lookups, caches local CLI version reads to keep startup light, falls back to `npm install -g --prefix ~/.local` if a global install fails, and warns instead of blocking app launch when the refresh attempt does not succeed.
+  Before Electron launches, the generated launcher asks `codex-update-manager` to verify the installed Codex CLI, prompt to install it when it is missing, and update it if the npm package is newer. Terminal launches prompt inline; GUI launches prefer `kdialog` on KDE/Plasma, otherwise `zenity`, before falling back to an actionable desktop notification. Missing-CLI automatic installation is launcher-scoped: the daemon and `codex-update-manager status` report `cli_status: NotInstalled` and may notify, but they do not attempt installation on their own. The check is best-effort: it uses a 1-hour cooldown for npm registry lookups, caches local CLI version reads to keep startup light, falls back to `npm install -g --prefix ~/.local` if a global install fails, and warns instead of blocking app launch when the refresh attempt does not succeed.
 - ASAR patches are independent and fail-soft:
   `scripts/patch-linux-window-ui.js` is structured as a chain of small, independent patch functions called from `patchMainBundleSource` and `patchExtractedApp`. Each one has its own regex-driven needles, an idempotency check, and a `console.warn` fall-back when the upstream bundle drifts. Current patches: `applyLinuxWindowOptionsPatch`, `applyLinuxMenuPatch`, `applyLinuxSetIconPatch`, `applyLinuxOpaqueBackgroundPatch`, `applyLinuxFileManagerPatch`, `applyLinuxTrayPatch`, `applyLinuxSingleInstancePatch`, `applyLinuxComputerUsePluginGatePatch`, `applyLinuxTrayCloseSettingPatch`, `applyLinuxSettingsPersistencePatch`, `applyLinuxLaunchActionArgsPatch`, `applyLinuxHotkeyWindowPrewarmPatch`, `applyBrowserAnnotationScreenshotPatch`. Plus `patchKeybindsSettingsAssets` (transactional — atomic, fail-soft via `WARN: Keybinds settings patch skipped: ...`) and `patchCommentPreloadBundle` for browser annotation fixes. The three Computer Use UI gates (`applyLinuxComputerUseFeaturePatch`, `applyLinuxComputerUseRendererAvailabilityPatch`, `applyLinuxComputerUseInstallFlowPatch`) are opt-in — see "Linux Computer Use plugin gate" below. When adding a new needle, mirror this pattern — never `throw`.
 - Linux file manager integration:
@@ -151,7 +151,7 @@ Do not assume `codex-app/` is pristine. If behavior differs from `install.sh`, p
 
 ## Crate Versioning
 
-- Current updater crate version: `0.6.2`
+- Current updater crate version: `0.7.1`
 - Bump `patch` for fixes, docs, and maintenance-only updates.
 - Bump `minor` for compatible feature additions.
 - Bump `major` for incompatible CLI, persisted-state, or install-flow changes.
@@ -227,9 +227,9 @@ PACKAGE_VERSION=2026.03.24.120000+deadbeef ./scripts/build-pacman.sh
 
 ## Runtime Expectations
 
-- `node`, `npm`, `npx`, `python3`, `7z`, `curl`, `unzip`, `make`, and `g++` are required for `install.sh`
-- Node.js 20+ is required
-- On apt-based systems, `scripts/install-deps.sh` uses a compatible distro `nodejs`/`npm` candidate when available and otherwise bootstraps NodeSource Node.js 22 by default. `NODEJS_MAJOR=24 bash scripts/install-deps.sh` selects Node.js 24 instead.
+- `python3`, `7z`, `curl`, `unzip`, `tar`, `make`, and `g++` are required for `install.sh`
+- `install.sh` downloads and installs a managed Linux Node.js runtime into `codex-app/resources/node-runtime`; that runtime provides `node`, `npm`, and `npx` for native module rebuilds, Browser Use, Codex CLI install/update flow, and local auto-update rebuilds.
+- On apt-based systems, `scripts/install-deps.sh` can still bootstrap NodeSource Node.js 22 for users who want a system Node.js. `NODEJS_MAJOR=24 bash scripts/install-deps.sh` selects Node.js 24 instead.
 - the packaged app still requires the Codex CLI at runtime:
   `codex` must exist in `PATH` or be set through `CODEX_CLI_PATH`, but the launcher now attempts a best-effort automatic install on first run when the CLI is missing and `npm` is available
 

@@ -4,6 +4,15 @@ Thanks for your interest in contributing to Codex Desktop for Linux. This projec
 
 Contributions of all sizes are welcome: bug reports, documentation improvements, packaging fixes, installer updates, tests, and new features.
 
+## Pull Request Best Practices
+
+- Keep each pull request focused: one bug fix, one feature, or one maintenance change.
+- Touch the minimum set of files needed to solve the problem.
+- Avoid mixed pull requests that combine unrelated fixes, refactors, formatting, docs, or cleanup.
+- Think through the impact on every supported path: source installs, `.deb`, `.rpm`, pacman packages, Nix, updater rebuilds, and different desktop environments.
+- Preserve existing platform behavior unless the pull request explicitly explains why it must change.
+- Include a short summary, the user-visible behavior change, and the validation you ran.
+
 ## Before You Start
 
 Please take a moment to understand how this repository is structured before making changes.
@@ -57,7 +66,6 @@ bash scripts/install-deps.sh
 
 This project requires:
 
-- Node.js 20+ with `npm` and `npx`
 - `python3`
 - `7z` or `7zz`
 - `curl`
@@ -65,6 +73,8 @@ This project requires:
 - `make`
 - `g++`
 - Rust toolchain with `cargo`
+
+`install.sh` downloads a managed Node.js runtime for the build and packaged app. A system Node.js install is optional user tooling.
 
 If you are working on apt-based systems, prefer the bootstrap path in `scripts/install-deps.sh` so you get a compatible Node.js version.
 

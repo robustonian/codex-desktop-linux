@@ -3,12 +3,13 @@ use crate::terminal::{enrich_terminal_windows, TerminalWindowContext};
 use anyhow::{bail, Context, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, process::Command, time::Duration};
 use tokio::time::sleep;
 use zbus::{zvariant::OwnedValue, Proxy};
 
 pub const GNOME_SHELL_INTROSPECT_BACKEND: &str = "gnome-shell-introspect";
 pub const GNOME_SHELL_EXTENSION_BACKEND: &str = "gnome-shell-extension";
+pub const HYPRLAND_BACKEND: &str = "hyprland";
 pub const GNOME_SHELL_EXTENSION_SERVICE: &str = "com.openai.Codex.WindowControl";
 pub const GNOME_SHELL_EXTENSION_OBJECT_PATH: &str = "/com/openai/Codex/WindowControl";
 pub const WINDOW_PERMISSION_HINT: &str = "Computer Use could not access a GNOME window list backend. Targeted window input requires session-bus access plus either GNOME Shell Introspect permission or the Codex GNOME Shell extension backend. Run setup_window_targeting to install the extension backend.";
@@ -123,9 +124,12 @@ pub async fn list_windows() -> Result<Vec<WindowInfo>> {
         Ok(windows) => Ok(windows),
         Err(extension_error) => match list_gnome_shell_introspect_windows().await {
             Ok(windows) => Ok(windows),
-            Err(introspect_error) => Err(anyhow::anyhow!(
-                "Codex GNOME Shell extension failed: {extension_error:#}; GNOME Shell Introspect failed: {introspect_error:#}"
-            )),
+            Err(introspect_error) => match list_hyprland_windows() {
+                Ok(windows) => Ok(windows),
+                Err(hyprland_error) => Err(anyhow::anyhow!(
+                    "Codex GNOME Shell extension failed: {extension_error:#}; GNOME Shell Introspect failed: {introspect_error:#}; Hyprland failed: {hyprland_error:#}"
+                )),
+            },
         },
     }
 }
@@ -170,6 +174,35 @@ pub async fn list_extension_windows() -> Result<Vec<WindowInfo>> {
     Ok(windows)
 }
 
+fn list_hyprland_windows() -> Result<Vec<WindowInfo>> {
+    let output = Command::new("hyprctl")
+        .args(["clients", "-j"])
+        .output()
+        .context("failed to run hyprctl clients -j")?;
+    if !output.status.success() {
+        bail!(
+            "hyprctl clients -j failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    parse_hyprland_clients(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_hyprland_clients(json: &str) -> Result<Vec<WindowInfo>> {
+    let clients: Vec<HyprlandClient> =
+        serde_json::from_str(json).context("failed to parse hyprctl clients -j output")?;
+
+    let mut windows = clients
+        .into_iter()
+        .filter(|client| client.mapped.unwrap_or(true))
+        .map(WindowInfo::try_from)
+        .collect::<Result<Vec<_>>>()?;
+    windows.sort_by_key(|window| window.window_id);
+    enrich_terminal_windows(&mut windows);
+    Ok(windows)
+}
+
 pub async fn focused_window() -> Result<Option<WindowInfo>> {
     current_focused_window().await
 }
@@ -183,7 +216,9 @@ pub async fn focus_window_target(target: &WindowTarget) -> Result<WindowFocusRes
     let requested_window = resolve_window_target(&windows, target)?.clone();
     ensure_backend_can_focus_target(target, &requested_window)?;
 
-    if requested_window.backend == GNOME_SHELL_EXTENSION_BACKEND {
+    if requested_window.backend == HYPRLAND_BACKEND {
+        activate_hyprland_window(requested_window.window_id)?;
+    } else if requested_window.backend == GNOME_SHELL_EXTENSION_BACKEND {
         activate_extension_window(requested_window.window_id).await?;
     } else {
         let app_id = requested_window
@@ -217,9 +252,12 @@ pub async fn focus_window_target(target: &WindowTarget) -> Result<WindowFocusRes
 }
 
 fn ensure_backend_can_focus_target(target: &WindowTarget, window: &WindowInfo) -> Result<()> {
-    if target.requires_exact_focus() && window.backend != GNOME_SHELL_EXTENSION_BACKEND {
+    if target.requires_exact_focus()
+        && window.backend != GNOME_SHELL_EXTENSION_BACKEND
+        && window.backend != HYPRLAND_BACKEND
+    {
         bail!(
-            "Exact window targeting requires the Codex GNOME Shell extension backend; {} can list the matched window but cannot activate a specific window safely.",
+            "Exact window targeting requires the Codex GNOME Shell extension or Hyprland backend; {} can list the matched window but cannot activate a specific window safely.",
             window.backend
         );
     }
@@ -520,6 +558,89 @@ async fn activate_extension_window(window_id: u64) -> Result<()> {
     } else {
         bail!("Codex GNOME Shell extension refused activation: {message}");
     }
+}
+
+fn activate_hyprland_window(window_id: u64) -> Result<()> {
+    let address = format!("address:0x{window_id:x}");
+    let output = Command::new("hyprctl")
+        .args(["dispatch", "focuswindow", &address])
+        .output()
+        .with_context(|| format!("failed to run hyprctl dispatch focuswindow {address}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        bail!(
+            "hyprctl dispatch focuswindow {address} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct HyprlandClient {
+    address: String,
+    mapped: Option<bool>,
+    hidden: Option<bool>,
+    at: Option<[i32; 2]>,
+    size: Option<[u32; 2]>,
+    workspace: Option<HyprlandWorkspace>,
+    #[serde(rename = "class")]
+    class_name: Option<String>,
+    title: Option<String>,
+    pid: Option<i64>,
+    xwayland: Option<bool>,
+    #[serde(rename = "focusHistoryID")]
+    focus_history_id: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HyprlandWorkspace {
+    id: Option<i32>,
+}
+
+impl TryFrom<HyprlandClient> for WindowInfo {
+    type Error = anyhow::Error;
+
+    fn try_from(client: HyprlandClient) -> Result<Self> {
+        let window_id = parse_hyprland_address(&client.address)?;
+        let bounds = client.size.map(|[width, height]| WindowBounds {
+            x: client.at.map(|[x, _]| x),
+            y: client.at.map(|[_, y]| y),
+            width,
+            height,
+        });
+        let client_type = client.xwayland.map(|xwayland| {
+            if xwayland {
+                "x11".to_string()
+            } else {
+                "wayland".to_string()
+            }
+        });
+
+        Ok(WindowInfo {
+            window_id,
+            title: client.title,
+            app_id: client.class_name.clone(),
+            wm_class: client.class_name,
+            pid: client.pid.and_then(|pid| u32::try_from(pid).ok()),
+            bounds,
+            workspace: client.workspace.and_then(|workspace| workspace.id),
+            focused: client.focus_history_id == Some(0),
+            hidden: client.hidden.unwrap_or(false),
+            client_type,
+            backend: HYPRLAND_BACKEND.to_string(),
+            terminal: None,
+        })
+    }
+}
+
+fn parse_hyprland_address(address: &str) -> Result<u64> {
+    let hex = address
+        .trim()
+        .strip_prefix("0x")
+        .context("Hyprland window address did not start with 0x")?;
+    u64::from_str_radix(hex, 16)
+        .with_context(|| format!("failed to parse Hyprland window address {address}"))
 }
 
 fn window_from_properties(window_id: u64, properties: &HashMap<String, OwnedValue>) -> WindowInfo {
@@ -928,6 +1049,83 @@ mod tests {
         );
 
         assert_eq!(hint.as_deref(), Some(WINDOW_PERMISSION_HINT));
+    }
+
+    #[test]
+    fn parses_hyprland_clients_as_window_info() {
+        let clients_json = r#"[
+          {
+            "address": "0x559952b6db60",
+            "mapped": true,
+            "hidden": false,
+            "at": [10, 48],
+            "size": [1900, 1022],
+            "workspace": {"id": 2, "name": "2"},
+            "class": "brave-browser",
+            "title": "Repo - Brave",
+            "pid": 24134,
+            "xwayland": false,
+            "focusHistoryID": 1
+          },
+          {
+            "address": "0x559952be43d0",
+            "mapped": true,
+            "hidden": false,
+            "at": [10, 48],
+            "size": [1900, 1022],
+            "workspace": {"id": 1, "name": "1"},
+            "class": "codex-desktop",
+            "title": "Codex",
+            "pid": 68986,
+            "xwayland": false,
+            "focusHistoryID": 0
+          },
+          {
+            "address": "0x559952c99aa0",
+            "mapped": true,
+            "hidden": false,
+            "at": [0, 0],
+            "size": [400, 300],
+            "workspace": {"id": 3, "name": "3"},
+            "class": "transient",
+            "title": "Transient",
+            "pid": -1,
+            "xwayland": false,
+            "focusHistoryID": 2
+          }
+        ]"#;
+
+        let windows = parse_hyprland_clients(clients_json).unwrap();
+
+        assert_eq!(windows.len(), 3);
+        assert_eq!(windows[0].window_id, 0x559952b6db60);
+        assert_eq!(windows[0].app_id.as_deref(), Some("brave-browser"));
+        assert_eq!(windows[0].wm_class.as_deref(), Some("brave-browser"));
+        assert_eq!(windows[0].title.as_deref(), Some("Repo - Brave"));
+        assert_eq!(windows[0].pid, Some(24134));
+        assert_eq!(windows[0].bounds.as_ref().unwrap().x, Some(10));
+        assert_eq!(windows[0].bounds.as_ref().unwrap().height, 1022);
+        assert_eq!(windows[0].workspace, Some(2));
+        assert!(!windows[0].focused);
+        assert_eq!(windows[0].client_type.as_deref(), Some("wayland"));
+        assert_eq!(windows[0].backend, HYPRLAND_BACKEND);
+        assert!(windows[1].focused);
+        assert_eq!(windows[2].pid, None);
+    }
+
+    #[test]
+    fn hyprland_backend_can_exact_focus_targets() {
+        let mut window = window(2, "Codex", "codex-desktop", "codex-desktop");
+        window.backend = HYPRLAND_BACKEND.to_string();
+
+        ensure_backend_can_focus_target(
+            &WindowTarget {
+                title: Some("Codex".to_string()),
+                ..Default::default()
+            },
+            &window,
+        )
+        .unwrap();
     }
 
     #[test]

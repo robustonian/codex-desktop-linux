@@ -2,6 +2,8 @@ SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
 APP_DIR := $(CURDIR)/codex-app
+NEXT_APP_DIR := $(CURDIR)/codex-app-next
+REBUILD_REPORT_DIR := $(CURDIR)/dist-next/rebuild
 PACKAGE_NAME := codex-desktop
 DEV_APP_ID ?= codex-cua-lab
 DEV_APP_NAME ?= Codex CUA Lab
@@ -13,14 +15,55 @@ PACMAN_GLOB := $(CURDIR)/dist/$(PACKAGE_NAME)-[0-9]*.pkg.tar.*
 
 .DEFAULT_GOAL := help
 
-.PHONY: help check test build-updater build-app run-app build-dev-app run-dev-app deb rpm pacman package install service-enable service-status clean-dist clean-state
+NATIVE_PKG_FORMAT_CMD = format=""; \
+os_release_token_match() { \
+	local expected token; \
+	for token in $${ID:-} $${ID_LIKE:-}; do \
+		for expected in "$$@"; do \
+			if [ "$$token" = "$$expected" ]; then \
+				return 0; \
+			fi; \
+		done; \
+	done; \
+	return 1; \
+}; \
+if [ -r /etc/os-release ]; then . /etc/os-release; \
+	if os_release_token_match arch archlinux manjaro endeavouros artix; then \
+		format="pacman"; \
+	elif os_release_token_match fedora rhel centos rocky almalinux ol sles suse opensuse; then \
+		format="rpm"; \
+	elif os_release_token_match debian ubuntu linuxmint pop elementary zorin; then \
+		format="deb"; \
+	fi; \
+fi; \
+if [ -z "$$format" ]; then \
+	if command -v pacman >/dev/null 2>&1 && ! command -v dpkg-deb >/dev/null 2>&1; then \
+		format="pacman"; \
+	elif command -v rpmbuild >/dev/null 2>&1 && ! command -v dpkg-deb >/dev/null 2>&1; then \
+		format="rpm"; \
+	elif command -v dpkg-deb >/dev/null 2>&1; then \
+		format="deb"; \
+	elif command -v rpmbuild >/dev/null 2>&1; then \
+		format="rpm"; \
+	elif command -v pacman >/dev/null 2>&1; then \
+		format="pacman"; \
+	fi; \
+fi; \
+printf '%s\n' "$$format"
+
+.PHONY: help check test build-updater update rebuild rebuild-install inspect-upstream build-app rebuild-next run-app build-dev-app run-dev-app deb rpm pacman package install service-enable service-status clean-dist clean-state
 
 help:
 	@printf '\nCodex Desktop Linux Make Targets\n\n'
 	@printf '  %-18s %s\n' "make check" "Run cargo check for codex-update-manager"
 	@printf '  %-18s %s\n' "make test" "Run updater test suite"
 	@printf '  %-18s %s\n' "make build-updater" "Build codex-update-manager in release mode"
+	@printf '  %-18s %s\n' "make update" "Find a DMG, rebuild, and replace codex-app/ with backup"
+	@printf '  %-18s %s\n' "make rebuild" "Inspect a DMG and build a side-by-side candidate"
+	@printf '  %-18s %s\n' "make rebuild-install" "Find a DMG, rebuild, and install into codex-app/"
+	@printf '  %-18s %s\n' "make inspect-upstream" "Inspect a DMG and write rebuild reports without changing codex-app/"
 	@printf '  %-18s %s\n' "make build-app" "Run install.sh and regenerate codex-app/"
+	@printf '  %-18s %s\n' "make rebuild-next" "Build a side-by-side candidate in codex-app-next/"
 	@printf '  %-18s %s\n' "make run-app" "Launch the local generated Electron app from codex-app/"
 	@printf '  %-18s %s\n' "make build-dev-app" "Build a side-by-side test app with a distinct app id/bin"
 	@printf '  %-18s %s\n' "make run-dev-app" "Launch the side-by-side test app"
@@ -34,7 +77,10 @@ help:
 	@printf '  %-18s %s\n' "make clean-dist" "Remove generated dist/ artifacts"
 	@printf '  %-18s %s\n' "make clean-state" "Remove updater runtime state from XDG directories"
 	@printf '\nVariables:\n\n'
-	@printf '  %-18s %s\n' "DMG=/path/file.dmg" "Override the DMG passed to install.sh (default: let install.sh reuse/download Codex.dmg)"
+	@printf '  %-18s %s\n' "DMG=/path/file.dmg" "Override the DMG; rebuild commands auto-find ./Codex.dmg"
+	@printf '  %-18s %s\n' "NEXT_APP_DIR=..." "Override side-by-side rebuild candidate directory"
+	@printf '  %-18s %s\n' "APP_DIR=..." "Override final app directory for make rebuild-install"
+	@printf '  %-18s %s\n' "REBUILD_REPORT_DIR=..." "Override inspect/rebuild report output directory"
 	@printf '  %-18s %s\n' "DEV_APP_ID=..." "Override side-by-side test app id/bin (default: codex-cua-lab)"
 	@printf '  %-18s %s\n' "DEV_APP_NAME=..." "Override side-by-side test app display name"
 	@printf '  %-18s %s\n' "PACKAGE_VERSION=..." "Override the package version for make deb / make rpm / make pacman"
@@ -42,7 +88,12 @@ help:
 	@printf '  %-18s %s\n' "RPM=/path/file.rpm" "Override the .rpm used by make install"
 	@printf '  %-18s %s\n' "PKG=/path/file.pkg.tar.zst" "Override the pacman package used by make install"
 	@printf '\nExamples:\n\n'
+	@printf '  %s\n' "make update"
+	@printf '  %s\n' "make rebuild-install"
+	@printf '  %s\n' "make rebuild DMG=/tmp/Codex.dmg"
 	@printf '  %s\n' "make build-app DMG=/tmp/Codex.dmg"
+	@printf '  %s\n' "make inspect-upstream DMG=/tmp/Codex.dmg"
+	@printf '  %s\n' "make rebuild-next DMG=/tmp/Codex.dmg"
 	@printf '  %s\n' "make run-app"
 	@printf '  %s\n' "make build-dev-app"
 	@printf '  %s\n' "./bin/codex-cua-lab"
@@ -64,9 +115,38 @@ build-updater:
 	@echo "[make] Building codex-update-manager (release)"
 	cargo build --release -p codex-update-manager
 
+update: rebuild-install
+
+rebuild:
+	@echo "[make] Running safe rebuild flow"
+	REBUILD_REPORT_DIR="$(REBUILD_REPORT_DIR)" \
+	CODEX_NEXT_APP_DIR="$(NEXT_APP_DIR)" \
+		./scripts/rebuild-candidate.sh "$(DMG)"
+
+rebuild-install:
+	@echo "[make] Running rebuild and local install flow"
+	REBUILD_REPORT_DIR="$(REBUILD_REPORT_DIR)" \
+	CODEX_NEXT_APP_DIR="$(NEXT_APP_DIR)" \
+	CODEX_FINAL_APP_DIR="$(APP_DIR)" \
+		./scripts/rebuild-candidate.sh --install "$(DMG)"
+
+inspect-upstream:
+	@echo "[make] Inspecting upstream DMG"
+	./install.sh --inspect --report-dir "$(REBUILD_REPORT_DIR)" "$(DMG)"
+
 build-app:
 	@echo "[make] Regenerating codex-app from DMG"
 	./install.sh "$(DMG)"
+
+rebuild-next:
+	@echo "[make] Building side-by-side rebuild candidate"
+	CODEX_INSTALL_DIR="$(NEXT_APP_DIR)" \
+	CODEX_PATCH_REPORT_JSON="$(REBUILD_REPORT_DIR)/patch-report.json" \
+	CODEX_REBUILD_REPORT_JSON="$(REBUILD_REPORT_DIR)/rebuild-report.json" \
+	REBUILD_REPORT_DIR="$(REBUILD_REPORT_DIR)" \
+		./install.sh "$(DMG)"
+	@echo "[make] Candidate app: $(NEXT_APP_DIR)"
+	@echo "[make] Rebuild report: $(REBUILD_REPORT_DIR)/rebuild-report.json"
 
 run-app:
 	@echo "[make] Launching local Electron app"
@@ -100,12 +180,13 @@ pacman: build-updater
 
 package: build-updater
 	@echo "[make] Building native package (auto-detecting distro)"
-	@if command -v makepkg >/dev/null 2>&1 && ! command -v dpkg-deb >/dev/null 2>&1; then \
+	@format="$$( $(NATIVE_PKG_FORMAT_CMD) )"; \
+	if [ "$$format" = "pacman" ]; then \
 		PACKAGE_VERSION="$(or $(PACKAGE_VERSION),)" ./scripts/build-pacman.sh; \
-	elif command -v dpkg-deb >/dev/null 2>&1; then \
-		PACKAGE_VERSION="$(or $(PACKAGE_VERSION),)" ./scripts/build-deb.sh; \
-	elif command -v rpmbuild >/dev/null 2>&1; then \
+	elif [ "$$format" = "rpm" ]; then \
 		PACKAGE_VERSION="$(or $(PACKAGE_VERSION),)" ./scripts/build-rpm.sh; \
+	elif [ "$$format" = "deb" ]; then \
+		PACKAGE_VERSION="$(or $(PACKAGE_VERSION),)" ./scripts/build-deb.sh; \
 	else \
 		echo "[make] No supported packaging tool found. Install dpkg-dev (Debian), rpm-build (Fedora), or pacman (Arch)." >&2; \
 		exit 1; \
@@ -113,14 +194,36 @@ package: build-updater
 
 install:
 	@echo "[make] Installing latest native package"
-	@if command -v pacman >/dev/null 2>&1 && ! command -v dpkg >/dev/null 2>&1; then \
+	@format="$$( $(NATIVE_PKG_FORMAT_CMD) )"; \
+	if [ "$$format" = "pacman" ]; then \
 		pkg="$${PKG:-$$(ls -1 $(PACMAN_GLOB) 2>/dev/null | sort -V | tail -n 1)}"; \
 		if [ -z "$$pkg" ]; then \
 			echo "[make] No pacman package found. Run 'make pacman' first." >&2; exit 1; \
 		fi; \
 		echo "[make] Installing $$pkg"; \
 		sudo pacman -U --noconfirm "$$pkg"; \
-	elif command -v dpkg >/dev/null 2>&1; then \
+	elif [ "$$format" = "rpm" ] && command -v dnf >/dev/null 2>&1; then \
+		rpm="$${RPM:-$$(ls -1 $(RPM_GLOB) 2>/dev/null | sort -V | tail -n 1)}"; \
+		if [ -z "$$rpm" ]; then \
+			echo "[make] No RPM package found. Run 'make rpm' first." >&2; exit 1; \
+		fi; \
+		echo "[make] Installing $$rpm"; \
+		sudo dnf install -y "$$rpm"; \
+	elif [ "$$format" = "rpm" ] && command -v zypper >/dev/null 2>&1; then \
+		rpm="$${RPM:-$$(ls -1 $(RPM_GLOB) 2>/dev/null | sort -V | tail -n 1)}"; \
+		if [ -z "$$rpm" ]; then \
+			echo "[make] No RPM package found. Run 'make rpm' first." >&2; exit 1; \
+		fi; \
+		echo "[make] Installing $$rpm"; \
+		sudo zypper --non-interactive --no-gpg-checks install -y "$$rpm"; \
+	elif [ "$$format" = "rpm" ]; then \
+		rpm="$${RPM:-$$(ls -1 $(RPM_GLOB) 2>/dev/null | sort -V | tail -n 1)}"; \
+		if [ -z "$$rpm" ]; then \
+			echo "[make] No RPM package found. Run 'make rpm' first." >&2; exit 1; \
+		fi; \
+		echo "[make] Installing $$rpm"; \
+		sudo rpm -Uvh "$$rpm"; \
+	elif [ "$$format" = "deb" ]; then \
 		deb="$${DEB:-$$(ls -1 $(DEB_GLOB) 2>/dev/null | sort -V | tail -n 1)}"; \
 		if [ -z "$$deb" ]; then \
 			echo "[make] No Debian package found. Run 'make deb' first." >&2; exit 1; \
@@ -131,20 +234,6 @@ install:
 		else \
 			sudo dpkg -i "$$deb"; \
 		fi; \
-	elif command -v zypper >/dev/null 2>&1; then \
-		rpm="$${RPM:-$$(ls -1 $(RPM_GLOB) 2>/dev/null | sort -V | tail -n 1)}"; \
-		if [ -z "$$rpm" ]; then \
-			echo "[make] No RPM package found. Run 'make rpm' first." >&2; exit 1; \
-		fi; \
-		echo "[make] Installing $$rpm"; \
-		sudo zypper --non-interactive --no-gpg-checks install -y "$$rpm"; \
-	elif command -v rpm >/dev/null 2>&1; then \
-		rpm="$${RPM:-$$(ls -1 $(RPM_GLOB) 2>/dev/null | sort -V | tail -n 1)}"; \
-		if [ -z "$$rpm" ]; then \
-			echo "[make] No RPM package found. Run 'make rpm' first." >&2; exit 1; \
-		fi; \
-		echo "[make] Installing $$rpm"; \
-		sudo rpm -Uvh "$$rpm"; \
 	else \
 		echo "[make] No supported package manager found (dpkg, rpm, zypper, or pacman)." >&2; exit 1; \
 	fi

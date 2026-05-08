@@ -3,7 +3,7 @@ use anyhow::{anyhow, Context, Result};
 use atspi::{
     connection::P2P,
     proxy::{accessible::AccessibleProxy, proxy_ext::ProxyExt},
-    AccessibilityConnection, CoordType, ObjectRef, ObjectRefOwned,
+    AccessibilityConnection, CoordType, ObjectRef, ObjectRefOwned, StateSet,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -35,8 +35,10 @@ pub struct AccessibilityNode {
     pub description: Option<String>,
     pub child_count: i32,
     pub bounds: Option<Bounds>,
+    pub states: Vec<String>,
     pub actions: Vec<AccessibilityAction>,
     pub value: Option<AccessibilityValue>,
+    pub text: Option<AccessibilityText>,
     pub supports_editable_text: bool,
 }
 
@@ -65,6 +67,21 @@ pub struct AccessibilityValue {
     pub text: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct AccessibilityText {
+    pub character_count: i32,
+    pub caret_offset: Option<i32>,
+    pub content: Option<String>,
+    pub truncated: bool,
+    pub selections: Vec<AccessibilityTextSelection>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct AccessibilityTextSelection {
+    pub start_offset: i32,
+    pub end_offset: i32,
+}
+
 #[derive(Debug, Clone)]
 pub struct ActionInvocation {
     pub action_index: i32,
@@ -77,6 +94,9 @@ pub enum ValueSetInvocation {
     Numeric { value: f64 },
     EditableText,
 }
+
+const MAX_TEXT_READBACK_CHARS: i32 = 4096;
+const MAX_TEXT_SELECTIONS: i32 = 8;
 
 pub async fn list_accessible_apps(limit: usize) -> Result<Vec<AccessibleAppSummary>> {
     let conn = connect().await?;
@@ -362,8 +382,10 @@ async fn read_node(
         description: optional_string(proxy.description().await.ok()),
         child_count: proxy.child_count().await.unwrap_or_default(),
         bounds: bounds_from_proxies(proxies.as_ref(), proxy).await,
+        states: states_from_proxy(proxy).await,
         actions: actions_from_proxies(proxies.as_ref()).await,
         value: value_from_proxies(proxies.as_ref()).await,
+        text: text_from_proxies(proxies.as_ref()).await,
         supports_editable_text: supports_editable_text(proxies.as_ref()).await,
     }
 }
@@ -404,12 +426,22 @@ async fn bounds_from_proxies(
     };
     let component = proxies.component().await.ok()?;
     let (x, y, width, height) = component.get_extents(CoordType::Screen).await.ok()?;
-    Some(Bounds {
+    normalize_bounds(Bounds {
         x,
         y,
         width,
         height,
     })
+}
+
+fn normalize_bounds(bounds: Bounds) -> Option<Bounds> {
+    if bounds.width <= 0 || bounds.height <= 0 {
+        return None;
+    }
+    if bounds.x <= i32::MIN / 2 || bounds.y <= i32::MIN / 2 {
+        return None;
+    }
+    Some(bounds)
 }
 
 async fn actions_from_proxies(
@@ -437,6 +469,14 @@ async fn actions_from_proxies(
         .collect()
 }
 
+async fn states_from_proxy(proxy: &AccessibleProxy<'_>) -> Vec<String> {
+    proxy
+        .get_state()
+        .await
+        .map(state_labels)
+        .unwrap_or_default()
+}
+
 async fn value_from_proxies(
     proxies: Option<&atspi::proxy::proxy_ext::Proxies<'_>>,
 ) -> Option<AccessibilityValue> {
@@ -450,11 +490,51 @@ async fn value_from_proxies(
     })
 }
 
+async fn text_from_proxies(
+    proxies: Option<&atspi::proxy::proxy_ext::Proxies<'_>>,
+) -> Option<AccessibilityText> {
+    let text = proxies?.text().await.ok()?;
+    let character_count = text.character_count().await.ok()?.max(0);
+    let caret_offset = text.caret_offset().await.ok();
+    let capped_count = character_count.min(MAX_TEXT_READBACK_CHARS);
+    let content = if capped_count > 0 {
+        optional_string(text.get_text(0, capped_count).await.ok())
+    } else {
+        None
+    };
+    let selection_count = text
+        .get_nselections()
+        .await
+        .unwrap_or_default()
+        .clamp(0, MAX_TEXT_SELECTIONS);
+    let mut selections = Vec::new();
+    for index in 0..selection_count {
+        if let Ok((start_offset, end_offset)) = text.get_selection(index).await {
+            selections.push(AccessibilityTextSelection {
+                start_offset,
+                end_offset,
+            });
+        }
+    }
+
+    Some(AccessibilityText {
+        character_count,
+        caret_offset,
+        content,
+        truncated: character_count > MAX_TEXT_READBACK_CHARS,
+        selections,
+    })
+}
+
 async fn supports_editable_text(proxies: Option<&atspi::proxy::proxy_ext::Proxies<'_>>) -> bool {
     let Some(proxies) = proxies else {
         return false;
     };
     proxies.editable_text().await.is_ok()
+}
+
+fn state_labels(state_set: StateSet) -> Vec<String> {
+    state_set.iter().map(|state| state.to_string()).collect()
 }
 
 fn select_action_index(actions: &[atspi::Action], requested_action: Option<&str>) -> Result<i32> {
@@ -577,5 +657,12 @@ mod tests {
         ];
 
         assert_eq!(select_action_index(&actions, None).unwrap(), 1);
+    }
+
+    #[test]
+    fn state_labels_serialize_in_bit_order() {
+        let labels = state_labels(StateSet::new(atspi::State::Focused | atspi::State::Checked));
+
+        assert_eq!(labels, vec!["checked".to_string(), "focused".to_string()]);
     }
 }
