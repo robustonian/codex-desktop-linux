@@ -10,10 +10,11 @@ use crate::remote_desktop::{
     start_portal_pointer_session, PointerButton, PortalPointerSession, ScrollDirection,
 };
 use crate::screenshot::{capture_screenshot, ScreenshotCapture};
+use crate::windowing::registry;
 use crate::windows::{
     focus_window_target, focused_window, list_windows, resolve_window_target,
     window_permission_hint, WindowFocusResult, WindowInfo, WindowTarget,
-    GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND,
+    GNOME_SHELL_INTROSPECT_BACKEND,
 };
 use anyhow::Result;
 use rmcp::{
@@ -24,8 +25,10 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use std::{
     env,
+    io::Write,
+    os::unix::net::UnixStream,
     path::PathBuf,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     sync::{Arc, Mutex},
     thread,
     time::Duration,
@@ -103,7 +106,7 @@ impl ComputerUseLinux {
                     error: None,
                     permissions_hint: None,
                     message:
-                        "Focused window query completed through the available GNOME window backend."
+                        "Focused window query completed through the available compositor window backend."
                             .to_string(),
                 })
             }
@@ -475,6 +478,7 @@ impl ComputerUseLinux {
                 });
             }
         };
+
         if let Some(session) = self.cached_portal_pointer_session() {
             match portal_scroll(&session, target_point, direction, units).await {
                 Ok(()) => {
@@ -657,8 +661,7 @@ impl ComputerUseLinux {
                 });
             }
         };
-        let result = run_ydotool(&["type".to_string(), "--".to_string(), params.text])
-            .map(|output| vec![output]);
+        let result = run_ydotool_type_text(&params.text).map(|output| vec![output]);
         Json(action_result_with_focus(
             "type_text",
             result,
@@ -671,7 +674,7 @@ impl ComputerUseLinux {
 #[tool_handler(
     name = "codex-computer-use-linux",
     version = "0.1.0",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus GNOME Shell windows when org.gnome.Shell.Introspect or the Codex GNOME Shell extension permits it, attach best-effort terminal tty/process metadata to terminal windows, and send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available or through ydotool otherwise. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified."
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, and send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available or through ydotool otherwise. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified."
 )]
 impl ServerHandler for ComputerUseLinux {}
 
@@ -1781,11 +1784,7 @@ async fn window_list_output() -> ListWindowsOutput {
     match list_windows().await {
         Ok(windows) => {
             let backend = window_backend(windows.iter());
-            let note = if backend == GNOME_SHELL_EXTENSION_BACKEND {
-                "Window list came from the Codex GNOME Shell extension. Terminal windows may include best-effort PTY and active-process context when the process tree is readable."
-            } else {
-                "Window list came from GNOME Shell Introspect. Terminal windows may include best-effort PTY and active-process context when the process tree is readable."
-            };
+            let note = registry::list_note(&backend);
             ListWindowsOutput {
                 backend,
                 windows,
@@ -1855,41 +1854,78 @@ fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
 
     match command.output() {
         Ok(output) if output.status.success() => Ok(output),
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let detail = if stderr.is_empty() { stdout } else { stderr };
-            Err(if detail.is_empty() {
-                format!("ydotool exited with {}", output.status)
-            } else {
-                detail
-            })
+        Ok(output) => Err(ydotool_output_error(output)),
+        Err(error) => Err(format!("failed to run ydotool: {error}")),
+    }
+}
+
+fn run_ydotool_type_text(text: &str) -> std::result::Result<Output, String> {
+    let mut command = Command::new("ydotool");
+    command.args(["type", "--file", "-"]);
+    if let Some(socket) = ydotool_socket() {
+        command.env("YDOTOOL_SOCKET", socket);
+    }
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    match command.spawn() {
+        Ok(mut child) => {
+            if let Some(stdin) = child.stdin.as_mut() {
+                if let Err(error) = stdin.write_all(text.as_bytes()) {
+                    let _ = child.kill();
+                    return Err(format!("failed to write text to ydotool stdin: {error}"));
+                }
+            }
+            match child.wait_with_output() {
+                Ok(output) if output.status.success() => Ok(output),
+                Ok(output) => Err(ydotool_output_error(output)),
+                Err(error) => Err(format!("failed to wait for ydotool: {error}")),
+            }
         }
         Err(error) => Err(format!("failed to run ydotool: {error}")),
     }
 }
 
+fn ydotool_output_error(output: Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if stderr.is_empty() { stdout } else { stderr };
+    if detail.is_empty() {
+        format!("ydotool exited with {}", output.status)
+    } else {
+        detail
+    }
+}
+
 fn ydotool_socket() -> Option<String> {
+    connectable_ydotool_socket_from(ydotool_socket_candidates())
+        .map(|path| path.display().to_string())
+}
+
+fn ydotool_socket_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
     if let Ok(socket) = env::var("YDOTOOL_SOCKET") {
-        if !socket.trim().is_empty() {
-            return Some(socket);
+        let socket = socket.trim();
+        if !socket.is_empty() {
+            candidates.push(PathBuf::from(socket));
         }
     }
+    if let Some(runtime) = env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| user_id().map(|uid| PathBuf::from(format!("/run/user/{uid}"))))
+    {
+        candidates.push(runtime.join(".ydotool_socket"));
+    }
+    candidates.push(PathBuf::from("/tmp/.ydotool_socket"));
+    candidates
+}
 
-    let candidates = [
-        env::var("XDG_RUNTIME_DIR")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(|| user_id().map(|uid| PathBuf::from(format!("/run/user/{uid}"))))
-            .map(|runtime| runtime.join(".ydotool_socket")),
-        Some(PathBuf::from("/tmp/.ydotool_socket")),
-    ];
-
+fn connectable_ydotool_socket_from(candidates: Vec<PathBuf>) -> Option<PathBuf> {
     candidates
         .into_iter()
-        .flatten()
-        .find(|path| path.exists())
-        .map(|path| path.display().to_string())
+        .find(|path| UnixStream::connect(path).is_ok())
 }
 
 fn mouse_button_code(button: Option<&str>) -> String {
@@ -2088,7 +2124,7 @@ fn looks_like_desktop_app(name: &str, command: &str) -> bool {
 mod tests {
     use super::*;
     use crate::atspi_tree::{AccessibilityAction, Bounds};
-    use crate::windows::WindowBounds;
+    use crate::windows::{WindowBounds, GNOME_SHELL_EXTENSION_BACKEND};
 
     fn node(index: u32, bounds: Option<Bounds>) -> AccessibilityNode {
         node_with_actions(index, bounds, Vec::new())
@@ -2640,6 +2676,26 @@ mod tests {
             key_sequence("Super"),
             Some(vec!["125:1".to_string(), "125:0".to_string()])
         );
+    }
+
+    #[test]
+    fn ydotool_socket_selection_skips_unconnectable_candidates() {
+        let dir =
+            std::env::temp_dir().join(format!("codex-computer-use-server-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp server dir");
+        let stale_socket = dir.join("stale.sock");
+        std::fs::write(&stale_socket, b"not a socket").expect("write stale socket placeholder");
+        let usable_socket = dir.join("usable.sock");
+        let listener =
+            std::os::unix::net::UnixListener::bind(&usable_socket).expect("bind usable socket");
+
+        let selected = connectable_ydotool_socket_from(vec![stale_socket, usable_socket.clone()])
+            .expect("usable socket should be selected");
+
+        assert_eq!(selected, usable_socket);
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1,0 +1,10 @@
+{
+  "id": "example-feature",
+  "title": "Example Linux Feature",
+  "description": "Disabled example showing the linux-features ASAR patch and stage hook contract.",
+  "defaultEnabled": false,
+  "entrypoints": {
+    "mainBundlePatch": "./patch.js",
+    "stageHook": "./stage.sh"
+  }
+}

@@ -1,10 +1,12 @@
 mod atspi_tree;
+mod cosmic_helper;
 mod diagnostics;
 mod gnome_extension;
 mod remote_desktop;
 mod screenshot;
 mod server;
 mod terminal;
+mod windowing;
 mod windows;
 
 use anyhow::{Context, Result};
@@ -84,7 +86,7 @@ async fn main() -> Result<()> {
                 Err(error) => {
                     let error = format!("{error:#}");
                     serde_json::json!({
-                        "backend": windows::GNOME_SHELL_INTROSPECT_BACKEND,
+                        "backend": "unavailable",
                         "windows": [],
                         "error": error,
                         "permissions_hint": windows::window_permission_hint(&error),

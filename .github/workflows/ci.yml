@@ -32,6 +32,17 @@ jobs:
           bash -n scripts/build-deb.sh
           bash -n scripts/build-rpm.sh
           bash -n scripts/build-pacman.sh
+          bash -n scripts/ci/update-nix-hashes.sh
+
+      - name: Check Node patcher syntax
+        run: |
+          set -euo pipefail
+          node --check scripts/patch-linux-window-ui.js
+          node --check scripts/patch-linux-window-ui.test.js
+          for file in scripts/patches/*.js; do
+            node --check "$file"
+          done
+          node --check scripts/ci/validate-patch-report.js
 
       - name: Check Rust formatting
         run: cargo fmt --check

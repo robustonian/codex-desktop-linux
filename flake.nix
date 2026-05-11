@@ -22,7 +22,7 @@
 
         codexDmg = pkgs.fetchurl {
           url = "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg";
-          hash = "sha256-WSs2iN4Ojk0Ky2FlGsOc8CayZaFHio9Wse+YbpFUE2Y=";
+          hash = "sha256-4FroU+UDXJSbB5FfjGhiGyXrQ/R+UYXuaYPoR7oXbyc=";
         };
 
         electronLibs = with pkgs; [
@@ -113,6 +113,36 @@ codex_nixos_add_runtime_library_dirs() {\
 \
 codex_nixos_add_runtime_library_dirs' "${installDir}/start.sh"
             fi
+            if ! grep -q "Browser Use bundled marketplace metadata" "${installDir}/start.sh"; then
+              ${pkgs.python3}/bin/python3 - "${installDir}/start.sh" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+needle = '    [ -f "$source_client" ] || return 0\n\n'
+insert = "\n".join([
+    "    # Browser Use bundled marketplace metadata for app-server plugin discovery.",
+    "    local source_marketplace=\"$SCRIPT_DIR/resources/plugins/openai-bundled/.agents/plugins/marketplace.json\"",
+    "    local marketplace_root=\"$codex_home/.tmp/bundled-marketplaces/openai-bundled\"",
+    "    local marketplace_plugins_dir=\"$marketplace_root/.agents/plugins\"",
+    "    if [ -f \"$source_marketplace\" ]; then",
+    "        mkdir -p \"$marketplace_plugins_dir\"",
+    "        rm -f \"$marketplace_plugins_dir/marketplace.json\"",
+    "        cp \"$source_marketplace\" \"$marketplace_plugins_dir/marketplace.json\" && \\",
+    "            chmod u+w \"$marketplace_plugins_dir/marketplace.json\" || \\",
+    "            echo \"Browser Use bundled marketplace sync failed; continuing with existing marketplace cache.\"",
+    "    fi",
+    "",
+    "",
+])
+if insert not in text:
+    if needle not in text:
+        raise SystemExit("Browser Use plugin cache insertion point not found")
+    text = text.replace(needle, needle + insert, 1)
+    path.write_text(text)
+PY
+            fi
           fi
 
           # Patch the Electron binary for NixOS.
@@ -149,7 +179,7 @@ codex_nixos_add_runtime_library_dirs' "${installDir}/start.sh"
 
         codexDesktopPayload = pkgs.stdenv.mkDerivation {
           pname = "codex-desktop-payload";
-          version = "unstable-2026-05-02";
+          version = "26.506.21252";
           src = sourceRoot;
           __structuredAttrs = true;
 
@@ -170,7 +200,7 @@ codex_nixos_add_runtime_library_dirs' "${installDir}/start.sh"
 
           outputHashAlgo = "sha256";
           outputHashMode = "recursive";
-          outputHash = "sha256-5bB5LHtOL0x3XAaUrRKRTTxsovHP6VVsgv/dcSfriGs=";
+          outputHash = "sha256-Mckt6xOP0tcmhsezQTboLTB7u3Xws+3ruq2A6jo5R5I=";
           unsafeDiscardReferences.out = true;
 
           dontConfigure = true;
@@ -185,6 +215,7 @@ codex_nixos_add_runtime_library_dirs' "${installDir}/start.sh"
             export NIX_SSL_CERT_FILE="$SSL_CERT_FILE"
             export npm_config_cafile="$SSL_CERT_FILE"
             export CARGO_HOME="$TMPDIR/cargo-home"
+            export CODEX_MANAGED_NODE_SOURCE="${pkgs.nodejs}"
             mkdir -p "$HOME" "$npm_config_cache" "$CARGO_HOME"
 
             source_dir="$TMPDIR/codex-source"
@@ -232,7 +263,7 @@ NODE
 
         codexDesktop = pkgs.stdenv.mkDerivation {
           pname = "codex-desktop";
-          version = "unstable-2026-05-02";
+          version = "26.506.21252";
           src = codexDesktopPayload;
 
           nativeBuildInputs = [
@@ -250,6 +281,12 @@ NODE
             mkdir -p "$out/opt"
             cp -aT "$src/opt/codex-desktop" "$out/opt/codex-desktop"
             chmod -R u+w "$out/opt/codex-desktop"
+            rm -rf "$out/opt/codex-desktop/resources/node-runtime"
+            ln -s ${pkgs.nodejs} "$out/opt/codex-desktop/resources/node-runtime"
+            if [ -e "$out/opt/codex-desktop/update-builder/node-runtime" ]; then
+              rm -rf "$out/opt/codex-desktop/update-builder/node-runtime"
+              ln -s ${pkgs.nodejs} "$out/opt/codex-desktop/update-builder/node-runtime"
+            fi
 
             resources_dir="$out/opt/codex-desktop/resources"
             (cd "$resources_dir/app-extracted" && find . -type f | LC_ALL=C sort | sed 's#^\./##') > "$TMPDIR/app.asar.ordering"
@@ -257,6 +294,12 @@ NODE
               --ordering "$TMPDIR/app.asar.ordering" \
               --unpack "{*.node,*.so,*.dylib}"
             rm -rf "$resources_dir/app-extracted"
+
+            if [ -f "$resources_dir/node_repl" ]; then
+              patchelf --set-interpreter "$(cat ${pkgs.stdenv.cc}/nix-support/dynamic-linker)" \
+                --set-rpath "${pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.glibc ]}" \
+                "$resources_dir/node_repl"
+            fi
 
             ${patchNixInstalledApp "$out/opt/codex-desktop"}
 
@@ -320,6 +363,7 @@ NODE
 
             cd "$source_dir"
             export CODEX_INSTALL_DIR="''${CODEX_INSTALL_DIR:-$root_dir/codex-app}"
+            export CODEX_MANAGED_NODE_SOURCE="${pkgs.nodejs}"
             ${pkgs.bash}/bin/bash "$source_dir/install.sh" "$source_dir/Codex.dmg" "$@"
 
             install_dir="''${CODEX_INSTALL_DIR:-$root_dir/codex-app}"

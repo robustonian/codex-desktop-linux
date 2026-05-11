@@ -1,5 +1,6 @@
 use crate::diagnostics::hydrate_session_bus_env;
-use crate::windows::{list_extension_windows, window_permission_hint, WindowInfo};
+use crate::windowing::backends::gnome::list_extension_windows;
+use crate::windows::{window_permission_hint, WindowInfo};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::{

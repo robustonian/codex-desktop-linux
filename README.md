@@ -1,8 +1,12 @@
 # Codex Desktop for Linux
 
+Unofficial Linux build of [OpenAI Codex Desktop](https://openai.com/codex/). The official Codex Desktop app is macOS-only — this project converts the upstream macOS `Codex.dmg` into a runnable Linux Electron app, ships native `.deb` / `.rpm` / `.pkg.tar.zst` packages plus a Nix flake, and includes a local auto-updater that rebuilds future Linux packages from newer upstream DMGs.
+
 Before opening a pull request, please read [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Unofficial Linux build of [OpenAI Codex Desktop](https://openai.com/codex/). The official Codex Desktop app is macOS-only — this project converts the upstream macOS `Codex.dmg` into a runnable Linux Electron app, ships native `.deb` / `.rpm` / `.pkg.tar.zst` packages plus a Nix flake, and includes a local auto-updater that rebuilds future Linux packages from newer upstream DMGs.
+## Linux features
+
+Optional Linux-only additions live in `linux-features/`. Use them for integrations that are useful for some users but should not become mandatory core patches. Copy `linux-features/features.example.json` to the git-ignored `linux-features/features.json` before building; enabled features are applied during the install/build pipeline. See [`linux-features/README.md`](linux-features/README.md) for the feature contract.
 
 ## Supported platforms
 
@@ -27,16 +31,15 @@ Anything systemd-based should work for the optional auto-updater service (`syste
 | Linux tray + warm-start handoff | ✅ always | Single-instance lock, second-instance window focus |
 | GUI install prompts (`kdialog` / `zenity`) | ✅ if installed | Falls back to interactive terminal prompt |
 | Linux browser annotations | ✅ always | Stored-anchor screenshots, isolated marker rendering |
-| Linux Computer Use | ⚠️ opt-in | Linux Computer Use backend with screen capture, accessibility, and input synthesis. The MCP server registers by default; the in-app UI surface is enabled at your discretion — see "Enabling Computer Use UI" below. Validated on Ubuntu/GNOME. |
+| Chrome plugin native host | ✅ always | Auto-installs the upstream Chrome plugin plus Linux native-messaging support for Chrome, Brave, and Chromium |
+| Linux Computer Use | ⚠️ opt-in | MCP backend registers by default; the in-app UI is opt-in. Supports screenshots, accessibility, window targeting, and input synthesis |
 | Server-gated features (e.g. `gpt-5.5`) | 🟡 server-side | OpenAI rolls per-account, not project-controlled. Building a fresh package does not unlock these. |
 
 ## Before you install
 
-Codex Desktop for Linux now bundles a managed Linux Node.js runtime in the generated app and native packages. You do **not** need a distro `nodejs` / `npm` package for normal installs, Browser Use, Codex CLI install/update, or local auto-update rebuilds.
+The generated app and native packages bundle a managed Linux Node.js runtime. You do **not** need a distro `nodejs` / `npm` package for normal installs, Browser Use, Codex CLI install/update, or local auto-update rebuilds.
 
-Existing `nvm`, asdf, Volta, NodeSource, or nodejs.org tarball installs are still fine. They are optional user tooling now, not required package dependencies.
-
-The Codex CLI is still required at runtime, but the first launch can install or update `@openai/codex` automatically using the bundled managed `npm`. You can also pre-install and manage the CLI yourself if you prefer.
+The Codex CLI is still required at runtime. The first launch can install or update `@openai/codex` with the bundled `npm`, or you can manage the CLI yourself.
 
 On some systems (e.g. hardened Linux setups), `/tmp` may be mounted with `noexec`, preventing the rust installer and bundled Node.js runtime from executing.
 
@@ -80,25 +83,24 @@ make install        # installs the newest package from dist/
 
 `make package` picks the format that matches your distro. `make install` then runs the right `dpkg -i` / `dnf install` / `zypper install` / `pacman -U` against the freshly built artifact.
 
-The first launch can auto-install the Codex CLI (`@openai/codex`) using the bundled managed Node.js runtime. You can still pre-install the CLI yourself, but a system `node` / `npm` install is no longer required for the packaged app.
-
 ### NixOS / Nix one-liner
 
 ```bash
 nix run github:ilysenko/codex-desktop-linux
 ```
 
-The flake handles dependencies and patches Electron for NixOS. A GitHub Actions bot keeps the upstream `Codex.dmg` SRI hash refreshed in `main` once per day. If you happen to try right after an upstream Codex release and hit `error: hash mismatch in fixed-output derivation`, wait up to a day for the bot and retry.
+The flake handles dependencies and patches Electron for NixOS. A GitHub Actions bot refreshes the upstream `Codex.dmg` and recursive Nix payload hashes in `main`; if you hit a hash mismatch right after an upstream release, wait for the next bot run and retry.
 
 `nix develop github:ilysenko/codex-desktop-linux` enters a dev shell with the required tooling.
 
 ## Linux Computer Use
 
-Linux Computer Use is an **opt-in** plugin that lets Codex inspect and control desktop apps on Linux through a native Rust MCP backend (`codex-computer-use-linux`). It is designed and maintained by [@avifenesh](https://github.com/avifenesh). It supports:
+Linux Computer Use is an **opt-in** plugin that lets Codex inspect and control desktop apps on Linux through a native Rust MCP backend (`codex-computer-use-linux`). It is designed and maintained by [@avifenesh](https://github.com/avifenesh) and supports:
 
-- **App listing & accessibility tree** — via AT-SPI bus (`org.a11y.Bus`)
-- **Screenshot capture** — primary path through GNOME Shell DBus, fallback through XDG Desktop Portal (`org.freedesktop.portal.Screenshot`)
-- **Input synthesis** — keys, text, click, scroll, drag — through `ydotool` with `ydotoold` daemon
+- app listing and accessibility trees via AT-SPI
+- screenshots through GNOME Shell DBus or XDG Desktop Portal
+- window listing and focusing on GNOME, KWin/Plasma, Hyprland, and i3
+- keyboard, text, click, scroll, and drag input through `ydotool`
 
 ### Runtime dependencies
 
@@ -118,30 +120,30 @@ sudo pacman -S ydotool
 sudo zypper install ydotool
 ```
 
-`ydotool` needs `/dev/uinput` access. The simplest path is to run `ydotoold` as the daemon and add your user to the `input` group (then re-login):
+`ydotool` needs `/dev/uinput` access. The usual setup is to run `ydotoold`, add your user to the `input` group, then re-login:
 
 ```bash
 sudo systemctl enable --now ydotoold
 sudo usermod -a -G input "$USER"
 ```
 
-On Ubuntu 24.04, the `ydotoold` package may install `/usr/bin/ydotoold` without a systemd unit. In that case, create or install a `ydotoold.service` unit before running `systemctl enable --now ydotoold`.
+Some distros install `/usr/bin/ydotoold` without a service unit. If `systemctl enable --now ydotoold` fails, create or install a distro-appropriate unit. If `doctor` reports `ydotool_socket: Permission denied`, make sure the socket is usable by users in the `input` group.
 
-A working XDG Desktop Portal implementation is needed if you are not on GNOME — `xdg-desktop-portal-kde` for KDE Plasma, `xdg-desktop-portal-wlr` for sway / Hyprland. GNOME ships a working portal by default.
+A working XDG Desktop Portal implementation is needed if you are not on GNOME — `xdg-desktop-portal-kde` for KDE Plasma, `xdg-desktop-portal-wlr` for sway / Hyprland, or your distro's preferred portal backend for i3. GNOME ships a working portal by default.
 
 ### Verifying readiness
 
-The plugin exposes a `doctor` tool. Once Computer Use is visible in the Codex UI, ask the LLM:
+Once Computer Use is visible in the Codex UI, ask the LLM:
 
 > Check whether Linux Computer Use is ready
 
-The response is a structured report covering AT-SPI bus availability, GNOME Shell version, Desktop Portal interfaces, `ydotool` / `ydotoold` / `/dev/uinput`, and a top-level readiness verdict. You can also invoke the backend binary directly:
+You can also invoke the backend binary directly:
 
 ```bash
 ./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux doctor
 ./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux setup    # enables GNOME accessibility
 ./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux apps     # lists running apps via AT-SPI
-./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux state Codex
+./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux windows  # lists targetable windows
 ./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux screenshot
 ```
 
@@ -158,9 +160,7 @@ mkdir -p ~/.config/codex-desktop
 echo '{"codex-linux-computer-use-ui-enabled": true}' > ~/.config/codex-desktop/settings.json
 ```
 
-Either path enables the in-app controls on subsequent builds. Use of this option is at your own discretion; this is an unofficial Linux build and the upstream app may change at any time.
-
-To opt back out, unset the env var and remove or set the settings flag to `false`.
+Either path enables the in-app controls on subsequent builds. To opt back out, unset the env var and remove or set the settings flag to `false`.
 
 ### Side-by-side dev variant
 
@@ -175,21 +175,13 @@ Override the dev identity with `DEV_APP_ID`, `DEV_APP_NAME`, and `CODEX_WEBVIEW_
 
 ## Auto-update Manager
 
-The package installs a companion service named `codex-update-manager`.
+The native package installs a companion `systemd --user` service named `codex-update-manager`.
 
-- It runs as a `systemd --user` service, started in best-effort mode by the launcher on app launch.
-- Each app launch also triggers a background `check-now --if-stale`; the updater skips that request when the last successful upstream check is still fresh, or another check / rebuild / install is already active. Concurrent checks are serialized via a kernel-backed file lock (`flock(2)`).
-- It checks the upstream `Codex.dmg` on daemon startup and every 6 hours.
-- When a new DMG is detected, it rebuilds a local native package using `/opt/codex-desktop/update-builder`.
-- If the app is open, the update waits until Electron exits.
-- When the app is closed, the updater uses `pkexec` (with `--disable-internal-agent`, so the desktop polkit agent renders the auth dialog) only for the final native-package install step.
-- On Arch, that final install step is `pacman -U --noconfirm` against the locally rebuilt `.pkg.tar.zst`.
-- On openSUSE, that final install step is `zypper --non-interactive --no-gpg-checks install` against the locally rebuilt `.rpm` (the package is unsigned because it is built locally).
-- A failed or dismissed `pkexec` prompt (exit `126` / `127`) keeps the candidate `ReadyToInstall` and retries on the next app exit, instead of moving to a permanent `Failed` state.
-- An `Installing` state interrupted by a crash or restart is automatically recovered.
-- Before Electron launches, the launcher only resolves a usable Codex CLI path. If the CLI is missing and the launcher was started from an interactive terminal, it prompts before attempting an automatic install. GUI launches use the updater prompt flow for the same recovery path. The updater CLI preflight then runs in the background by default so npm registry checks and follow-up updates do not block the first window. Set `CODEX_SYNC_CLI_PREFLIGHT=1` to restore the synchronous preflight for debugging.
-- That CLI preflight is best-effort: it uses the bundled managed `npm`, applies a 1-hour cooldown for registry checks, falls back to a user-local `~/.local` npm prefix when a global install fails, and keeps the app launch on the current CLI when the automatic refresh does not succeed.
-- Automatic installation of a missing CLI is launcher-scoped. The daemon and `codex-update-manager status` report a missing dependency as `cli_status: NotInstalled` and may notify, but they do not install the CLI on their own.
+- It checks upstream `Codex.dmg` on daemon startup, every 6 hours, and in the background on app launch when stale.
+- When a new DMG is available, it rebuilds a local native package with `/opt/codex-desktop/update-builder`.
+- If Codex Desktop is open, the final install waits until Electron exits.
+- The updater runs unprivileged and uses `pkexec` only for the final package install.
+- Codex CLI checks are best-effort and launcher-scoped. Set `CODEX_SYNC_CLI_PREFLIGHT=1` when debugging launch-time CLI preflight.
 
 Inspect the live service and runtime files with:
 
@@ -200,15 +192,13 @@ sed -n '1,160p' ~/.local/state/codex-update-manager/state.json
 sed -n '1,160p' ~/.local/state/codex-update-manager/service.log
 ```
 
-If a rebuilt update installs but the previous retained package was better, close
-Codex Desktop and run:
+If a rebuilt update installs but the previous retained package was better, close Codex Desktop and run:
 
 ```bash
 codex-update-manager rollback
 ```
 
-Rollback uses the last retained known-good package and refuses to run when no
-rollback package is available.
+Rollback uses the last retained known-good package and refuses to run when no rollback package is available.
 
 Runtime files live in standard XDG locations:
 
@@ -228,7 +218,7 @@ Runtime files live in standard XDG locations:
 You need:
 
 - `python3`, `7z` (or `7zz`), `curl`, `unzip`, `make`, `g++`
-- **Rust toolchain** (`cargo`) for the `codex-update-manager` and `codex-computer-use-linux` crates
+- **Rust toolchain** (`cargo`) for the `codex-update-manager` and `codex-computer-use-linux` crates, including the Chrome extension host binary
 
 The installer downloads a managed Linux Node.js runtime into `codex-app/resources/node-runtime` and uses it for `node`, `npm`, and `npx` during the build. Existing `nvm`, asdf, Volta, NodeSource, or nodejs.org tarball installs are still fine, but they are no longer required for this project.
 
@@ -242,14 +232,14 @@ It auto-detects `apt`, `dnf5`, `dnf`, `pacman`, or `zypper`, installs system pac
 
 #### Apt-specific (Debian / Ubuntu / Pop!_OS / Mint)
 
-`install-deps.sh` can still bootstrap NodeSource Node.js for users who want a system Node.js toolchain, but `install.sh`, native packages, Browser Use, and the Codex CLI install/update flow use the bundled managed runtime:
+On apt-based systems, `install-deps.sh` can still bootstrap NodeSource Node.js for users who want a system Node.js toolchain:
 
 ```bash
 bash scripts/install-deps.sh                       # full host bootstrap
 NODEJS_MAJOR=24 bash scripts/install-deps.sh       # choose a different optional system Node line
 ```
 
-Ubuntu-family `p7zip-full` can be too old for newer APFS DMGs. `install-deps.sh` bootstraps `7zz` into `~/.local/bin` (set `SEVENZIP_SYSTEM_INSTALL=1` to install to `/usr/local/bin` instead).
+Ubuntu-family `p7zip-full` can be too old for newer APFS DMGs, so `install-deps.sh` bootstraps `7zz` into `~/.local/bin` by default.
 
 #### Manual deps per distro
 
@@ -291,22 +281,16 @@ Equivalent direct commands:
 ./codex-app/start.sh                        # run after build
 ```
 
-Manual Codex CLI installation is optional. If you choose to manage the CLI yourself and `npm i -g` needs elevated privileges on your system:
-
-```bash
-npm i -g --prefix ~/.local @openai/codex
-```
-
 ### Electron download mirrors
 
-`make build-app` downloads Electron headers while rebuilding native modules, then downloads a Linux Electron runtime. The installer uses Electron's `artifacts.electronjs.org` headers endpoint by default so `@electron/rebuild` does not need to connect to `www.electronjs.org`. If the later runtime download from GitHub is slow or blocked, use an Electron runtime mirror:
+`make build-app` downloads Electron headers while rebuilding native modules, then downloads a Linux Electron runtime. If the runtime download from GitHub is slow or blocked, use a mirror:
 
 ```bash
 ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ \
 make build-app
 ```
 
-`ELECTRON_HEADERS_URL` is passed to `@electron/rebuild --dist-url`. It must provide both `node-v<version>-headers.tar.gz` and the matching `SHASUMS256.txt`; ordinary Electron runtime mirrors may not include the headers checksum format that `node-gyp` expects.
+`ELECTRON_HEADERS_URL` is passed to `@electron/rebuild --dist-url` and must provide both `node-v<version>-headers.tar.gz` and the matching `SHASUMS256.txt`.
 
 ### One-command install or update
 
@@ -333,7 +317,7 @@ Override the package version with `PACKAGE_VERSION=YYYY.MM.DD.HHMMSS+commitish .
 
 The packaging scripts only repackage what's already in `codex-app/`. They do not download or extract the DMG themselves.
 
-Native packages bundle the managed Node.js runtime used by the launcher, Browser Use, Codex CLI install/update flow, and local auto-update rebuilds. They do not hard-depend on distro `nodejs` / `npm`, so installs also work when Node.js comes from `nvm`, asdf, Volta, or the nodejs.org tarball. Packages still pull in `polkit` (or `policykit-1` on older Debian/Ubuntu) plus `pkexec` so the privileged install flow works out of the box.
+Native packages bundle the managed Node.js runtime and do not hard-depend on distro `nodejs` / `npm`. Packages still pull in `polkit` (or `policykit-1` on older Debian/Ubuntu) plus `pkexec` for privileged update installs.
 
 ### Updater service controls
 
@@ -383,8 +367,9 @@ make clean-state
 | Window flickering | GPU compositing is disabled by default. If flickering persists, try `./codex-app/start.sh --disable-gpu` to fully disable GPU acceleration |
 | Sandbox errors | The launcher already sets `--no-sandbox` |
 | Stale install / cached DMG | `./install.sh --fresh` removes the existing install dir and re-downloads |
-| Computer Use plugin invisible in UI | Most likely the OpenAI per-account Statsig rollout (`computerUse` feature flag) hasn't been enabled for your account. Building / reinstalling does not change this |
+| Computer Use plugin invisible in UI | Ensure you enabled the Computer Use UI. If it is enabled and still hidden, the OpenAI per-account rollout may not be available |
 | Computer Use `doctor` reports `ydotool not running` | `sudo systemctl enable --now ydotoold` and add your user to the `input` group |
+| Computer Use `doctor` reports `ydotool_socket: Permission denied` | The daemon socket is root-only. Adjust the `ydotoold` service so `/tmp/.ydotool_socket` becomes `root:input` with `0660` permissions |
 | `ConnectTimeoutError` for `www.electronjs.org` during `@electron/rebuild` | Re-run `make build-app`; the installer now uses `https://artifacts.electronjs.org/headers/dist` for Electron headers by default |
 | Computer Use AT-SPI tree empty | Run `codex-computer-use-linux setup` to flip GNOME accessibility on, then restart the target app |
 | `codex-update-manager` keeps running after package removal | `systemctl --user disable --now codex-update-manager.service` once in the affected session, then confirm `/opt/codex-desktop` is gone |
@@ -401,13 +386,11 @@ make clean-state
 8. The installed package provides `codex-update-manager` plus a `systemd --user` service unit
 9. The updater watches for newer upstream DMGs and rebuilds future Linux packages locally
 
-The macOS Codex app is an Electron application; `app.asar` is platform-independent JavaScript but bundles macOS-native modules and a macOS Electron binary. The installer replaces the macOS Electron with a Linux build and recompiles native modules. The `sparkle` module is removed because it is macOS-only.
+The installer replaces the macOS Electron binary with a Linux build, recompiles native modules, and removes macOS-only pieces such as `sparkle`.
 
-The extracted app expects a local webview origin, so the launcher starts `python3 -m http.server "$CODEX_LINUX_WEBVIEW_PORT" --bind 127.0.0.1` from `content/webview/`, exports `ELECTRON_RENDERER_URL`, waits for the socket, validates that `/index.html` contains the expected Codex startup markers, and only then launches Electron. The default app uses port `5175`; the dev-app variant defaults to `5176`. The launcher tracks the owned webview server PID under XDG state, rediscovers an orphaned server from the same `content/webview/` directory, and reuses an already-verified server instead of killing every process that matches the port.
+The launcher serves extracted webview assets from `content/webview/` on `127.0.0.1` (`5175` by default, `5176` for the dev app), validates the origin, then starts Electron. Warm-start launches hand off actions such as `--new-chat` over a Unix-domain socket instead of spawning a second app process.
 
-If an existing Electron process is detected, the launcher uses a warm-start handoff: it sends launch-action args (e.g. `--new-chat`, `--prompt-chat`) over a Unix-domain socket and exits, letting the running app's single-instance handler focus the right window.
-
-Native-package-only launcher behavior (desktop-entry hints, `codex-update-manager` session bootstrapping, the launch-time update check) lives in `packaging/linux/codex-packaged-runtime.sh`, which the generated launcher loads only when present inside a packaged install.
+Native-package-only launcher behavior, such as desktop-entry hints and update-manager startup, lives in `packaging/linux/codex-packaged-runtime.sh`.
 
 The current evaluation for a future Rust replacement of the local webview server lives in `docs/webview-server-evaluation.md`.
 
@@ -418,7 +401,10 @@ After changing installer, packaging, or updater logic:
 ```bash
 bash -n install.sh scripts/lib/*.sh launcher/start.sh.template scripts/build-deb.sh scripts/build-rpm.sh scripts/build-pacman.sh scripts/install-deps.sh
 node --check scripts/patch-linux-window-ui.js
+for file in scripts/patches/*.js; do node --check "$file"; done
+node --check scripts/ci/validate-patch-report.js
 node --test scripts/patch-linux-window-ui.test.js
+node --test linux-features/*/test.js
 bash tests/scripts_smoke.sh
 cargo check -p codex-update-manager
 cargo test -p codex-update-manager
@@ -427,22 +413,12 @@ cargo test -p codex-computer-use-linux
 make package
 ```
 
-If `dpkg-deb` is available:
+For package metadata checks, run the format-specific commands that are available on your system:
 
 ```bash
 dpkg-deb -I dist/codex-desktop_*.deb
 dpkg-deb -c dist/codex-desktop_*.deb | sed -n '1,40p'
-```
-
-If `rpmbuild` is available:
-
-```bash
 make rpm
-```
-
-If `makepkg` is available (Arch):
-
-```bash
 ./scripts/build-pacman.sh
 pacman -Qip dist/codex-desktop-*.pkg.tar.zst
 pacman -Qlp dist/codex-desktop-*.pkg.tar.zst | sed -n '1,40p'

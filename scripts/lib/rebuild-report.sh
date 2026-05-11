@@ -6,6 +6,10 @@ default_rebuild_report_dir() {
 
 prepare_rebuild_report_dir() {
     local report_dir="$1"
+    case "$report_dir" in
+        /*) ;;
+        *) report_dir="$PWD/$report_dir" ;;
+    esac
     mkdir -p "$report_dir"
     echo "$report_dir"
 }

@@ -11,6 +11,7 @@ Contributions of all sizes are welcome: bug reports, documentation improvements,
 - Avoid mixed pull requests that combine unrelated fixes, refactors, formatting, docs, or cleanup.
 - Think through the impact on every supported path: source installs, `.deb`, `.rpm`, pacman packages, Nix, updater rebuilds, and different desktop environments.
 - Preserve existing platform behavior unless the pull request explicitly explains why it must change.
+- If a feature is not part of the standard upstream Codex Desktop experience and is not required Linux compatibility glue, implement it as an opt-in `linux-features/` module instead of a core patch.
 - Include a short summary, the user-visible behavior change, and the validation you ran.
 
 ## Before You Start

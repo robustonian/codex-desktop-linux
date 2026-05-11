@@ -24,6 +24,11 @@ assert_file_exists() {
     [ -f "$path" ] || fail "Expected file to exist: $path"
 }
 
+assert_file_not_exists() {
+    local path="$1"
+    [ ! -e "$path" ] || fail "Expected file not to exist: $path"
+}
+
 assert_contains() {
     local path="$1"
     local pattern="$2"
@@ -61,7 +66,7 @@ JSON
 {"name":"browser-use","version":"0.1.0-alpha1"}
 JSON
     cat > "$resources_dir/plugins/openai-bundled/plugins/browser-use/scripts/browser-client.mjs" <<'JS'
-class Wm{async fetchBlocked(t){let n=await MT(t.endpoint,{method:"GET"});if(!n.ok)throw new Error(Rt(`Browser Use cannot determine if ${t.displayUrl} is allowed. Please try again later or use another source.`));let r=await n.json();return R7(r)}}export function setupAtlasRuntime() {}
+class Uf{async fetchBlocked(e){let r=await bS(e.endpoint,{method:"GET"});if(!r.ok)throw new Error(ae(`Browser Use cannot determine if ${e.displayUrl} is allowed. Please try again later or use another source.`));let n=await r.json();return TF(n)}}export function setupAtlasRuntime() {}
 JS
 }
 
@@ -133,10 +138,18 @@ SCRIPT
     assert_file_exists "$pkg_root/DEBIAN/prerm"
     assert_file_exists "$pkg_root/DEBIAN/postrm"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/package-common.sh"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/patch-chrome-plugin.js"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/node-runtime.sh"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/linux-update-bridge-patch.js"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/patch-report.js"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/rebuild-report.sh"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/linux-features.js"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/linux-features.sh"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/patches/registry.js"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/patches/shared.js"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/linux-features/README.md"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/linux-features/example-feature/feature.json"
+    assert_file_not_exists "$pkg_root/opt/codex-desktop/update-builder/linux-features/features.json"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/node-runtime/bin/node"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/Cargo.toml"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/computer-use-linux/Cargo.toml"
@@ -320,6 +333,8 @@ test_upstream_build_app_workflow_tracks_dmg_metadata() {
     assert_contains "$workflow" 'path: /tmp/codex-upstream-ci/Codex.dmg'
     assert_contains "$workflow" 'Last-Modified'
     assert_contains "$workflow" 'sha256sum'
+    assert_contains "$workflow" 'CODEX_PATCH_REPORT_JSON="$GITHUB_WORKSPACE/patch-report.json"'
+    assert_contains "$workflow" 'node scripts/ci/validate-patch-report.js patch-report.json --profile upstream-build'
     assert_contains "$workflow" 'make build-app DMG=/tmp/codex-upstream-ci/Codex.dmg'
     assert_contains "$workflow" 'DMG Last-Modified'
     assert_contains "$workflow" 'DMG SHA-256'
@@ -436,6 +451,7 @@ test_launcher_template_sanity() {
     assert_contains "$REPO_DIR/launcher/start.sh.template" "owned_webview_server_pid"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "discover_webview_server_pid"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "Adopted existing webview server"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" "reconcile_runtime_state"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "detect_warm_start"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "send_warm_start_launch_action"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "CODEX_DESKTOP_LAUNCH_ACTION_SOCKET"
@@ -459,6 +475,7 @@ runtime_body = source.split("trap cleanup_launcher EXIT", 1)[1].split("launch_el
 stop_body = source.split("stop_owned_webview_server() {", 1)[1].split("owned_webview_server_pid() {", 1)[0]
 adopt_body = source.split("adopt_existing_webview_server() {", 1)[1].split("ensure_webview_server() {", 1)[0]
 ensure_body = source.split("ensure_webview_server() {", 1)[1].split("wait_for_webview_server", 1)[0]
+reconcile_body = source.split("reconcile_runtime_state() {", 1)[1].split("set_electron_defaults() {", 1)[0]
 if 'RUNNING_APP_PID="$(find_running_app_pid)"' not in detect_body:
     raise SystemExit("detect_warm_start must record a pid-file running app even when warm start is disabled")
 if '[ -S "$LAUNCH_ACTION_SOCKET" ] && RUNNING_APP_PID="$(discover_running_app_pid)"' not in detect_body:
@@ -479,6 +496,8 @@ if 'if needs_cold_start && [ -z "${CODEX_CLI_PATH:-}" ]; then' not in runtime_bo
     raise SystemExit("second-instance handoff must skip CLI lookup")
 if 'if needs_cold_start && [ -z "$CODEX_CLI_PATH" ]; then' not in runtime_body:
     raise SystemExit("second-instance handoff must skip missing-CLI failure")
+if '"$HOME/.bun/bin/codex"' not in source:
+    raise SystemExit("CLI lookup must include bun global install path")
 if "if needs_cold_start;" not in runtime_body:
     raise SystemExit("second-instance handoff must skip CLI preflight")
 if "running_app_is_active" not in stop_body or "Preserving webview server" not in stop_body:
@@ -497,7 +516,99 @@ if "stop_stale_webview_server" not in ensure_body:
     raise SystemExit("ensure_webview_server must clear stale deleted webview servers before treating the port as foreign")
 if "Keeping the live app untouched" not in ensure_body:
     raise SystemExit("ensure_webview_server must not stop a live app server when validation fails")
+if 'if live_app_pid="$(find_running_app_pid)" || { [ -S "$LAUNCH_ACTION_SOCKET" ] && live_app_pid="$(discover_running_app_pid)"; }; then' not in reconcile_body:
+    raise SystemExit("reconcile_runtime_state must preserve runtime markers when a live app still exists")
+if 'rm -f "$LAUNCH_ACTION_SOCKET"' not in reconcile_body:
+    raise SystemExit("reconcile_runtime_state must clear a stale launch-action socket when no live app exists")
+if 'clear_stale_pid_file' not in reconcile_body:
+    raise SystemExit("reconcile_runtime_state must still clear stale app.pid markers")
+if 'if [ -z "$webview_pid" ] || { ! pid_is_webview_server "$webview_pid" && ! pid_is_stale_webview_server "$webview_pid"; }; then' not in reconcile_body:
+    raise SystemExit("reconcile_runtime_state must clear stale launcher webview ownership markers without touching valid orphaned servers")
 PY
+    local launcher_probe
+    local output
+    launcher_probe="$TMP_DIR/launcher-rendering-probe.sh"
+    python3 - "$REPO_DIR/launcher/start.sh.template" "$launcher_probe" <<'PY'
+import sys
+
+source_path, output_path = sys.argv[1:3]
+source = open(source_path, encoding="utf-8").read()
+start = source.index("is_wsl_environment() {")
+end = source.index("configure_side_by_side_app_env() {")
+probe = "#!/bin/bash\n" + source[start:end] + r'''
+set -Eeuo pipefail
+
+CODEX_LINUX_APP_ID="${CODEX_LINUX_APP_ID:-codex-desktop}"
+APP_STATE_DIR="${APP_STATE_DIR:-/tmp/codex-launcher-probe-state}"
+
+print_state() {
+    printf 'mode=%s wslg=%s ozone_platform=%s ozone_hint=%s gpu=%s gpu_arg=%s comp=%s gl_added=%s launch=' \
+        "$ELECTRON_RENDERING_MODE" \
+        "$ELECTRON_WSLG_DETECTED" \
+        "${ELECTRON_OZONE_PLATFORM:-}" \
+        "${ELECTRON_OZONE_HINT:-}" \
+        "$ELECTRON_GPU_ENABLED" \
+        "$ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS" \
+        "$ELECTRON_GPU_COMPOSITING_DISABLED" \
+        "$ELECTRON_GL_SWITCH_ADDED"
+    for arg in "${ELECTRON_LAUNCH_ARGS[@]}"; do
+        printf '<%s>' "$arg"
+    done
+    printf ' electron='
+    for arg in "${ELECTRON_ARGS[@]}"; do
+        printf '<%s>' "$arg"
+    done
+    printf '\n'
+}
+
+case "${1:-}" in
+    probe)
+        shift
+        set_electron_defaults "$@"
+        build_electron_launch_args
+        print_state
+        ;;
+    *)
+        echo "Usage: $0 probe [launcher args...]" >&2
+        exit 2
+        ;;
+esac
+'''
+open(output_path, "w", encoding="utf-8").write(probe)
+PY
+    chmod +x "$launcher_probe"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=default "$launcher_probe" probe --x11 -- --use-gl=angle)"
+    [[ "$output" == *"electron=<--use-gl=angle>"* ]] || fail "launcher must pass Electron args after -- without the separator: $output"
+    [[ "$output" != *"electron=<--><--use-gl=angle>"* ]] || fail "launcher must not pass the -- separator to Electron: $output"
+    [[ "$output" == *"<--ozone-platform=x11>"* ]] || fail "launcher --x11 must still set the Electron ozone platform: $output"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=default "$launcher_probe" probe -- --ozone-platform=x11)"
+    [[ "$output" == *"electron=<--ozone-platform=x11>"* ]] || fail "pass-through ozone platform must reach Electron: $output"
+    [[ "$output" != *"<--ozone-platform-hint=auto>"* ]] || fail "launcher must not add ozone hint when pass-through supplies an ozone platform: $output"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wslg "$launcher_probe" probe)"
+    [[ "$output" == *"mode=wslg"* && "$output" == *"comp=0"* && "$output" == *"gl_added=1"* ]] || fail "forced WSLg profile must disable GPU compositing default and add ANGLE: $output"
+    [[ "$output" == *"<--ozone-platform=x11>"* && "$output" == *"electron=<--use-gl=angle>"* ]] || fail "forced WSLg profile must use X11 and ANGLE by default: $output"
+    [[ "$output" != *"<--disable-gpu-compositing>"* ]] || fail "forced WSLg profile must not add disable-gpu-compositing by default: $output"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wslg "$launcher_probe" probe --wayland --use-gl=desktop)"
+    [[ "$output" == *"<--ozone-platform=wayland>"* && "$output" == *"electron=<--use-gl=desktop>"* ]] || fail "explicit rendering args must override WSLg defaults: $output"
+    [[ "$output" == *"gl_added=0"* && "$output" != *"<--use-gl=angle>"* ]] || fail "WSLg profile must not add ANGLE when a GL switch was supplied: $output"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wslg "$launcher_probe" probe -- --disable-gpu)"
+    [[ "$output" == *"gpu=1"* && "$output" == *"gpu_arg=1"* && "$output" == *"gl_added=0"* ]] || fail "pass-through --disable-gpu must suppress WSLg ANGLE without becoming a launcher GPU toggle: $output"
+    [[ "$output" == *"electron=<--disable-gpu>"* && "$output" != *"<--disable-features=Vulkan>"* ]] || fail "pass-through --disable-gpu must not add launcher-only Vulkan flags: $output"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wslg CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=1 "$launcher_probe" probe)"
+    [[ "$output" == *"comp=1"* && "$output" == *"<--disable-gpu-compositing>"* ]] || fail "CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=1 must force the compositor flag: $output"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=default CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=0 "$launcher_probe" probe)"
+    [[ "$output" == *"comp=0"* && "$output" != *"<--disable-gpu-compositing>"* ]] || fail "CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=0 must suppress the compositor flag: $output"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" WSL_INTEROP=/tmp/codex-wsl WAYLAND_DISPLAY=wayland-0 "$launcher_probe" probe)"
+    [[ "$output" == *"mode=wslg"* && "$output" == *"wslg=1"* ]] || fail "auto rendering mode must detect WSLg from WSL and GUI markers: $output"
+
     assert_contains "$REPO_DIR/launcher/start.sh.template" "warm_start_ipc_sent"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "launcher_phase"
     assert_contains "$REPO_DIR/launcher/start.sh.template" 'date +%s%N'
@@ -528,6 +639,19 @@ PY
     assert_contains "$REPO_DIR/launcher/start.sh.template" "resolve_update_manager_path"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "run_update_manager"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "sync_browser_use_bundled_plugin_cache"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" "sync_chrome_bundled_plugin_cache"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" "extension-id.json"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" ".config/BraveSoftware/Brave-Browser/NativeMessagingHosts"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" ".config/chromium/NativeMessagingHosts"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" "scripts/check-extension-installed.js"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" "scripts/chrome-is-running.js"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" ".tmp/bundled-marketplaces/openai-bundled"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" ".agents/plugins/marketplace.json"
+    assert_contains "$REPO_DIR/scripts/lib/bundled-plugins.sh" "stage_chrome_plugin_from_upstream"
+    assert_contains "$REPO_DIR/scripts/lib/patch-chrome-plugin.js" "Linux native host manifest location"
+    assert_contains "$REPO_DIR/computer-use-linux/src/bin/codex-chrome-extension-host.rs" "CODEX_BROWSER_USE_SOCKET_DIR"
+    assert_contains "$REPO_DIR/flake.nix" "Browser Use bundled marketplace metadata"
+    assert_contains "$REPO_DIR/flake.nix" ".tmp/bundled-marketplaces/openai-bundled"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "Install it now? \\[Y/n\\]"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "is_interactive_terminal"
     assert_contains "$REPO_DIR/updater/src/app.rs" "kdialog"
@@ -552,6 +676,8 @@ PY
     assert_contains "$REPO_DIR/scripts/lib/package-common.sh" "node-runtime"
     assert_contains "$REPO_DIR/tests/fixtures/create-packaged-app-fixture.sh" "resources/node-runtime/bin"
     assert_contains "$REPO_DIR/.github/workflows/ci.yml" "tests/fixtures/create-packaged-app-fixture.sh codex-app"
+    assert_contains "$REPO_DIR/.github/workflows/ci.yml" "for file in scripts/patches/"
+    assert_contains "$REPO_DIR/scripts/ci/container-entrypoint.sh" "for file in scripts/patches/"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "MANAGED_NODE_BIN_DIR"
     assert_contains "$REPO_DIR/updater/src/builder.rs" "managed_node_bin_dirs"
     assert_contains "$REPO_DIR/scripts/build-rpm.sh" "stage_common_package_files"
@@ -598,12 +724,12 @@ test_side_by_side_launcher_identity() {
     assert_contains "$app_dir/start.sh" '--user-data-dir="${CODEX_ELECTRON_USER_DATA_DIR:-$APP_STATE_DIR/electron-user-data}"'
     assert_contains "$app_dir/start.sh" "--force-renderer-accessibility"
     assert_contains "$app_dir/start.sh" 'LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/$CODEX_LINUX_APP_ID"'
-    XDG_CACHE_HOME="$workspace/cache" XDG_STATE_HOME="$workspace/state" "$app_dir/start.sh" --help >"$help_log"
+    XDG_CACHE_HOME="$workspace/cache" XDG_STATE_HOME="$workspace/state" XDG_RUNTIME_DIR="$workspace/runtime" "$app_dir/start.sh" --help >"$help_log"
     assert_contains "$help_log" "Launches the Codex CUA Lab app."
     assert_contains "$help_log" "codex-cua-lab/launcher.log"
 
     ln -s "$app_dir/start.sh" "$bin_dir/codex-cua-lab"
-    XDG_CACHE_HOME="$workspace/cache" XDG_STATE_HOME="$workspace/state" "$bin_dir/codex-cua-lab" --help >"$symlink_help_log"
+    XDG_CACHE_HOME="$workspace/cache" XDG_STATE_HOME="$workspace/state" XDG_RUNTIME_DIR="$workspace/runtime" "$bin_dir/codex-cua-lab" --help >"$symlink_help_log"
     assert_contains "$symlink_help_log" "Launches the Codex CUA Lab app."
 }
 
@@ -653,6 +779,12 @@ test_browser_use_node_repl_fallback_runtime() {
         # shellcheck disable=SC1091
         source "$REPO_DIR/scripts/lib/bundled-plugins.sh"
         stage_linux_computer_use_plugin() { return 1; }
+        build_chrome_extension_host() {
+            local fake_host="$workspace/codex-chrome-extension-host"
+            printf '#!/bin/sh\n' > "$fake_host"
+            chmod +x "$fake_host"
+            printf '%s\n' "$fake_host"
+        }
         install_bundled_plugin_resources "$app_dir"
     ) >"$output_log" 2>&1
 
@@ -661,7 +793,191 @@ test_browser_use_node_repl_fallback_runtime() {
     cmp -s /bin/true "$install_dir/resources/node_repl" || fail "Expected fallback node_repl to come from the runtime archive"
     assert_contains "$install_dir/resources/plugins/openai-bundled/plugins/browser-use/scripts/browser-client.mjs" "codexLinuxSiteStatusAllowlistFallback"
     assert_contains "$output_log" "Browser Use node_repl runtime is not a Linux executable for x86_64; skipping"
+    assert_not_contains "$output_log" "WARN.*Browser Use node_repl runtime is not a Linux executable"
     assert_contains "$output_log" "Downloading Browser Use node_repl fallback runtime"
+}
+
+make_fake_chrome_upstream_app() {
+    local app_dir="$1"
+    local resources_dir="$app_dir/Contents/Resources"
+    local chrome_dir="$resources_dir/plugins/openai-bundled/plugins/chrome"
+
+    mkdir -p \
+        "$resources_dir/plugins/openai-bundled/.agents/plugins" \
+        "$chrome_dir/.codex-plugin" \
+        "$chrome_dir/scripts"
+
+    cat > "$resources_dir/plugins/openai-bundled/.agents/plugins/marketplace.json" <<'JSON'
+{"plugins":[{"name":"chrome","source":{"source":"local","path":"./plugins/chrome"},"policy":{"installation":"AVAILABLE"}}]}
+JSON
+    cat > "$chrome_dir/.codex-plugin/plugin.json" <<'JSON'
+{"name":"chrome","version":"0.1.7"}
+JSON
+    cat > "$chrome_dir/scripts/installManifest.mjs" <<'JS'
+var n={extensionId:"hehggadaopoacecdllhhajmbjkdcmajg",extensionHostName:"com.openai.codexextension"};var p=o=>{let t=`${o.extensionHostName}.json`,r={darwin:["Library/Application Support/Google/Chrome/NativeMessagingHosts"],linux:[".config/google-chrome/NativeMessagingHosts"],win32:["AppData/Local/OpenAI/extension"]}[m.platform()];return r.map(s=>l.resolve(m.homedir(),s,t))};
+JS
+    cat > "$chrome_dir/scripts/extension-id.json" <<'JSON'
+{"extensionId":"hehggadaopoacecdllhhajmbjkdcmajg","extensionHostName":"com.openai.codexextension"}
+JSON
+    cat > "$chrome_dir/scripts/browser-client.mjs" <<'JS'
+import{resolve as GF}from"path";import{homedir as VF,platform as WF}from"os";var Tc=GF(VF(),WF()==="win32"?"AppData\\Local\\Google\\Chrome\\User Data":"Library/Application Support/Google/Chrome");
+async fetchBlocked(e){let r=await bS(e.endpoint,{method:"GET"});if(!r.ok)throw new Error(ae(`Browser Use cannot determine if ${e.displayUrl} is allowed. Please try again later or use another source.`));let n=await r.json();return TF(n)}
+JS
+    cat > "$chrome_dir/scripts/check-native-host-manifest.js" <<'JS'
+function getNativeHostManifestLocation() {
+  if (process.platform === "win32") {
+    const registryKey = `${WINDOWS_NATIVE_HOST_REGISTRY_KEY_PREFIX}\\${expectedHostName}`;
+    const registryManifestPath = readWindowsRegistryDefaultValue(registryKey);
+
+    return {
+      manifestPath: registryManifestPath || getDefaultWindowsManifestPath(),
+      registryKey,
+      registryManifestPath,
+      registryKeyExists: registryManifestPath != null,
+    };
+  }
+
+  throw new Error(
+    `Unsupported platform for native host manifest check: ${process.platform}. This script supports macOS and Windows.`,
+  );
+}
+JS
+    cat > "$chrome_dir/scripts/installed-browsers.js" <<'JS'
+const KNOWN_BROWSERS = [
+  {
+    name: "Google Chrome",
+    bundleIds: ["com.google.Chrome"],
+    appNames: ["Google Chrome.app"],
+    commands: ["google-chrome", "chrome"],
+    windowsExecutable: "chrome.exe",
+  },
+];
+JS
+    cat > "$chrome_dir/scripts/chrome-is-running.js" <<'JS'
+const CHROME_PROCESS_NAMES_BY_PLATFORM = {
+  darwin: new Set(["Google Chrome", "Google Chrome Helper"]),
+  win32: new Set(["chrome.exe"]),
+};
+JS
+    cat > "$chrome_dir/scripts/check-extension-installed.js" <<'JS'
+function resolveChromeUserDataDirectory() {
+  return path.join(os.homedir(), ".config", "google-chrome");
+}
+JS
+    cat > "$chrome_dir/scripts/open-chrome-window.js" <<'JS'
+function resolveChromeUserDataDirectory() {
+  return path.join(os.homedir(), ".config", "google-chrome");
+}
+
+function getOpenChromeCommand(profileDirectory) {
+  const chromeArgs = [
+    `--profile-directory=${profileDirectory}`,
+    "--new-window",
+    ABOUT_BLANK_URL,
+  ];
+
+  return {
+    command: "google-chrome",
+    args: chromeArgs,
+  };
+}
+JS
+}
+
+test_chrome_plugin_staging() {
+    info "Checking Chrome plugin staging"
+    local workspace="$TMP_DIR/chrome-plugin"
+    local app_dir="$workspace/Codex.app"
+    local install_dir="$workspace/install"
+    local output_log="$workspace/output.log"
+    local chrome_dir="$install_dir/resources/plugins/openai-bundled/plugins/chrome"
+    local host="$chrome_dir/extension-host/linux/x64/extension-host"
+
+    mkdir -p "$workspace" "$install_dir/resources"
+    make_fake_chrome_upstream_app "$app_dir"
+
+    (
+        SCRIPT_DIR="$REPO_DIR"
+        INSTALL_DIR="$install_dir"
+        WORK_DIR="$workspace/work"
+        ARCH="x86_64"
+        ICON_SOURCE="$workspace/missing-icon.png"
+        CODEX_APP_ID="codex-desktop"
+        mkdir -p "$WORK_DIR"
+        warn() { echo "[WARN] $*" >&2; }
+        info() { echo "[INFO] $*" >&2; }
+        # shellcheck disable=SC1091
+        source "$REPO_DIR/scripts/lib/bundled-plugins.sh"
+        stage_linux_computer_use_plugin() { return 1; }
+        install_bundled_plugin_resources "$app_dir"
+    ) >"$output_log" 2>&1
+
+    assert_file_exists "$host"
+    [ -x "$host" ] || fail "Expected Chrome extension host to be executable: $host"
+    assert_contains "$chrome_dir/scripts/installManifest.mjs" "BraveSoftware/Brave-Browser/NativeMessagingHosts"
+    assert_contains "$chrome_dir/scripts/installManifest.mjs" ".config/chromium/NativeMessagingHosts"
+    assert_contains "$chrome_dir/scripts/installed-browsers.js" "Brave Browser"
+    assert_contains "$chrome_dir/scripts/installed-browsers.js" "Chromium"
+    assert_contains "$chrome_dir/scripts/chrome-is-running.js" "brave-browser"
+    assert_contains "$chrome_dir/scripts/chrome-is-running.js" "chromium-browser"
+    assert_contains "$chrome_dir/scripts/check-native-host-manifest.js" 'process.platform === "linux"'
+    assert_contains "$chrome_dir/scripts/check-native-host-manifest.js" "BraveSoftware"
+    assert_contains "$chrome_dir/scripts/check-native-host-manifest.js" "chromium"
+    assert_contains "$chrome_dir/scripts/check-extension-installed.js" "linuxBraveUserDataDirectory"
+    assert_contains "$chrome_dir/scripts/check-extension-installed.js" "linuxChromiumUserDataDirectory"
+    assert_contains "$chrome_dir/scripts/check-extension-installed.js" "linuxCandidateWithInstalledExtension"
+    assert_contains "$chrome_dir/scripts/open-chrome-window.js" "brave-browser"
+    assert_contains "$chrome_dir/scripts/open-chrome-window.js" "chromium"
+    assert_contains "$chrome_dir/scripts/open-chrome-window.js" "defaultBrowser ==="
+    assert_contains "$chrome_dir/scripts/browser-client.mjs" ".config/google-chrome"
+    assert_contains "$chrome_dir/scripts/browser-client.mjs" "codexLinuxSiteStatusAllowlistFallback"
+    assert_contains "$install_dir/resources/plugins/openai-bundled/.agents/plugins/marketplace.json" '"name": "chrome"'
+    assert_contains "$output_log" "Chrome plugin staged from upstream DMG"
+}
+
+test_chrome_native_host_manifest_writer() {
+    info "Checking Chrome native host manifest writer"
+    local workspace="$TMP_DIR/chrome-native-host-manifest"
+    local plugin_dir="$workspace/plugin"
+    local home_dir="$workspace/home"
+    local host_path="$workspace/extension-host"
+    local manifest_path
+
+    mkdir -p "$plugin_dir/scripts" "$home_dir" "$(dirname "$host_path")"
+    printf '#!/bin/sh\n' > "$host_path"
+    chmod +x "$host_path"
+    cat > "$plugin_dir/scripts/extension-id.json" <<'JSON'
+{"extensionId":"abcdefghijklmnopabcdefghijklmnop","extensionHostName":"com.example.codextest"}
+JSON
+
+    python3 - "$REPO_DIR/launcher/start.sh.template" "$host_path" "$home_dir" "$plugin_dir" <<'PY'
+import subprocess
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+marker = "python3 - \"$host_path\" \"$HOME\" \"$plugin_dir\" <<'PY'\n"
+start = source.index(marker) + len(marker)
+end = source.index("\nPY\n", start)
+script = source[start:end]
+subprocess.run(
+    ["python3", "-", sys.argv[2], sys.argv[3], sys.argv[4]],
+    input=script,
+    text=True,
+    check=True,
+)
+PY
+
+    for relative in \
+        ".config/google-chrome/NativeMessagingHosts" \
+        ".config/BraveSoftware/Brave-Browser/NativeMessagingHosts" \
+        ".config/chromium/NativeMessagingHosts"; do
+        manifest_path="$home_dir/$relative/com.example.codextest.json"
+        assert_file_exists "$manifest_path"
+        assert_contains "$manifest_path" "com.example.codextest"
+        assert_contains "$manifest_path" "chrome-extension://abcdefghijklmnopabcdefghijklmnop/"
+        assert_contains "$manifest_path" "$host_path"
+    done
 }
 
 make_fake_extracted_asar() {
@@ -782,7 +1098,7 @@ JS
     assert_contains "$extracted/.vite/build/main-test.js" 'let e=process.platform===`linux`&&this.setLinuxTrayContextMenu?this.setLinuxTrayContextMenu():n.Menu.buildFromTemplate'
     assert_contains "$extracted/.vite/build/main-test.js" 'if(process.platform===`linux`)return;e.once(`menu-will-show`'
     assert_contains "$extracted/.vite/build/main-test.js" 'this.trayMenuThreads=e.trayMenuThreads,process.platform===`linux`&&!(typeof codexLinuxIsQuitInProgress===`function`&&codexLinuxIsQuitInProgress())&&this.setLinuxTrayContextMenu?.()'
-    assert_contains "$extracted/.vite/build/main-test.js" '(E||process.platform===`linux`&&codexLinuxIsTrayEnabled())&&oe();'
+    assert_contains "$extracted/.vite/build/main-test.js" '(E||process.platform===`linux`&&(typeof codexLinuxIsTrayEnabled!==`function`||codexLinuxIsTrayEnabled()))&&oe();'
     assert_not_contains "$extracted/.vite/build/main-test.js" 'process.platform===`linux`&&this.tray.setContextMenu?.(e),this.tray.popUpContextMenu(e)'
     assert_not_contains "$output_log" 'WARN: Could not find tray'
 
@@ -887,7 +1203,139 @@ NODE
     assert_occurrence_count "$extracted/.vite/build/main-test.js" 'let e=process.platform===`linux`&&this.setLinuxTrayContextMenu?this.setLinuxTrayContextMenu():n.Menu.buildFromTemplate' '1'
     assert_occurrence_count "$extracted/.vite/build/main-test.js" 'if(process.platform===`linux`)return;e.once(`menu-will-show`' '1'
     assert_occurrence_count "$extracted/.vite/build/main-test.js" 'process.platform===`linux`&&!(typeof codexLinuxIsQuitInProgress===`function`&&codexLinuxIsQuitInProgress())&&this.setLinuxTrayContextMenu?.()' '1'
-    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'process.platform===`linux`&&codexLinuxIsTrayEnabled())&&oe' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'process.platform===`linux`&&(typeof codexLinuxIsTrayEnabled!==`function`||codexLinuxIsTrayEnabled()))&&oe' '1'
+}
+
+test_linux_explicit_quit_patch_smoke() {
+    info "Checking Linux explicit quit patch behavior"
+    local workspace="$TMP_DIR/explicit-quit-patch"
+    local extracted="$workspace/extracted"
+    local output_log="$workspace/output.log"
+    local bundle_body
+
+    mkdir -p "$workspace"
+    bundle_body="$(cat <<'JS'
+let n=require(`electron`),i=require(`node:path`),a=require(`node:fs`);
+var pb=class{getNativeTrayMenuItems(){return[{label:rB(this.appName),click:()=>{n.app.quit()}}]}};
+function qB(r,o){if(o.type===`quit-app`){n.app.quit();return}return o}
+n.app.on(`before-quit`,o=>{let s=BI(),c=t.sr().some(e=>e.status===`ACTIVE`);if(e||i.canQuitWithoutPrompt()||r||!s&&!c){g=!0,a.markAppQuitting();return}let l=n.app.getName();if(n.dialog.showMessageBoxSync({type:`warning`,buttons:[`Quit`,`Cancel`],defaultId:0,cancelId:1,noLink:!0,title:`Quit ${l}?`,message:`Quit ${l}?`,detail:vB({hasInProgressLocalConversation:s,hasEnabledAutomations:c})})!==0){o.preventDefault();return}i.markQuitApproved(),g=!0,a.markAppQuitting()});
+n.app.on(`will-quit`,e=>{if(g=!0,!h){if(i.shouldSkipDrainBeforeQuit()){mB({hotkeyWindowLifecycleManager:c,globalDictationLifecycleManager:l,flushAndDisposeContexts:d,disposables:f});return}e.preventDefault(),h=!0,c.dispose(),l.dispose(),Promise.all([...u.values()].map(e=>e.flush())).finally(()=>{d(),f.dispose(),n.app.quit()})}});
+JS
+)"
+    make_fake_extracted_asar "$extracted" "$bundle_body"
+
+    node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
+    assert_contains "$extracted/.vite/build/main-test.js" 'codexLinuxPrepareForExplicitQuit=()=>{codexLinuxExplicitQuitApproved=!0,codexLinuxMarkQuitInProgress()}'
+    assert_contains "$extracted/.vite/build/main-test.js" 'codexLinuxShouldBypassQuitPrompt=()=>codexLinuxExplicitQuitApproved===!0'
+    assert_contains "$extracted/.vite/build/main-test.js" '{label:rB(this.appName),click:()=>{typeof codexLinuxPrepareForExplicitQuit===`function`?codexLinuxPrepareForExplicitQuit():typeof codexLinuxMarkQuitInProgress===`function`&&codexLinuxMarkQuitInProgress(),n.app.quit()}}'
+    assert_contains "$extracted/.vite/build/main-test.js" 'if(o.type===`quit-app`){typeof codexLinuxPrepareForExplicitQuit===`function`?codexLinuxPrepareForExplicitQuit():typeof codexLinuxMarkQuitInProgress===`function`&&codexLinuxMarkQuitInProgress(),n.app.quit();return}'
+    assert_contains "$extracted/.vite/build/main-test.js" 'if((typeof codexLinuxShouldBypassQuitPrompt===`function`&&codexLinuxShouldBypassQuitPrompt())||e||i.canQuitWithoutPrompt()||r||!s&&!c){g=!0,a.markAppQuitting();return}'
+    assert_contains "$extracted/.vite/build/main-test.js" 'codexLinuxFinalizeQuit=()=>{d(),f.dispose(),n.app.quit()},codexLinuxDrainPromise=Promise.all('
+    assert_contains "$extracted/.vite/build/main-test.js" 'codexLinuxExplicitQuitDrainTimeoutMs'
+    assert_contains "$extracted/.vite/build/main-test.js" 'setTimeout(e,typeof codexLinuxExplicitQuitDrainTimeoutMs'
+    assert_not_contains "$extracted/.vite/build/main-test.js" '\`number\`'
+    assert_not_contains "$output_log" 'WARN: Could not find tray quit menu handler'
+    assert_not_contains "$output_log" 'WARN: Could not find quit-app IPC handler'
+    assert_not_contains "$output_log" 'WARN: Could not find before-quit confirmation guard'
+    assert_not_contains "$output_log" 'WARN: Could not find will-quit drain sequence'
+
+    node - "$extracted/.vite/build/main-test.js" <<'NODE'
+const fs = require("fs");
+
+const source = fs.readFileSync(process.argv[2], "utf8");
+const helperSnippet = source.match(/let codexLinuxQuitInProgress=!1,[^;]*codexLinuxShouldBypassQuitPrompt=\(\)=>codexLinuxExplicitQuitApproved===!0,[^;]*codexLinuxIsQuitInProgress=\(\)=>codexLinuxQuitInProgress===!0;/)?.[0];
+const traySnippet = source.match(/\{label:rB\(this\.appName\),click:\(\)=>\{typeof codexLinuxPrepareForExplicitQuit===`function`\?codexLinuxPrepareForExplicitQuit\(\):typeof codexLinuxMarkQuitInProgress===`function`&&codexLinuxMarkQuitInProgress\(\),n\.app\.quit\(\)\}\}/)?.[0];
+const quitAppSnippet = source.match(/if\(o\.type===`quit-app`\)\{typeof codexLinuxPrepareForExplicitQuit===`function`\?codexLinuxPrepareForExplicitQuit\(\):typeof codexLinuxMarkQuitInProgress===`function`&&codexLinuxMarkQuitInProgress\(\),n\.app\.quit\(\);return\}/)?.[0];
+const beforeQuitSnippet = source.match(/if\(\(typeof codexLinuxShouldBypassQuitPrompt===`function`&&codexLinuxShouldBypassQuitPrompt\(\)\)\|\|e\|\|i\.canQuitWithoutPrompt\(\)\|\|r\|\|!s&&!c\)\{g=!0,a\.markAppQuitting\(\);return\}/)?.[0];
+if (!helperSnippet || !traySnippet || !quitAppSnippet || !beforeQuitSnippet) {
+  throw new Error("Could not extract explicit quit snippets");
+}
+
+function runTrayQuit({ withHelper = true } = {}) {
+  const state = { markCalls: 0, prepareCalls: 0, quitCalls: 0 };
+  const app = { quit() { state.quitCalls += 1; } };
+  const mark = () => { state.markCalls += 1; };
+  const prepare = withHelper ? () => { state.prepareCalls += 1; mark(); } : undefined;
+  const factory = new Function(
+    "n",
+    "rB",
+    "codexLinuxPrepareForExplicitQuit",
+    "codexLinuxMarkQuitInProgress",
+    `return (${traySnippet}).click;`,
+  );
+  const click = factory({ app }, () => "Quit", prepare, mark);
+  click();
+  return state;
+}
+
+function runQuitApp({ withHelper = true } = {}) {
+  const state = { markCalls: 0, prepareCalls: 0, quitCalls: 0 };
+  const app = { quit() { state.quitCalls += 1; } };
+  const mark = () => { state.markCalls += 1; };
+  const prepare = withHelper ? () => { state.prepareCalls += 1; mark(); } : undefined;
+  const handler = new Function(
+    "n",
+    "codexLinuxPrepareForExplicitQuit",
+    "codexLinuxMarkQuitInProgress",
+    "o",
+    `${quitAppSnippet};return null;`,
+  );
+  handler({ app }, prepare, mark, { type: "quit-app" });
+  return state;
+}
+
+function runBeforeQuitBypass() {
+  const state = { markCalls: 0 };
+  const scope = new Function(
+    "BI",
+    "t",
+    `${helperSnippet}return {runBeforeQuitCheck(e,i,r,a){let s=BI(),c=t.sr().some(e=>e.status===\`ACTIVE\`);${beforeQuitSnippet}return \`prompt\`;},prepare:codexLinuxPrepareForExplicitQuit,bypass:codexLinuxShouldBypassQuitPrompt};`,
+  )(
+    () => true,
+    { sr: () => [{ status: "ACTIVE" }] },
+  );
+  const controller = {
+    canQuitWithoutPrompt() { return false; },
+    markQuitApproved() {},
+  };
+  const appQuitting = { markAppQuitting() { state.markCalls += 1; } };
+  scope.prepare();
+  const bypassed = scope.runBeforeQuitCheck(false, controller, false, appQuitting);
+  return { state, bypassed, shouldBypass: scope.bypass() };
+}
+
+let state = runTrayQuit();
+if (state.prepareCalls !== 1 || state.markCalls !== 1 || state.quitCalls !== 1) {
+  throw new Error("tray quit should prepare explicit quit before quitting");
+}
+
+state = runQuitApp();
+if (state.prepareCalls !== 1 || state.markCalls !== 1 || state.quitCalls !== 1) {
+  throw new Error("quit-app IPC should prepare explicit quit before quitting");
+}
+
+state = runTrayQuit({ withHelper: false });
+if (state.prepareCalls !== 0 || state.markCalls !== 1 || state.quitCalls !== 1) {
+  throw new Error("tray quit should still fall back to the quit-in-progress marker");
+}
+
+state = runQuitApp({ withHelper: false });
+if (state.prepareCalls !== 0 || state.markCalls !== 1 || state.quitCalls !== 1) {
+  throw new Error("quit-app IPC should still fall back to the quit-in-progress marker");
+}
+
+state = runBeforeQuitBypass();
+if (!state.shouldBypass || state.bypassed !== undefined || state.state.markCalls !== 1) {
+  throw new Error("before-quit should bypass the Linux quit confirmation after an explicit quit");
+}
+NODE
+
+    node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'codexLinuxPrepareForExplicitQuit=()=>{codexLinuxExplicitQuitApproved=!0,codexLinuxMarkQuitInProgress()}' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'codexLinuxShouldBypassQuitPrompt=()=>codexLinuxExplicitQuitApproved===!0' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'typeof codexLinuxPrepareForExplicitQuit===`function`?codexLinuxPrepareForExplicitQuit():typeof codexLinuxMarkQuitInProgress===`function`&&codexLinuxMarkQuitInProgress()' '2'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'typeof codexLinuxShouldBypassQuitPrompt===`function`&&codexLinuxShouldBypassQuitPrompt()' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'codexLinuxDrainPromise=Promise.all(' '1'
 }
 
 test_keybinds_settings_tab_patch_smoke() {
@@ -1564,7 +2012,7 @@ const repoDir = process.argv[2];
 const baseExtracted = process.argv[3];
 const workspace = process.argv[4];
 const patcher = path.join(repoDir, "scripts", "patch-linux-window-ui.js");
-const patcherSource = fs.readFileSync(patcher, "utf8");
+const launchPatchSource = fs.readFileSync(path.join(repoDir, "scripts", "patches", "launch-actions.js"), "utf8");
 const mainBundlePath = path.join(".vite", "build", "main-test.js");
 const baseMainPath = path.join(baseExtracted, mainBundlePath);
 const currentSource = fs.readFileSync(baseMainPath, "utf8");
@@ -1576,7 +2024,7 @@ function assert(condition, message) {
 }
 
 function extractConst(name) {
-  const match = patcherSource.match(new RegExp(`const ${name} =\\n    "((?:\\\\.|[^"])*)";`));
+  const match = launchPatchSource.match(new RegExp(`const ${name} =\\n    "((?:\\\\.|[^"])*)";`));
   assert(match, `Could not extract ${name}`);
   return JSON.parse(`"${match[1]}"`);
 }
@@ -1747,6 +2195,8 @@ main() {
     test_installer_keeps_electron_fallback_for_bad_metadata
     test_managed_node_runtime_source_install
     test_browser_use_node_repl_fallback_runtime
+    test_chrome_plugin_staging
+    test_chrome_native_host_manifest_writer
     test_launcher_template_sanity
     test_side_by_side_launcher_identity
     test_linux_file_manager_patch_smoke
@@ -1754,6 +2204,7 @@ main() {
     test_keybinds_settings_tab_patch_smoke
     test_keybinds_settings_patch_warns_on_bundle_shape_miss
     test_linux_tray_patch_smoke
+    test_linux_explicit_quit_patch_smoke
     test_browser_annotation_screenshot_patch_smoke
     test_linux_single_instance_patch_smoke
     test_linux_computer_use_gate_patch_smoke

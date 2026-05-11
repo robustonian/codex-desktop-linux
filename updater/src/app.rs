@@ -271,6 +271,7 @@ fn upstream_check_is_fresh(config: &RuntimeConfig, state: &PersistedState) -> bo
 
 fn run_status(state: &mut PersistedState, paths: &RuntimePaths, json: bool) -> Result<()> {
     codex_cli::reconcile_if_present(state, paths)?;
+    complete_pending_install_if_already_installed(state, paths)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(state)?);
@@ -712,7 +713,7 @@ async fn run_install_ready(
 
     if complete_pending_install_if_already_installed(state, paths)? {
         let _ = maybe_notify_installed(state, paths, config.notifications);
-        println!("Codex Desktop update is already installed.");
+        println!("Codex Desktop update is already installed or superseded.");
         return Ok(());
     }
 
@@ -797,18 +798,24 @@ fn complete_pending_install_if_already_installed(
         return Ok(false);
     }
 
-    if !state.candidate_version.as_deref().is_some_and(|candidate| {
-        installed_version_matches_candidate(&state.installed_version, candidate)
-    }) {
+    let Some(candidate_version) = state.candidate_version.clone().filter(|candidate| {
+        installed_version_satisfies_candidate(&state.installed_version, candidate)
+    }) else {
         return Ok(false);
-    }
+    };
+
+    let candidate_is_installed =
+        installed_version_matches_candidate(&state.installed_version, &candidate_version);
 
     state.status = UpdateStatus::Installed;
     state.candidate_version = None;
+    if !candidate_is_installed {
+        state.artifact_paths.package_path = None;
+    }
     state.error_message = None;
     state.notified_events.clear();
     persist_state(paths, state)?;
-    info!("recovered pending install state because the candidate version is already installed");
+    info!("recovered pending install state because the candidate version is already installed or superseded");
     Ok(true)
 }
 
@@ -817,11 +824,17 @@ fn recover_interrupted_install(state: &mut PersistedState, paths: &RuntimePaths)
         return Ok(());
     }
 
-    if state.candidate_version.as_deref().is_some_and(|candidate| {
+    if let Some(candidate_version) = state.candidate_version.clone().filter(|candidate| {
         installed_version_satisfies_candidate(&state.installed_version, candidate)
     }) {
+        let candidate_is_installed =
+            installed_version_matches_candidate(&state.installed_version, &candidate_version);
+
         state.status = UpdateStatus::Installed;
         state.candidate_version = None;
+        if !candidate_is_installed {
+            state.artifact_paths.package_path = None;
+        }
         state.error_message = None;
         state.notified_events.clear();
         persist_state(paths, state)?;
@@ -1223,7 +1236,7 @@ mod tests {
 
         let mut state = PersistedState::new(false);
         state.status = UpdateStatus::Failed;
-        state.candidate_version = Some("2026.03.25.010203+deadbeef".to_string());
+        state.candidate_version = Some("2999.03.25.010203+deadbeef".to_string());
         state.error_message = Some("previous failure".to_string());
         state.artifact_paths.package_path = Some(package_path);
 
@@ -1313,15 +1326,22 @@ mod tests {
         };
         paths.ensure_dirs()?;
 
-        {
-            let first_lock = try_acquire_check_lock(&paths)?;
-            let second_lock = try_acquire_check_lock(&paths)?;
+        let first_lock =
+            try_acquire_check_lock(&paths)?.expect("first lock acquisition should succeed");
+        let second_lock = try_acquire_check_lock(&paths)?;
 
-            assert!(first_lock.is_some());
-            assert!(second_lock.is_none());
+        assert!(second_lock.is_none());
+        drop(second_lock);
+        drop(first_lock);
+
+        let mut reacquired_lock = None;
+        for _ in 0..20 {
+            reacquired_lock = try_acquire_check_lock(&paths)?;
+            if reacquired_lock.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
-
-        let reacquired_lock = try_acquire_check_lock(&paths)?;
 
         assert!(reacquired_lock.is_some());
         Ok(())
@@ -1353,7 +1373,7 @@ mod tests {
 
         let mut state = PersistedState::new(true);
         state.status = UpdateStatus::ReadyToInstall;
-        state.candidate_version = Some("2026.03.25.010203+deadbeef".to_string());
+        state.candidate_version = Some("2999.03.25.010203+deadbeef".to_string());
         state.artifact_paths.package_path = Some(temp.path().join("missing/codex.deb"));
 
         reconcile_pending_install(&config, &mut state, &paths).await?;
@@ -1400,7 +1420,7 @@ mod tests {
 
         let mut state = PersistedState::new(true);
         state.status = UpdateStatus::ReadyToInstall;
-        state.candidate_version = Some("2026.03.25.010203+deadbeef".to_string());
+        state.candidate_version = Some("2999.03.25.010203+deadbeef".to_string());
         state.artifact_paths.package_path = Some(package_path);
 
         reconcile_pending_install(&config, &mut state, &paths).await?;
@@ -1444,11 +1464,11 @@ mod tests {
 
         let mut state = PersistedState::new(false);
         state.status = UpdateStatus::ReadyToInstall;
-        state.candidate_version = Some("2026.03.25.010203+deadbeef".to_string());
+        state.candidate_version = Some("2999.03.25.010203+deadbeef".to_string());
         state.artifact_paths.package_path = Some(package_path);
         state
             .notified_events
-            .insert("install_auth_required:2026.03.25.010203+deadbeef".to_string());
+            .insert("install_auth_required:2999.03.25.010203+deadbeef".to_string());
 
         run_install_ready(&config, &mut state, &paths).await?;
 
@@ -1483,7 +1503,7 @@ mod tests {
 
         let mut state = PersistedState::new(false);
         state.status = UpdateStatus::ReadyToInstall;
-        state.candidate_version = Some("2026.03.25.010203+deadbeef".to_string());
+        state.candidate_version = Some("2999.03.25.010203+deadbeef".to_string());
         state.artifact_paths.package_path = Some(temp.path().join("missing/codex.deb"));
 
         run_install_ready(&config, &mut state, &paths).await?;
@@ -1555,6 +1575,8 @@ mod tests {
         let original_path = std::env::var_os("PATH");
         let original_home = std::env::var_os("HOME");
         let original_nvm_dir = std::env::var_os("NVM_DIR");
+        let original_skip_system_cli_lookup =
+            std::env::var_os("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP");
 
         std::env::remove_var("DISPLAY");
         std::env::remove_var("WAYLAND_DISPLAY");
@@ -1563,6 +1585,7 @@ mod tests {
         std::env::set_var("PATH", temp.path().join("missing-bin"));
         std::env::set_var("HOME", temp.path());
         std::env::remove_var("NVM_DIR");
+        std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
 
         let invalid_cli_path = temp.path().join("codex.txt");
         std::fs::write(&invalid_cli_path, b"not executable")?;
@@ -1606,6 +1629,11 @@ mod tests {
             std::env::set_var("NVM_DIR", value);
         } else {
             std::env::remove_var("NVM_DIR");
+        }
+        if let Some(value) = original_skip_system_cli_lookup {
+            std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", value);
+        } else {
+            std::env::remove_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP");
         }
 
         assert_eq!(outcome, PromptInstallCliOutcome::NoBackend);
@@ -1693,6 +1721,192 @@ mod tests {
     }
 
     #[test]
+    fn pending_install_is_cleared_when_installed_version_is_newer() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let paths = RuntimePaths {
+            config_file: temp.path().join("config/config.toml"),
+            state_file: temp.path().join("state/state.json"),
+            log_file: temp.path().join("state/service.log"),
+            cache_dir: temp.path().join("cache"),
+            state_dir: temp.path().join("state"),
+            config_dir: temp.path().join("config"),
+        };
+        paths.ensure_dirs()?;
+
+        let mut state = PersistedState::new(true);
+        state.status = UpdateStatus::ReadyToInstall;
+        state.installed_version = "2026.05.01.010203-99999999.fc43".to_string();
+        state.candidate_version = Some("2026.04.28.082247+abcdef12".to_string());
+        state.error_message = Some("authentication was not obtained".to_string());
+        let superseded_package_path = temp.path().join("superseded.deb");
+        std::fs::write(&superseded_package_path, b"deb")?;
+        state.artifact_paths.package_path = Some(superseded_package_path);
+
+        assert!(complete_pending_install_if_already_installed(
+            &mut state, &paths
+        )?);
+
+        assert_eq!(state.status, UpdateStatus::Installed);
+        assert_eq!(state.candidate_version, None);
+        assert_eq!(state.artifact_paths.package_path, None);
+        assert_eq!(state.error_message, None);
+        crate::rollback::record_current_package_as_known_good(&mut state);
+        assert_eq!(state.artifact_paths.rollback_package_path, None);
+        Ok(())
+    }
+
+    #[test]
+    fn status_clears_superseded_ready_update() -> Result<()> {
+        let _env_guard = crate::test_util::env_lock();
+        let temp = tempfile::tempdir()?;
+        let paths = RuntimePaths {
+            config_file: temp.path().join("config/config.toml"),
+            state_file: temp.path().join("state/state.json"),
+            log_file: temp.path().join("state/service.log"),
+            cache_dir: temp.path().join("cache"),
+            state_dir: temp.path().join("state"),
+            config_dir: temp.path().join("config"),
+        };
+        paths.ensure_dirs()?;
+
+        let mut state = PersistedState::new(true);
+        state.status = UpdateStatus::ReadyToInstall;
+        state.installed_version = "2026.05.01.010203".to_string();
+        state.candidate_version = Some("2026.04.28.082247+abcdef12".to_string());
+        let superseded_package_path = temp.path().join("superseded-status.deb");
+        std::fs::write(&superseded_package_path, b"deb")?;
+        state.artifact_paths.package_path = Some(superseded_package_path);
+
+        let original_home = std::env::var_os("HOME");
+        let original_path = std::env::var_os("PATH");
+        let original_nvm_dir = std::env::var_os("NVM_DIR");
+        let original_codex_cli_path = std::env::var_os("CODEX_CLI_PATH");
+        let original_skip_system_cli_lookup =
+            std::env::var_os("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP");
+        std::env::set_var("HOME", temp.path());
+        std::env::set_var("PATH", temp.path().join("missing-bin"));
+        std::env::remove_var("NVM_DIR");
+        std::env::remove_var("CODEX_CLI_PATH");
+        std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
+
+        let result = run_status(&mut state, &paths, true);
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(path) = original_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        if let Some(nvm_dir) = original_nvm_dir {
+            std::env::set_var("NVM_DIR", nvm_dir);
+        } else {
+            std::env::remove_var("NVM_DIR");
+        }
+        if let Some(cli_path) = original_codex_cli_path {
+            std::env::set_var("CODEX_CLI_PATH", cli_path);
+        } else {
+            std::env::remove_var("CODEX_CLI_PATH");
+        }
+        if let Some(value) = original_skip_system_cli_lookup {
+            std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", value);
+        } else {
+            std::env::remove_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP");
+        }
+
+        result?;
+
+        assert_eq!(state.status, UpdateStatus::Installed);
+        assert_eq!(state.candidate_version, None);
+        assert_eq!(state.artifact_paths.package_path, None);
+        Ok(())
+    }
+
+    #[test]
+    fn status_preserves_cli_reconciliation_failure() -> Result<()> {
+        let _env_guard = crate::test_util::env_lock();
+        let temp = tempfile::tempdir()?;
+        let paths = RuntimePaths {
+            config_file: temp.path().join("config/config.toml"),
+            state_file: temp.path().join("state/state.json"),
+            log_file: temp.path().join("state/service.log"),
+            cache_dir: temp.path().join("cache"),
+            state_dir: temp.path().join("state"),
+            config_dir: temp.path().join("config"),
+        };
+        paths.ensure_dirs()?;
+
+        let bin_dir = temp.path().join("bin");
+        fs::create_dir_all(&bin_dir)?;
+        let codex_path = bin_dir.join("codex");
+        fs::write(
+            &codex_path,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ] || [ \"$1\" = \"version\" ]; then\n  echo 'codex-cli v0.42.0'\n  exit 0\nfi\nexit 1\n",
+        )?;
+        let mut permissions = fs::metadata(&codex_path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&codex_path, permissions)?;
+
+        let npm_path = bin_dir.join("npm");
+        fs::write(
+            &npm_path,
+            "#!/bin/sh\nif [ \"$1\" = \"view\" ] && [ \"$2\" = \"@openai/codex\" ] && [ \"$3\" = \"version\" ]; then\n  echo '0.42.1'\n  exit 0\nfi\nexit 1\n",
+        )?;
+        let mut permissions = fs::metadata(&npm_path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&npm_path, permissions)?;
+
+        let original_home = std::env::var_os("HOME");
+        let original_path = std::env::var_os("PATH");
+        let original_nvm_dir = std::env::var_os("NVM_DIR");
+        let original_codex_cli_path = std::env::var_os("CODEX_CLI_PATH");
+        let original_skip_system_cli_lookup =
+            std::env::var_os("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP");
+        std::env::set_var("HOME", temp.path());
+        std::env::set_var("PATH", std::env::join_paths([bin_dir])?);
+        std::env::remove_var("NVM_DIR");
+        std::env::remove_var("CODEX_CLI_PATH");
+        std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
+
+        let mut state = PersistedState::new(true);
+        state.cli_path = Some(codex_path);
+        let result = run_status(&mut state, &paths, true);
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(path) = original_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        if let Some(nvm_dir) = original_nvm_dir {
+            std::env::set_var("NVM_DIR", nvm_dir);
+        } else {
+            std::env::remove_var("NVM_DIR");
+        }
+        if let Some(cli_path) = original_codex_cli_path {
+            std::env::set_var("CODEX_CLI_PATH", cli_path);
+        } else {
+            std::env::remove_var("CODEX_CLI_PATH");
+        }
+        if let Some(value) = original_skip_system_cli_lookup {
+            std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", value);
+        } else {
+            std::env::remove_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP");
+        }
+
+        assert!(result.is_err());
+        assert_eq!(state.cli_status, CliStatus::Updating);
+        Ok(())
+    }
+
+    #[test]
     fn generated_versions_compare_by_timestamp_segments() {
         assert_eq!(
             compare_generated_versions("2026.04.01.035152", "2026.03.27.025604+1086e799"),
@@ -1748,6 +1962,7 @@ mod tests {
 
         assert_eq!(state.status, UpdateStatus::Installed);
         assert_eq!(state.candidate_version, None);
+        assert_eq!(state.artifact_paths.package_path, None);
         assert_eq!(state.error_message, None);
         Ok(())
     }

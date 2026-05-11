@@ -1,8 +1,8 @@
-name: Update Codex.dmg hash
+name: Update Nix upstream hashes
 
 on:
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '0 */2 * * *'
   workflow_dispatch: {}
 
 permissions:
@@ -11,42 +11,34 @@ permissions:
 jobs:
   update-hash:
     runs-on: ubuntu-latest
+    env:
+      NIX_CONFIG: experimental-features = nix-command flakes
     steps:
       - uses: actions/checkout@v4
 
       - uses: cachix/install-nix-action@v27
 
-      - name: Download upstream Codex.dmg
-        run: curl -fL --retry 3 -o /tmp/Codex.dmg https://persistent.oaistatic.com/codex-app-prod/Codex.dmg
+      - name: Refresh Nix fixed-output hashes
+        run: scripts/ci/update-nix-hashes.sh
 
-      - name: Compute SRI hash and update flake.nix
+      - name: Commit refreshed hashes
         run: |
           set -euo pipefail
 
-          NEW_HASH=$(nix hash file --sri --type sha256 /tmp/Codex.dmg)
-          echo "Upstream hash: $NEW_HASH"
-
-          if ! [[ "$NEW_HASH" =~ ^sha256-[A-Za-z0-9+/=]{44}$ ]]; then
-            echo "Refusing to proceed: computed hash '$NEW_HASH' is not a valid SRI sha256." >&2
-            exit 1
-          fi
-
-          CURRENT_HASH=$(grep -oP 'hash = "\Ksha256-[^"]+' flake.nix)
-          echo "Current hash:  $CURRENT_HASH"
-
-          if [ "$NEW_HASH" = "$CURRENT_HASH" ]; then
-            echo "Hash unchanged, nothing to do."
+          if git diff --quiet -- flake.nix; then
+            echo "Nix hashes unchanged, nothing to do."
             exit 0
           fi
 
-          sed -i "s|hash = \"sha256-[^\"]*\";|hash = \"$NEW_HASH\";|" flake.nix
+          CODEX_DMG_HASH="$(scripts/ci/update-nix-hashes.sh read-flake-hash 'codexDmg = pkgs.fetchurl {' 'hash = ')"
+          PAYLOAD_HASH="$(scripts/ci/update-nix-hashes.sh read-flake-hash 'codexDesktopPayload = pkgs.stdenv.mkDerivation {' 'outputHash = ')"
 
           git config user.name  "codex-dmg-hash-bot"
           git config user.email "actions@github.com"
           git add flake.nix
-          git commit -m "fix(nix): update Codex.dmg hash
-
-          Upstream binary changed — refreshed SRI hash to $NEW_HASH.
-
-          [skip ci]"
+          git commit \
+            -m "fix(nix): update upstream Nix hashes" \
+            -m "Refreshed Codex.dmg SRI hash to $CODEX_DMG_HASH." \
+            -m "Refreshed codexDesktopPayload recursive outputHash to $PAYLOAD_HASH." \
+            -m "[skip ci]"
           git push origin main
