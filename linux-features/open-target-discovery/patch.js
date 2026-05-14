@@ -132,7 +132,8 @@ function insertOpenTargetHelpers(currentSource, insertionIndex, { fsVar, pathVar
   const helpers =
     `function codexLinuxFindExecutable(e){if(process.platform!==\`linux\`||!e)return null;let t=process.env.PATH||\`\`;for(let n of t.split(\`:\`)){if(!n||!${pathVar}.isAbsolute(n))continue;let r=(0,${pathVar}.join)(n,e);try{if((0,${fsVar}.existsSync)(r)){let e=(0,${fsVar}.statSync)(r);if(e.isFile())try{(0,${fsVar}.accessSync)(r,${fsVar}.constants.X_OK);return r}catch{}}}catch{}}return null}` +
     `function codexLinuxResolveExistingTarget(e){if(typeof e!==\`string\`||e.length===0)return null;let t=e;for(;;){try{if((0,${fsVar}.existsSync)(t))return t}catch{}let n=(0,${pathVar}.dirname)(t);if(n===t)return null;t=n}}` +
-    `function codexLinuxOpenTargetEnv(){let e={...process.env};for(let t of [\`NODE_OPTIONS\`,\`NODE_PATH\`,\`NODE_REPL_EXTERNAL_MODULE\`,\`ELECTRON_RUN_AS_NODE\`,\`ELECTRON_NO_ASAR\`,\`ELECTRON_ENABLE_LOGGING\`,\`VSCODE_NODE_OPTIONS\`,\`VSCODE_NODE_REPL_EXTERNAL_MODULE\`,\`npm_config_node_options\`,\`NPM_CONFIG_NODE_OPTIONS\`])delete e[t];return e}` +
+    `function codexLinuxShouldDropXdgConfigHome(e){let t=e.XDG_CONFIG_HOME,n=e.CODEX_ELECTRON_USER_DATA_DIR;if(typeof t!==\`string\`)return!1;if(typeof n===\`string\`&&t===(0,${pathVar}.join)((0,${pathVar}.dirname)(n),\`xdg-config\`))return!0;let r=e.CODEX_LINUX_APP_ID;return!!(r&&t.endsWith(\`/\${r}/xdg-config\`))}` +
+    `function codexLinuxOpenTargetEnv(){let e={...process.env};codexLinuxShouldDropXdgConfigHome(e)&&delete e.XDG_CONFIG_HOME;for(let t of [\`NODE_OPTIONS\`,\`NODE_PATH\`,\`NODE_REPL_EXTERNAL_MODULE\`,\`ELECTRON_RUN_AS_NODE\`,\`ELECTRON_NO_ASAR\`,\`ELECTRON_ENABLE_LOGGING\`,\`VSCODE_NODE_OPTIONS\`,\`VSCODE_NODE_REPL_EXTERNAL_MODULE\`,\`npm_config_node_options\`,\`NPM_CONFIG_NODE_OPTIONS\`,\`CHROME_DESKTOP\`,\`ELECTRON_RENDERER_URL\`,\`CODEX_ELECTRON_RESOURCES_PATH\`,\`CODEX_ELECTRON_USER_DATA_DIR\`,\`CODEX_LINUX_APP_ID\`,\`CODEX_LINUX_APP_DISPLAY_NAME\`,\`CODEX_LINUX_WEBVIEW_PORT\`])delete e[t];return e}` +
     `function codexLinuxLaunchDetached(e,t,n={}){return new Promise((r,i)=>{let a=!1,o;try{let s=require(\`node:child_process\`).spawn(e,t,{detached:!0,stdio:\`ignore\`,windowsHide:!0,cwd:n.cwd,env:codexLinuxOpenTargetEnv()});o=setTimeout(()=>{a=!0,s.unref?.(),r()},400),o.unref?.(),s.on(\`error\`,e=>{a||(clearTimeout(o),i(e))}),s.on(\`close\`,e=>{a||(clearTimeout(o),e===0?r():i(Error(\`Linux open target launch failed\`)))})}catch(e){clearTimeout(o),i(e)}})}` +
     `function codexLinuxTryReveal(e,t){return new Promise((n,r)=>{let i=!1,a;try{let o=require(\`node:child_process\`).spawn(e,t,{stdio:\`ignore\`,windowsHide:!0,env:codexLinuxOpenTargetEnv()});a=setTimeout(()=>{i=!0,o.unref?.(),n()},400),a.unref?.(),o.on(\`error\`,e=>{i||(clearTimeout(a),r(e))}),o.on(\`close\`,e=>{i||(clearTimeout(a),e===0?n():r(Error(\`Linux file manager reveal failed\`)))})}catch(e){clearTimeout(a),r(e)}})}` +
     `async function codexLinuxOpenFileManager(e){let t=codexLinuxResolveExistingTarget(e)??e;if(typeof t!==\`string\`||t.length===0)throw Error(\`No Linux file manager target available\`);let n=!1;try{n=(0,${fsVar}.existsSync)(t)&&(0,${fsVar}.statSync)(t).isFile()}catch{}if(n)for(let e of [[\`dolphin\`,[\`--select\`,t]],[\`nautilus\`,[\`--select\`,t]]]){let t=codexLinuxFindExecutable(e[0]);if(t)try{await codexLinuxTryReveal(t,e[1]);return}catch{}}t=n?(0,${pathVar}.dirname)(t):t;for(let e of [\`nemo\`,\`thunar\`,\`pcmanfm\`,\`caja\`,\`xdg-open\`]){let n=codexLinuxFindExecutable(e);if(n)try{await codexLinuxLaunchDetached(n,[t]);return}catch{}}throw Error(\`No Linux file manager available\`)}`;
@@ -288,17 +289,23 @@ function applyIdeDiscoveryPatch(currentSource, deps) {
     : `function codexLinuxSplitDesktopExec(e){let t=[],n=\`\`,r=null,i=!1;for(let a=0;a<e.length;a++){let o=e[a];if(i){n+=o,i=!1;continue}if(o===\`\\\\\`){i=!0;continue}if(r){o===r?r=null:n+=o;continue}if(o===\`"\`||o===\`'\`){r=o;continue}if(/\\s/u.test(o)){n&&(t.push(n),n=\`\`);continue}n+=o}return n&&t.push(n),t}` +
     `function codexLinuxDesktopDirs(){if(process.platform!==\`linux\`)return[];let e=process.env.HOME||\`/nonexistent\`,t=process.env.XDG_DATA_HOME&&(0,${pathVar}.isAbsolute)(process.env.XDG_DATA_HOME)?[process.env.XDG_DATA_HOME]:[(0,${pathVar}.join)(e,\`.local/share\`)],n=(process.env.XDG_DATA_DIRS&&process.env.XDG_DATA_DIRS.length>0?process.env.XDG_DATA_DIRS:\`/usr/local/share:/usr/share\`).split(\`:\`).filter(Boolean),r=[...t,...n,(0,${pathVar}.join)(e,\`.local/share/flatpak/exports/share\`),\`/var/lib/flatpak/exports/share\`,\`/var/lib/snapd/desktop\`],a=new Set;return r.map(e=>(0,${pathVar}.join)(e,\`applications\`)).filter(e=>e&&(0,${pathVar}.isAbsolute)(e)&&!a.has(e)&&(a.add(e),!0))}` +
     `function codexLinuxDesktopEntryFiles(e,t=0){let n=[];if(t>4)return n;try{for(let r of (0,${fsVar}.readdirSync)(e,{withFileTypes:!0})){let a=(0,${pathVar}.join)(e,r.name);r.isDirectory()?n.push(...codexLinuxDesktopEntryFiles(a,t+1)):r.isFile()&&r.name.endsWith(\`.desktop\`)&&n.push(a)}}catch{}return n}` +
-    `function codexLinuxParseDesktopEntry(e){let t={Id:(0,${pathVar}.basename)(e).replace(/\\.desktop$/u,\`\`)},n=\`\`;try{for(let r of (0,${fsVar}.readFileSync)(e,\`utf8\`).split(/\\r?\\n/u)){let e=r.trim();if(!e||e.startsWith(\`#\`))continue;if(e.startsWith(\`[\`)&&e.endsWith(\`]\`)){n=e.slice(1,-1);continue}if(n&&n!==\`Desktop Entry\`)continue;let i=e.indexOf(\`=\`);if(i<1)continue;let a=e.slice(0,i).replace(/\\[.*\\]$/u,\`\`),o=e.slice(i+1);t[a]??=o}}catch{return null}let r=e=>(e||\`\`).trim().toLowerCase()===\`true\`;return(t.Type&&t.Type!==\`Application\`)||r(t.NoDisplay)||r(t.Hidden)||r(t.Terminal)||!t.Exec||!t.Name?null:t}` +
-    `function codexLinuxLooksLikeIde(e){let t=(e.Categories||\`\`).toLowerCase(),n=[e.Name,e.GenericName,e.Comment,e.Keywords,e.Exec].filter(Boolean).join(\` \`).toLowerCase();return/(^|;)(development|ide|texteditor)(;|$)/u.test(t)||/\\b(code|codium|cursor|zed|editor|ide|jetbrains|sublime|emacs|vim|neovim|kate|builder|windsurf|antigravity)\\b/u.test(n)}` +
+    `function codexLinuxParseDesktopEntry(e){let t={Id:(0,${pathVar}.basename)(e).replace(/\\.desktop$/u,\`\`)},n=\`\`;try{for(let r of (0,${fsVar}.readFileSync)(e,\`utf8\`).split(/\\r?\\n/u)){let e=r.trim();if(!e||e.startsWith(\`#\`))continue;if(e.startsWith(\`[\`)&&e.endsWith(\`]\`)){n=e.slice(1,-1);continue}if(n&&n!==\`Desktop Entry\`)continue;let i=e.indexOf(\`=\`);if(i<1)continue;let a=e.slice(0,i).replace(/\\[.*\\]$/u,\`\`),o=e.slice(i+1);t[a]??=o}}catch{return null}let r=e=>(e||\`\`).trim().toLowerCase()===\`true\`;return(t.Type&&t.Type!==\`Application\`)||r(t.NoDisplay)||r(t.Terminal)||!r(t.Hidden)&&(!t.Exec||!t.Name)?null:t}` +
+    `function codexLinuxLooksLikeIde(e){let t=\`;\${(e.Categories||\`\`).toLowerCase()};\`,n=[e.Name,e.GenericName,e.Comment,e.Keywords,e.Exec].filter(Boolean).join(\` \`).toLowerCase(),r=/(;)(office|wordprocessor|spreadsheet|presentation|graphics|audiovideo|audiovideoediting|building)(;)/u.test(t),i=/;ide;/u.test(t);if(r&&!i)return!1;if(i)return!0;return/(;)(development|texteditor)(;)/u.test(t)&&/\\b(code|coding|codium|cursor|zed|ide|jetbrains|sublime|emacs|vim|neovim|neovide|kate|builder|windsurf|antigravity|rstudio|positron|agent|agents|agentic|workspace|workspaces)\\b/u.test(n)}` +
     `function codexLinuxExecutablePath(e){if(!e)return null;if(!(0,${pathVar}.isAbsolute)(e))return codexLinuxFindExecutable(e);try{if((0,${fsVar}.existsSync)(e)){let t=(0,${fsVar}.statSync)(e);if(t.isFile())try{(0,${fsVar}.accessSync)(e,${fsVar}.constants.X_OK);return e}catch{}}}catch{}return null}` +
     `function codexLinuxResolveDesktopExec(e){let t=codexLinuxSplitDesktopExec(e);if(t.length===0)return null;for(;;){if(t[0]===\`env\`){t.shift();continue}if(t[0]&&/^[A-Za-z_][A-Za-z0-9_]*=/u.test(t[0])){t.shift();continue}if(t[0]===\`-u\`||t[0]===\`--unset\`){t.splice(0,2);continue}break}let n=t.shift();if(!n)return null;let r=codexLinuxExecutablePath(n);return r?{command:r,args:t,base:(0,${pathVar}.basename)(n).replace(/\\.(sh|bin)$/u,\`\`).toLowerCase()}:null}` +
     `function codexLinuxPathToFileUri(e){try{return require(\`node:url\`).pathToFileURL(e).toString()}catch{return e}}` +
     `function codexLinuxDesktopArgs(e,t){let n=[],r=codexLinuxPathToFileUri(t);for(let a of e){if(a===\`%%\`){n.push(\`%\`);continue}if(/^%[fF]$/u.test(a)){n.push(t);continue}if(/^%[uU]$/u.test(a)){n.push(r);continue}if(/^%[dD]$/u.test(a)){n.push((0,${pathVar}.dirname)(t));continue}if(/^%[nN]$/u.test(a)){n.push((0,${pathVar}.basename)(t));continue}if(/^%[ickvm]$/u.test(a))continue;let o=a.replace(/%[fF]/gu,t).replace(/%[uU]/gu,r).replace(/%[dD]/gu,(0,${pathVar}.dirname)(t)).replace(/%[nN]/gu,(0,${pathVar}.basename)(t)).replace(/%%/gu,\`%\`).replace(/%[A-Za-z]/gu,\`\`);o&&n.push(o)}return n}` +
+    `function codexLinuxDesktopEntryLaunchId(e){return(0,${pathVar}.basename)(e).replace(/\\.desktop$/u,\`\`)}` +
+    `function codexLinuxDesktopLaunchOptions(){return{cwd:process.env.HOME||void 0}}` +
+    `async function codexLinuxLaunchDesktopEntry(e,t,n,r){let i=codexLinuxFindExecutable(\`gio\`),a=codexLinuxDesktopLaunchOptions();if(i)try{await codexLinuxLaunchDetached(i,[\`launch\`,e,t],a);return}catch{}let o=codexLinuxFindExecutable(\`gtk-launch\`);if(o)try{await codexLinuxLaunchDetached(o,[codexLinuxDesktopEntryLaunchId(e),codexLinuxPathToFileUri(t)],a);return}catch{}await codexLinuxLaunchDetached(n,codexLinuxDesktopArgs(r,t),a)}` +
     `function codexLinuxKnownIdeDesktopDuplicate(e){let t=new Set([\`cursor\`,\`code\`,\`codium\`,\`code-insiders\`,\`windsurf\`,\`antigravity\`,\`zed\`,\`zeditor\`,\`zedit\`,\`zed-cli\`,\`idea\`,\`webstorm\`,\`pycharm\`,\`goland\`,\`clion\`,\`rustrover\`,\`rider\`,\`phpstorm\`,\`studio\`,\`studio.sh\`]);return t.has(e.base)&&codexLinuxFindExecutable(e.base)!=null}` +
     `function codexLinuxDesktopIdeIcon(e,t){let n=\`\${e.Name||\`\`} \${e.Id||\`\`} \${t.base||\`\`}\`.toLowerCase();for(let[e,t]of [[\`cursor\`,\`apps/cursor.png\`],[\`code-insiders\`,\`apps/vscode-insiders.png\`],[\`vscode\`,\`apps/vscode.png\`],[\`visual studio code\`,\`apps/vscode.png\`],[\`codium\`,\`apps/vscode.png\`],[\`zed\`,\`apps/zed.png\`],[\`sublime\`,\`apps/sublime-text.png\`],[\`emacs\`,\`apps/emacs.png\`],[\`intellij\`,\`apps/intellij.png\`],[\`webstorm\`,\`apps/webstorm.svg\`],[\`pycharm\`,\`apps/pycharm.png\`],[\`goland\`,\`apps/goland.png\`],[\`clion\`,\`apps/clion.png\`],[\`rustrover\`,\`apps/rustrover.png\`],[\`rider\`,\`apps/rider.png\`],[\`phpstorm\`,\`apps/phpstorm.png\`],[\`android studio\`,\`apps/android-studio.png\`],[\`windsurf\`,\`apps/windsurf.png\`],[\`antigravity\`,\`apps/antigravity.png\`]])if(n.includes(e))return t;return\`apps/terminal.png\`}` +
+    `function codexLinuxIconSearchRoots(){let e=process.env.HOME||\`/nonexistent\`,t=process.env.XDG_DATA_HOME&&(0,${pathVar}.isAbsolute)(process.env.XDG_DATA_HOME)?process.env.XDG_DATA_HOME:(0,${pathVar}.join)(e,\`.local/share\`),n=(process.env.XDG_DATA_DIRS&&process.env.XDG_DATA_DIRS.length>0?process.env.XDG_DATA_DIRS:\`/usr/local/share:/usr/share\`).split(\`:\`).filter(Boolean),r=[(0,${pathVar}.join)(t,\`icons\`),(0,${pathVar}.join)(e,\`.icons\`),...n.map(e=>(0,${pathVar}.join)(e,\`icons\`)),(0,${pathVar}.join)(t,\`pixmaps\`),...n.map(e=>(0,${pathVar}.join)(e,\`pixmaps\`)),(0,${pathVar}.join)(e,\`.local/share/flatpak/exports/share/icons\`),(0,${pathVar}.join)(e,\`.local/share/flatpak/exports/share/pixmaps\`),\`/var/lib/flatpak/exports/share/icons\`,\`/var/lib/flatpak/exports/share/pixmaps\`,\`/var/lib/snapd/desktop/icons\`],a=new Set;return r.filter(e=>e&&(0,${pathVar}.isAbsolute)(e)&&!a.has(e)&&(a.add(e),!0))}` +
+    `function codexLinuxFindIconFile(e,t,n=0){if(n>6)return null;try{for(let r of (0,${fsVar}.readdirSync)(e,{withFileTypes:!0})){let a=(0,${pathVar}.join)(e,r.name);if(r.isDirectory()){let e=codexLinuxFindIconFile(a,t,n+1);if(e)return e}else if(r.isFile()&&r.name.replace(/\\.(png|svg|xpm)$/iu,\`\`)===t&&/\\.(png|svg|xpm)$/iu.test(r.name))return a}}catch{}return null}` +
+    `function codexLinuxDesktopIconPath(e){let t=(e.Icon||\`\`).trim();if(!t)return null;if((0,${pathVar}.isAbsolute)(t)){try{if((0,${fsVar}.existsSync)(t))return t}catch{}return null}let n=t.replace(/\\.(png|svg|xpm)$/iu,\`\`),r=[\`png\`,\`svg\`,\`xpm\`];for(let e of codexLinuxIconSearchRoots())for(let t of r){let r=(0,${pathVar}.join)(e,\`\${n}.\${t}\`);try{if((0,${fsVar}.existsSync)(r))return r}catch{}}for(let e of codexLinuxIconSearchRoots()){let t=codexLinuxFindIconFile(e,n);if(t)return t}return null}` +
     `function codexLinuxDesktopIdeId(e){let t=(e.Id||e.Name||e.Exec||\`app\`).toLowerCase().replace(/\\.desktop$/u,\`\`).replace(/[^a-z0-9]+/gu,\`-\`).replace(/^-|-$/gu,\`\`).slice(0,64)||\`app\`;return\`linux-desktop-\${t}\`}` +
     `function codexLinuxUniqueDesktopIdeId(e,t){let n=codexLinuxDesktopIdeId(e),r=n,i=2;for(;t.has(r);)r=\`\${n}-\${i++}\`;return t.add(r),r}` +
-    `function codexLinuxDiscoveredIdeTargets(){if(process.platform!==\`linux\`)return[];let e=[],t=new Set,n=new Set;for(let r of codexLinuxDesktopDirs())for(let a of codexLinuxDesktopEntryFiles(r)){let r=codexLinuxParseDesktopEntry(a);if(!r||!codexLinuxLooksLikeIde(r))continue;if(r.TryExec&&!codexLinuxExecutablePath(codexLinuxSplitDesktopExec(r.TryExec)[0]))continue;let i=codexLinuxResolveDesktopExec(r.Exec);if(!i||codexLinuxKnownIdeDesktopDuplicate(i))continue;let o=\`\${r.Name}|${"${i.command}"}|${"${i.args.join(` `)}"}\`.toLowerCase();if(t.has(o))continue;t.add(o);let s=r.Name.trim(),c=codexLinuxDesktopIdeIcon(r,i),l=codexLinuxUniqueDesktopIdeId(r,n);e.push({id:l,platforms:{linux:{label:s,icon:c,kind:\`editor\`,detect:()=>i.command,args:e=>codexLinuxDesktopArgs(i.args,e),open:async({command:e,path:t})=>{await codexLinuxLaunchDetached(e,codexLinuxDesktopArgs(i.args,t))}}}})}return e}`;
+    `function codexLinuxDiscoveredIdeTargets(){if(process.platform!==\`linux\`)return[];let e=[],t=new Set,n=new Set,r=new Set;for(let a of codexLinuxDesktopDirs())for(let o of codexLinuxDesktopEntryFiles(a)){let a=codexLinuxParseDesktopEntry(o),s=a?.Id?.toLowerCase();if(!a)continue;if((a.Hidden||\`\`).trim().toLowerCase()===\`true\`){s&&r.add(s);continue}if(s&&r.has(s)||!codexLinuxLooksLikeIde(a))continue;if(a.TryExec&&!codexLinuxExecutablePath(codexLinuxSplitDesktopExec(a.TryExec)[0]))continue;let i=codexLinuxResolveDesktopExec(a.Exec);if(!i||codexLinuxKnownIdeDesktopDuplicate(i))continue;let c=\`\${a.Name}|${"${i.command}"}|${"${i.args.join(` `)}"}\`.toLowerCase();if(t.has(c))continue;t.add(c);let l=a.Name.trim(),u=codexLinuxDesktopIdeIcon(a,i),d=codexLinuxUniqueDesktopIdeId(a,n),f=codexLinuxDesktopIconPath(a);e.push({id:d,platforms:{linux:{label:l,icon:u,iconPath:f?()=>f:void 0,kind:\`editor\`,detect:()=>i.command,args:e=>codexLinuxDesktopArgs(i.args,e),open:async({command:e,path:t})=>{await codexLinuxLaunchDesktopEntry(o,t,e,i.args)}}}})}return e}`;
 
   const helpers = ideCoreHelpers + dynamicDiscoveryHelpers;
   if (helpers.length > 0) {
@@ -370,6 +377,48 @@ function applyIdeDiscoveryPatch(currentSource, deps) {
   return patchedSource;
 }
 
+function applyLinuxIconPathResolutionPatch(currentSource) {
+  if (!currentSource.includes("iconPath?") || !currentSource.includes("async function d_(")) {
+    return currentSource;
+  }
+
+  let patchedSource = currentSource;
+  const linuxIconPlatformNeedle = "return(e===`win32`||e===`linux`)?Promise.all";
+  if (!patchedSource.includes(linuxIconPlatformNeedle)) {
+    const win32IconPlatformNeedle = "return e===`win32`?Promise.all";
+    if (patchedSource.includes(win32IconPlatformNeedle)) {
+      patchedSource = patchedSource.replace(
+        win32IconPlatformNeedle,
+        linuxIconPlatformNeedle,
+      );
+    } else {
+      warn("Could not find open target icon platform gate");
+    }
+  }
+
+  if (!patchedSource.includes("codexLinuxOpenTargetIconImage(")) {
+    const iconResolverNeedle =
+      "let r=e.toLowerCase().endsWith(`.lnk`)?await f_(e):await n.app.getFileIcon(e,{size:`normal`});return!r||r.isEmpty()?t:r.toDataURL()";
+    if (patchedSource.includes(iconResolverNeedle)) {
+      patchedSource = patchedSource.replace(
+        iconResolverNeedle,
+        "let r=codexLinuxOpenTargetIconImage(e)??(e.toLowerCase().endsWith(`.lnk`)?await f_(e):await n.app.getFileIcon(e,{size:`normal`}));return!r||r.isEmpty()?t:r.toDataURL()",
+      );
+      const resolverIndex = patchedSource.indexOf("async function d_(");
+      if (resolverIndex >= 0) {
+        patchedSource =
+          patchedSource.slice(0, resolverIndex) +
+          "function codexLinuxOpenTargetIconImage(e){if(process.platform!==`linux`||typeof e!==`string`||!/\\.(png|svg|jpe?g|bmp|ico)$/iu.test(e))return null;try{let t=n.nativeImage.createFromPath(e);return t.isEmpty()?null:t}catch{return null}}" +
+          patchedSource.slice(resolverIndex);
+      }
+    } else {
+      warn("Could not find open target icon resolver");
+    }
+  }
+
+  return patchedSource;
+}
+
 function applyMainBundlePatch(currentSource) {
   const electronVar = requireName(currentSource, "electron");
   const fsVar = requireName(currentSource, "node:fs");
@@ -386,6 +435,7 @@ function applyMainBundlePatch(currentSource) {
   }
   patchedSource = applyTerminalDiscoveryPatch(patchedSource, deps);
   patchedSource = applyIdeDiscoveryPatch(patchedSource, deps);
+  patchedSource = applyLinuxIconPathResolutionPatch(patchedSource);
   return patchedSource;
 }
 

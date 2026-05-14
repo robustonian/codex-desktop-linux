@@ -80,6 +80,8 @@ Environment:
                               Auto-detect WSLg, keep generic Linux defaults, or force the WSLg profile
   CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=0|1
                               Override the launcher's default --disable-gpu-compositing decision
+  CODEX_FORCE_RENDERER_ACCESSIBILITY=auto|0|1
+                              Override --force-renderer-accessibility; auto skips it under WSLg
 
 Logs: ${XDG_CACHE_HOME:-$HOME/.cache}/$CODEX_LINUX_APP_ID/launcher.log
 HELP
@@ -110,6 +112,53 @@ log_phase() {
     local elapsed_ms
     elapsed_ms="$(($(now_ms) - LAUNCHER_START_MS))"
     echo "[$(date -Is)] launcher_phase=$phase elapsedMs=$elapsed_ms"
+}
+
+make_tree_owner_writable() {
+    local path="$1"
+
+    [ -e "$path" ] || return 0
+    chmod -R u+rwX "$path" 2>/dev/null || true
+}
+
+remove_tree_if_exists() {
+    local path="$1"
+
+    [ -e "$path" ] || return 0
+    make_tree_owner_writable "$path"
+    rm -rf "$path"
+}
+
+fix_bundled_marketplace_tmp_permissions() {
+    local codex_home="${CODEX_HOME:-$HOME/.codex}"
+    local marketplace_tmp_root="$codex_home/.tmp/bundled-marketplaces"
+
+    [ -d "$marketplace_tmp_root" ] || return 0
+    find "$marketplace_tmp_root" -type d -exec chmod u+rwx {} + 2>/dev/null || true
+    find "$marketplace_tmp_root" -type f -exec chmod u+rw {} + 2>/dev/null || true
+}
+
+clear_bundled_marketplace_tmp_cache() {
+    local codex_home="${CODEX_HOME:-$HOME/.codex}"
+    local marketplace_tmp_root="$codex_home/.tmp/bundled-marketplaces"
+    local path
+
+    fix_bundled_marketplace_tmp_permissions
+    for path in "$marketplace_tmp_root"/openai-bundled "$marketplace_tmp_root"/openai-bundled.staging-*; do
+        [ -e "$path" ] || continue
+        remove_tree_if_exists "$path"
+    done
+}
+
+monitor_bundled_marketplace_tmp_permissions() {
+    (
+        local i=0
+        while [ "$i" -lt 300 ]; do
+            fix_bundled_marketplace_tmp_permissions
+            sleep 0.1
+            i=$((i + 1))
+        done
+    ) &
 }
 
 import_graphical_env_entry() {
@@ -357,16 +406,17 @@ sync_browser_use_bundled_plugin_cache() {
 
     cache_parent="$(dirname "$cache_plugin")"
     tmp_plugin="$cache_parent/.browser-use-$version.tmp.$$"
-    rm -rf "$tmp_plugin"
+    remove_tree_if_exists "$tmp_plugin"
     mkdir -p "$cache_parent"
 
     if cp -R "$source_plugin" "$tmp_plugin"; then
+        make_tree_owner_writable "$tmp_plugin"
         find "$tmp_plugin" -type f -name '*:com.apple.*' -delete
-        rm -rf "$cache_plugin"
+        remove_tree_if_exists "$cache_plugin"
         mv "$tmp_plugin" "$cache_plugin"
         echo "Browser Use plugin cache synced from bundled resources: $cache_plugin"
     else
-        rm -rf "$tmp_plugin"
+        remove_tree_if_exists "$tmp_plugin"
         echo "Browser Use plugin cache sync failed; continuing with existing cache."
     fi
 }
@@ -523,23 +573,24 @@ sync_chrome_bundled_plugin_cache() {
     if [ "$needs_copy" -eq 1 ]; then
         cache_parent="$(dirname "$cache_plugin")"
         tmp_plugin="$cache_parent/.chrome-$version.tmp.$$"
-        rm -rf "$tmp_plugin"
+        remove_tree_if_exists "$tmp_plugin"
         mkdir -p "$cache_parent"
 
         if cp -R "$source_plugin" "$tmp_plugin"; then
+            make_tree_owner_writable "$tmp_plugin"
             find "$tmp_plugin" -type f -name '*:com.apple.*' -delete
-            rm -rf "$cache_plugin"
+            remove_tree_if_exists "$cache_plugin"
             mv "$tmp_plugin" "$cache_plugin"
             echo "Chrome plugin cache synced from bundled resources: $cache_plugin"
         else
-            rm -rf "$tmp_plugin"
+            remove_tree_if_exists "$tmp_plugin"
             echo "Chrome plugin cache sync failed; continuing with existing cache."
             return 0
         fi
     fi
 
     if [ -e "$cache_root/latest" ] && [ ! -L "$cache_root/latest" ]; then
-        rm -rf "$cache_root/latest"
+        remove_tree_if_exists "$cache_root/latest"
     fi
     ln -sfn "$version" "$cache_root/latest"
 
@@ -554,7 +605,7 @@ sync_chrome_bundled_plugin_cache() {
             echo "Chrome bundled marketplace sync failed; continuing with existing marketplace cache."
     fi
     if [ -e "$marketplace_plugin_link" ] && [ ! -L "$marketplace_plugin_link" ]; then
-        rm -rf "$marketplace_plugin_link"
+        remove_tree_if_exists "$marketplace_plugin_link"
     fi
     ln -sfn "$cache_root/latest" "$marketplace_plugin_link"
 
@@ -611,16 +662,17 @@ sync_computer_use_bundled_plugin_cache() {
 
     cache_parent="$(dirname "$cache_plugin")"
     tmp_plugin="$cache_parent/.computer-use-$version.tmp.$$"
-    rm -rf "$tmp_plugin"
+    remove_tree_if_exists "$tmp_plugin"
     mkdir -p "$cache_parent"
 
     if cp -R "$source_plugin" "$tmp_plugin"; then
+        make_tree_owner_writable "$tmp_plugin"
         find "$tmp_plugin" -type f -name '*:com.apple.*' -delete
-        rm -rf "$cache_plugin"
+        remove_tree_if_exists "$cache_plugin"
         mv "$tmp_plugin" "$cache_plugin"
         echo "Computer Use plugin cache synced from bundled resources: $cache_plugin"
     else
-        rm -rf "$tmp_plugin"
+        remove_tree_if_exists "$tmp_plugin"
         echo "Computer Use plugin cache sync failed; continuing with existing cache."
     fi
 }
@@ -673,9 +725,11 @@ run_cli_preflight() {
 
     local -a preflight_args=(
         cli-preflight
-        --cli-path "$CODEX_CLI_PATH"
         --print-path
     )
+    if [ -n "${CODEX_CLI_PATH:-}" ]; then
+        preflight_args+=(--cli-path "$CODEX_CLI_PATH")
+    fi
     if [ "$allow_install_missing" = "1" ]; then
         preflight_args+=(--allow-install-missing)
     fi
@@ -701,7 +755,11 @@ run_cli_preflight_background() {
     fi
 
     (
-        if ! run_update_manager cli-preflight --cli-path "$CODEX_CLI_PATH" --print-path >/dev/null 2>&1; then
+        local -a args=(cli-preflight --print-path)
+        if [ -n "${CODEX_CLI_PATH:-}" ]; then
+            args+=(--cli-path "$CODEX_CLI_PATH")
+        fi
+        if ! run_update_manager "${args[@]}" >/dev/null 2>&1; then
             echo "Codex CLI background preflight failed. Continuing with the current CLI."
         fi
     ) &
@@ -717,7 +775,11 @@ run_gui_cli_prompt() {
     fi
 
     local refreshed_path=""
-    if ! refreshed_path="$(run_update_manager prompt-install-cli --cli-path "$CODEX_CLI_PATH" --print-path)"; then
+    local -a args=(prompt-install-cli --print-path)
+    if [ -n "${CODEX_CLI_PATH:-}" ]; then
+        args+=(--cli-path "$CODEX_CLI_PATH")
+    fi
+    if ! refreshed_path="$(run_update_manager "${args[@]}")"; then
         return 1
     fi
 
@@ -1047,7 +1109,7 @@ pid_has_webview_server_cmdline() {
     [ -d "/proc/$pid" ] || return 1
     pid_is_current_user "$pid" || return 1
     cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
-    [[ "$cmdline" == *"http.server $CODEX_LINUX_WEBVIEW_PORT"* ]]
+    [[ "$cmdline" == *"http.server $CODEX_LINUX_WEBVIEW_PORT"* || "$cmdline" == *"webview-server.py $CODEX_LINUX_WEBVIEW_PORT"* ]]
 }
 
 pid_is_webview_server() {
@@ -1244,7 +1306,7 @@ ensure_webview_server() {
     stop_owned_webview_server
 
     cd "$WEBVIEW_DIR"
-    python3 -m http.server "$CODEX_LINUX_WEBVIEW_PORT" --bind 127.0.0.1 &
+    python3 "$SCRIPT_DIR/.codex-linux/webview-server.py" "$CODEX_LINUX_WEBVIEW_PORT" --bind 127.0.0.1 &
     STARTED_WEBVIEW_PID=$!
     echo "$STARTED_WEBVIEW_PID" > "$WEBVIEW_PID_FILE"
 
@@ -1422,6 +1484,25 @@ should_disable_gpu_compositing() {
     [ "$ELECTRON_RENDERING_MODE" != "wslg" ]
 }
 
+should_force_renderer_accessibility() {
+    if [ -n "${CODEX_FORCE_RENDERER_ACCESSIBILITY:-}" ]; then
+        if truthy_env_value "$CODEX_FORCE_RENDERER_ACCESSIBILITY"; then
+            return 0
+        fi
+        if falsey_env_value "$CODEX_FORCE_RENDERER_ACCESSIBILITY"; then
+            return 1
+        fi
+        case "$CODEX_FORCE_RENDERER_ACCESSIBILITY" in
+            auto|AUTO|Auto) ;;
+            *)
+                echo "Invalid CODEX_FORCE_RENDERER_ACCESSIBILITY='${CODEX_FORCE_RENDERER_ACCESSIBILITY:-}'; using rendering profile default" >&2
+                ;;
+        esac
+    fi
+
+    [ "$ELECTRON_RENDERING_MODE" != "wslg" ]
+}
+
 set_electron_defaults() {
     ELECTRON_OZONE_PLATFORM=""
     ELECTRON_OZONE_HINT="auto"
@@ -1435,6 +1516,7 @@ set_electron_defaults() {
     ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS=0
     ELECTRON_GPU_COMPOSITING_DISABLED=0
     ELECTRON_GPU_COMPOSITING_SWITCH_PROVIDED=0
+    ELECTRON_RENDERER_ACCESSIBILITY_FORCED=0
     ELECTRON_ARGS=()
     local passthrough=0
 
@@ -1546,8 +1628,11 @@ build_electron_launch_args() {
         ELECTRON_LAUNCH_ARGS+=(--disable-gpu --disable-features=Vulkan)
     fi
 
-    if [ "${CODEX_FORCE_RENDERER_ACCESSIBILITY:-1}" = "1" ]; then
+    if should_force_renderer_accessibility; then
         ELECTRON_LAUNCH_ARGS+=(--force-renderer-accessibility)
+        ELECTRON_RENDERER_ACCESSIBILITY_FORCED=1
+    else
+        ELECTRON_RENDERER_ACCESSIBILITY_FORCED=0
     fi
 
     if [ "$ELECTRON_OZONE_PLATFORM" = "wayland" ]; then
@@ -1588,12 +1673,12 @@ launch_electron() {
     build_electron_launch_args
 
     if [ "$WARM_START" -eq 1 ]; then
-        echo "Electron warm-start handoff: pid=$RUNNING_APP_PID rendering_mode=$ELECTRON_RENDERING_MODE wslg_detected=$ELECTRON_WSLG_DETECTED ozone_platform=${ELECTRON_OZONE_PLATFORM:-default} ozone_hint=${ELECTRON_OZONE_HINT:-none} gpu_enabled=$ELECTRON_GPU_ENABLED gpu_disable_arg=$ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS gpu_compositing_disabled=$ELECTRON_GPU_COMPOSITING_DISABLED gl_switch_added=$ELECTRON_GL_SWITCH_ADDED"
+        echo "Electron warm-start handoff: pid=$RUNNING_APP_PID rendering_mode=$ELECTRON_RENDERING_MODE wslg_detected=$ELECTRON_WSLG_DETECTED ozone_platform=${ELECTRON_OZONE_PLATFORM:-default} ozone_hint=${ELECTRON_OZONE_HINT:-none} gpu_enabled=$ELECTRON_GPU_ENABLED gpu_disable_arg=$ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS gpu_compositing_disabled=$ELECTRON_GPU_COMPOSITING_DISABLED gl_switch_added=$ELECTRON_GL_SWITCH_ADDED renderer_accessibility_forced=$ELECTRON_RENDERER_ACCESSIBILITY_FORCED"
         "$SCRIPT_DIR/electron" "${ELECTRON_LAUNCH_ARGS[@]}" "${ELECTRON_ARGS[@]}"
         return $?
     fi
 
-    echo "Electron launch mode: rendering_mode=$ELECTRON_RENDERING_MODE wslg_detected=$ELECTRON_WSLG_DETECTED ozone_platform=${ELECTRON_OZONE_PLATFORM:-default} ozone_hint=${ELECTRON_OZONE_HINT:-none} gpu_enabled=$ELECTRON_GPU_ENABLED gpu_disable_arg=$ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS gpu_compositing_disabled=$ELECTRON_GPU_COMPOSITING_DISABLED gl_switch_added=$ELECTRON_GL_SWITCH_ADDED"
+    echo "Electron launch mode: rendering_mode=$ELECTRON_RENDERING_MODE wslg_detected=$ELECTRON_WSLG_DETECTED ozone_platform=${ELECTRON_OZONE_PLATFORM:-default} ozone_hint=${ELECTRON_OZONE_HINT:-none} gpu_enabled=$ELECTRON_GPU_ENABLED gpu_disable_arg=$ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS gpu_compositing_disabled=$ELECTRON_GPU_COMPOSITING_DISABLED gl_switch_added=$ELECTRON_GL_SWITCH_ADDED renderer_accessibility_forced=$ELECTRON_RENDERER_ACCESSIBILITY_FORCED"
     "$SCRIPT_DIR/electron" "${ELECTRON_LAUNCH_ARGS[@]}" "${ELECTRON_ARGS[@]}" &
     ELECTRON_PID=$!
     if [ -n "${RUNNING_APP_PID:-}" ] && pid_matches_executable "$RUNNING_APP_PID" "$SCRIPT_DIR/electron"; then
@@ -1678,6 +1763,10 @@ fi
 
 export_packaged_runtime_env
 if needs_cold_start; then
+    clear_bundled_marketplace_tmp_cache
+    # The runtime marketplace is populated asynchronously and can briefly
+    # recreate read-only plugin cache trees before the sync below replaces them.
+    monitor_bundled_marketplace_tmp_permissions
     sync_browser_use_bundled_plugin_cache
     sync_chrome_bundled_plugin_cache
     sync_computer_use_bundled_plugin_cache

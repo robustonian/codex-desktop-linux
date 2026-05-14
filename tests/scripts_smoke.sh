@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -72,7 +72,7 @@ JS
 
 make_fake_app() {
     local app_dir="$1"
-    "$REPO_DIR/tests/fixtures/create-packaged-app-fixture.sh" "$app_dir"
+    bash "$REPO_DIR/tests/fixtures/create-packaged-app-fixture.sh" "$app_dir"
 }
 
 make_stub_bin_dir() {
@@ -102,11 +102,11 @@ test_deb_builder_smoke() {
     mkdir -p "$workspace" "$dist_dir"
     make_stub_bin_dir "$bin_dir"
     make_fake_app "$app_dir"
-    printf '#!/bin/bash\nexit 0\n' > "$updater_bin"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$updater_bin"
     chmod +x "$updater_bin"
 
     cat > "$bin_dir/dpkg" <<'SCRIPT'
-#!/bin/bash
+#!/usr/bin/env bash
 if [ "$1" = "--print-architecture" ]; then
     echo amd64
     exit 0
@@ -114,13 +114,13 @@ fi
 exit 0
 SCRIPT
     cat > "$bin_dir/dpkg-deb" <<'SCRIPT'
-#!/bin/bash
+#!/usr/bin/env bash
 output="${@: -1}"
 mkdir -p "$(dirname "$output")"
 touch "$output"
 SCRIPT
     cat > "$bin_dir/cargo" <<'SCRIPT'
-#!/bin/bash
+#!/usr/bin/env bash
 echo "cargo should not be called when UPDATER_BINARY_SOURCE exists" >&2
 exit 99
 SCRIPT
@@ -132,7 +132,7 @@ SCRIPT
     DIST_DIR_OVERRIDE="$dist_dir" \
     UPDATER_BINARY_SOURCE="$updater_bin" \
     PACKAGE_VERSION="2026.03.24.120000+deadbeef" \
-    "$REPO_DIR/scripts/build-deb.sh"
+    bash "$REPO_DIR/scripts/build-deb.sh"
 
     assert_file_exists "$dist_dir/codex-desktop_2026.03.24.120000+deadbeef_amd64.deb"
     assert_file_exists "$pkg_root/DEBIAN/prerm"
@@ -145,8 +145,15 @@ SCRIPT
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/rebuild-report.sh"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/linux-features.js"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/linux-features.sh"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/linux-target-context.js"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/patches/engine.js"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/patches/registry.js"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/patches/shared.js"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/patches/core/all-linux/main-process/lifecycle/patch.js"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/patches/core/all-linux/webview/theme-and-sunset/patch.js"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/patches/core/distro/nixos/README.md"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/patches/core/desktop/i3/README.md"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/patches/core/package/deb/README.md"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/linux-features/README.md"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/linux-features/example-feature/feature.json"
     assert_file_not_exists "$pkg_root/opt/codex-desktop/update-builder/linux-features/features.json"
@@ -171,11 +178,11 @@ test_deb_builder_respects_package_identity() {
     mkdir -p "$workspace" "$dist_dir"
     make_stub_bin_dir "$bin_dir"
     make_fake_app "$app_dir"
-    printf '#!/bin/bash\nexit 0\n' > "$updater_bin"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$updater_bin"
     chmod +x "$updater_bin"
 
     cat > "$bin_dir/dpkg" <<'SCRIPT'
-#!/bin/bash
+#!/usr/bin/env bash
 if [ "$1" = "--print-architecture" ]; then
     echo amd64
     exit 0
@@ -183,13 +190,13 @@ fi
 exit 0
 SCRIPT
     cat > "$bin_dir/dpkg-deb" <<'SCRIPT'
-#!/bin/bash
+#!/usr/bin/env bash
 output="${@: -1}"
 mkdir -p "$(dirname "$output")"
 touch "$output"
 SCRIPT
     cat > "$bin_dir/cargo" <<'SCRIPT'
-#!/bin/bash
+#!/usr/bin/env bash
 echo "cargo should not be called when UPDATER_BINARY_SOURCE exists" >&2
 exit 99
 SCRIPT
@@ -203,7 +210,7 @@ SCRIPT
     PACKAGE_NAME="codex-cua-lab" \
     PACKAGE_DISPLAY_NAME="Codex CUA Lab" \
     PACKAGE_VERSION="2026.03.24.120000+deadbeef" \
-    "$REPO_DIR/scripts/build-deb.sh"
+    bash "$REPO_DIR/scripts/build-deb.sh"
 
     assert_file_exists "$dist_dir/codex-cua-lab_2026.03.24.120000+deadbeef_amd64.deb"
     assert_file_exists "$pkg_root/usr/bin/codex-cua-lab"
@@ -218,6 +225,122 @@ SCRIPT
     assert_contains "$pkg_root/opt/codex-cua-lab/.codex-linux/codex-packaged-runtime.sh" 'CHROME_DESKTOP="codex-cua-lab.desktop"'
 }
 
+test_deb_builder_without_updater() {
+    info "Running no-updater Debian packaging smoke test"
+    local workspace="$TMP_DIR/deb-no-updater"
+    local bin_dir="$workspace/bin"
+    local app_dir="$workspace/app"
+    local dist_dir="$workspace/dist"
+    local pkg_root="$workspace/deb-root"
+
+    mkdir -p "$workspace" "$dist_dir"
+    make_stub_bin_dir "$bin_dir"
+    make_fake_app "$app_dir"
+
+    cat > "$bin_dir/dpkg" <<'SCRIPT'
+#!/usr/bin/env bash
+if [ "$1" = "--print-architecture" ]; then
+    echo amd64
+    exit 0
+fi
+exit 0
+SCRIPT
+    cat > "$bin_dir/dpkg-deb" <<'SCRIPT'
+#!/usr/bin/env bash
+output="${@: -1}"
+mkdir -p "$(dirname "$output")"
+touch "$output"
+SCRIPT
+    cat > "$bin_dir/cargo" <<'SCRIPT'
+#!/usr/bin/env bash
+echo "cargo should not be called when PACKAGE_WITH_UPDATER=0" >&2
+exit 99
+SCRIPT
+    chmod +x "$bin_dir/dpkg" "$bin_dir/dpkg-deb" "$bin_dir/cargo"
+
+    PATH="$bin_dir:$PATH" \
+    APP_DIR_OVERRIDE="$app_dir" \
+    PKG_ROOT_OVERRIDE="$pkg_root" \
+    DIST_DIR_OVERRIDE="$dist_dir" \
+    PACKAGE_WITH_UPDATER=0 \
+    PACKAGE_VERSION="2026.03.24.120000+manual" \
+    bash "$REPO_DIR/scripts/build-deb.sh"
+
+    assert_file_exists "$dist_dir/codex-desktop_2026.03.24.120000+manual_amd64.deb"
+    assert_file_exists "$pkg_root/usr/bin/codex-desktop"
+    assert_file_exists "$pkg_root/DEBIAN/postinst"
+    assert_file_exists "$pkg_root/DEBIAN/prerm"
+    assert_file_exists "$pkg_root/opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh"
+    assert_file_exists "$pkg_root/opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh"
+    assert_file_not_exists "$pkg_root/usr/bin/codex-update-manager"
+    assert_file_not_exists "$pkg_root/usr/lib/systemd/user/codex-update-manager.service"
+    assert_file_not_exists "$pkg_root/usr/share/polkit-1/actions/com.github.ilysenko.codex-desktop-linux.update.policy"
+    assert_file_not_exists "$pkg_root/opt/codex-desktop/update-builder"
+    assert_file_not_exists "$pkg_root/DEBIAN/postrm"
+    assert_not_contains "$pkg_root/DEBIAN/control" "pkexec"
+    assert_not_contains "$pkg_root/DEBIAN/control" "polkit"
+    assert_not_contains "$pkg_root/DEBIAN/control" "Local auto-updates"
+    assert_contains "$pkg_root/DEBIAN/control" "without codex-update-manager"
+    assert_not_contains "$pkg_root/usr/share/applications/codex-desktop.desktop" "Actions=CheckForUpdates"
+    assert_not_contains "$pkg_root/usr/share/applications/codex-desktop.desktop" "Desktop Action CheckForUpdates"
+    assert_not_contains "$pkg_root/usr/share/applications/codex-desktop.desktop" "codex-update-manager"
+    assert_not_contains "$pkg_root/opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh" "systemctl"
+    assert_not_contains "$pkg_root/opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh" "codex-update-manager"
+    assert_contains "$pkg_root/opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh" 'CHROME_DESKTOP="codex-desktop.desktop"'
+    assert_contains "$pkg_root/opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh" "codex_no_updater_cleanup_update_manager_service"
+    assert_contains "$pkg_root/opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh" "stop \"\$SERVICE_NAME\""
+    assert_contains "$pkg_root/opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh" "disable \"\$SERVICE_NAME\""
+    assert_contains "$pkg_root/opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh" "daemon-reload"
+    assert_contains "$pkg_root/opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh" "codex_no_updater_cleanup_user_enablement_links"
+    assert_contains "$pkg_root/opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh" "default.target.wants"
+    assert_contains "$pkg_root/DEBIAN/postinst" "codex_no_updater_cleanup_update_manager_service"
+    assert_contains "$pkg_root/DEBIAN/prerm" "codex_no_updater_cleanup_update_manager_service"
+    assert_not_contains "$pkg_root/DEBIAN/postinst" "update-builder"
+    assert_not_contains "$pkg_root/DEBIAN/prerm" "update-builder"
+}
+
+test_no_updater_cleanup_helper_removes_inactive_user_enablement() {
+    info "Checking no-updater inactive user service cleanup"
+    local workspace="$TMP_DIR/no-updater-cleanup"
+    local bin_dir="$workspace/bin"
+    local helper="$workspace/codex-no-updater-transition-cleanup.sh"
+    local fake_home="$workspace/home/codexuser"
+    local service_link="$fake_home/.config/systemd/user/default.target.wants/codex-update-manager.service"
+
+    mkdir -p "$bin_dir" "$(dirname "$service_link")"
+    ln -s /usr/lib/systemd/user/codex-update-manager.service "$service_link"
+
+    render_no_updater_transition_cleanup_helper "$helper"
+
+    cat > "$bin_dir/getent" <<'SCRIPT'
+#!/usr/bin/env bash
+if [ "${1:-}" = "passwd" ]; then
+    printf 'codexuser:x:1000:1000::%s:/bin/sh\n' "$FAKE_HOME"
+fi
+SCRIPT
+    cat > "$bin_dir/runuser" <<'SCRIPT'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-u" ]; then
+    shift 2
+fi
+if [ "${1:-}" = "--" ]; then
+    shift
+fi
+exec "$@"
+SCRIPT
+    cat > "$bin_dir/systemctl" <<'SCRIPT'
+#!/usr/bin/env bash
+exit 0
+SCRIPT
+    chmod +x "$bin_dir/getent" "$bin_dir/runuser" "$bin_dir/systemctl"
+
+    PATH="$bin_dir:$PATH" FAKE_HOME="$fake_home" sh -c \
+        '. "$1"; codex_no_updater_cleanup_update_manager_service' \
+        _ "$helper"
+
+    assert_file_not_exists "$service_link"
+}
+
 test_rpm_builder_smoke() {
     info "Running RPM packaging smoke test"
     local workspace="$TMP_DIR/rpm"
@@ -225,16 +348,18 @@ test_rpm_builder_smoke() {
     local app_dir="$workspace/app"
     local dist_dir="$workspace/dist"
     local updater_bin="$workspace/codex-update-manager"
+    local capture_dir="$workspace/capture"
 
-    mkdir -p "$workspace" "$dist_dir"
+    mkdir -p "$workspace" "$dist_dir" "$capture_dir"
     make_stub_bin_dir "$bin_dir"
     make_fake_app "$app_dir"
-    printf '#!/bin/bash\nexit 0\n' > "$updater_bin"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$updater_bin"
     chmod +x "$updater_bin"
 
     cat > "$bin_dir/rpmbuild" <<'SCRIPT'
-#!/bin/bash
+#!/usr/bin/env bash
 rpmdir=""
+spec_file="${@: -1}"
 while [ $# -gt 0 ]; do
     if [ "$1" = "--define" ]; then
         case "$2" in
@@ -246,11 +371,18 @@ while [ $# -gt 0 ]; do
     shift
 done
 [ -n "$rpmdir" ] || exit 1
+if [ -n "${CAPTURE_DIR:-}" ]; then
+    cp "$spec_file" "$CAPTURE_DIR/codex-desktop.spec"
+    staging_dir="$(sed -n 's|cp -a "\(.*\)/\." "%{buildroot}/"|\1|p' "$spec_file" | head -n 1)"
+    if [ -n "$staging_dir" ] && [ -d "$staging_dir" ]; then
+        cp -a "$staging_dir" "$CAPTURE_DIR/staging"
+    fi
+fi
 mkdir -p "$rpmdir/x86_64"
 touch "$rpmdir/x86_64/codex-desktop-2026.03.24.120000-deadbeef.x86_64.rpm"
 SCRIPT
     cat > "$bin_dir/cargo" <<'SCRIPT'
-#!/bin/bash
+#!/usr/bin/env bash
 echo "cargo should not be called when UPDATER_BINARY_SOURCE exists" >&2
 exit 99
 SCRIPT
@@ -261,9 +393,83 @@ SCRIPT
     DIST_DIR_OVERRIDE="$dist_dir" \
     UPDATER_BINARY_SOURCE="$updater_bin" \
     PACKAGE_VERSION="2026.03.24.120000+deadbeef" \
-    "$REPO_DIR/scripts/build-rpm.sh"
+    bash "$REPO_DIR/scripts/build-rpm.sh"
 
     assert_file_exists "$dist_dir/codex-desktop-2026.03.24.120000-deadbeef.x86_64.rpm"
+
+    rm -rf "$dist_dir" "$capture_dir"
+    mkdir -p "$dist_dir" "$capture_dir"
+
+    PATH="$bin_dir:$PATH" \
+    CAPTURE_DIR="$capture_dir" \
+    APP_DIR_OVERRIDE="$app_dir" \
+    DIST_DIR_OVERRIDE="$dist_dir" \
+    PACKAGE_WITH_UPDATER=0 \
+    PACKAGE_VERSION="2026.03.24.120000+manual" \
+    bash "$REPO_DIR/scripts/build-rpm.sh"
+
+    assert_file_exists "$dist_dir/codex-desktop-2026.03.24.120000-manual.x86_64.rpm"
+    assert_file_exists "$capture_dir/codex-desktop.spec"
+    assert_file_exists "$capture_dir/staging/opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh"
+    assert_file_not_exists "$capture_dir/staging/usr/bin/codex-update-manager"
+    assert_file_not_exists "$capture_dir/staging/usr/lib/systemd/user/codex-update-manager.service"
+    assert_file_not_exists "$capture_dir/staging/usr/share/polkit-1/actions/com.github.ilysenko.codex-desktop-linux.update.policy"
+    assert_file_not_exists "$capture_dir/staging/opt/codex-desktop/update-builder"
+    assert_contains "$capture_dir/codex-desktop.spec" "%if 0"
+    assert_contains "$capture_dir/codex-desktop.spec" "codex_no_updater_cleanup_update_manager_service"
+    assert_contains "$capture_dir/staging/opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh" "codex_no_updater_cleanup_user_enablement_links"
+}
+
+test_pacman_builder_without_updater_transition_hook() {
+    info "Running no-updater pacman packaging hook smoke test"
+    if [ "$(id -u)" -eq 0 ]; then
+        info "Skipping pacman no-updater hook smoke test as root"
+        return
+    fi
+
+    local workspace="$TMP_DIR/pacman-no-updater"
+    local bin_dir="$workspace/bin"
+    local app_dir="$workspace/app"
+    local dist_dir="$workspace/dist"
+    local capture_dir="$workspace/capture"
+
+    mkdir -p "$workspace" "$dist_dir" "$capture_dir"
+    make_stub_bin_dir "$bin_dir"
+    make_fake_app "$app_dir"
+
+    cat > "$bin_dir/makepkg" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+cp PKGBUILD "$CAPTURE_DIR/PKGBUILD"
+cp codex-desktop.install "$CAPTURE_DIR/codex-desktop.install"
+mkdir -p "$PKGDEST"
+touch "$PKGDEST/codex-desktop-2026.03.24.120000-1-x86_64.pkg.tar.zst"
+SCRIPT
+    cat > "$bin_dir/cargo" <<'SCRIPT'
+#!/usr/bin/env bash
+echo "cargo should not be called when PACKAGE_WITH_UPDATER=0" >&2
+exit 99
+SCRIPT
+    chmod +x "$bin_dir/makepkg" "$bin_dir/cargo"
+
+    PATH="$bin_dir:$PATH" \
+    CAPTURE_DIR="$capture_dir" \
+    APP_DIR_OVERRIDE="$app_dir" \
+    DIST_DIR_OVERRIDE="$dist_dir" \
+    PACKAGE_WITH_UPDATER=0 \
+    PACKAGE_VERSION="2026.03.24.120000+manual" \
+    bash "$REPO_DIR/scripts/build-pacman.sh"
+
+    assert_file_exists "$dist_dir/codex-desktop-2026.03.24.120000-1-x86_64.pkg.tar.zst"
+    assert_file_exists "$capture_dir/PKGBUILD"
+    assert_file_exists "$capture_dir/codex-desktop.install"
+    assert_contains "$capture_dir/PKGBUILD" "install=codex-desktop.install"
+    assert_not_contains "$capture_dir/PKGBUILD" "'polkit'"
+    assert_contains "$capture_dir/codex-desktop.install" "codex_no_updater_cleanup_update_manager_service"
+    assert_contains "$capture_dir/codex-desktop.install" "post_upgrade"
+    assert_contains "$capture_dir/codex-desktop.install" "pre_remove"
+    assert_contains "$capture_dir/codex-desktop.install" "codex-no-updater-transition-cleanup.sh"
+    assert_not_contains "$capture_dir/codex-desktop.install" "update-builder"
 }
 
 test_missing_input_failure() {
@@ -277,20 +483,20 @@ test_missing_input_failure() {
     make_stub_bin_dir "$bin_dir"
     make_fake_app "$rpm_app_dir"
     cat > "$bin_dir/dpkg" <<'SCRIPT'
-#!/bin/bash
+#!/usr/bin/env bash
 echo amd64
 SCRIPT
     cat > "$bin_dir/dpkg-deb" <<'SCRIPT'
-#!/bin/bash
+#!/usr/bin/env bash
 exit 0
 SCRIPT
     chmod +x "$bin_dir/dpkg" "$bin_dir/dpkg-deb"
 
-    if PATH="$bin_dir:$PATH" APP_DIR_OVERRIDE="$workspace/does-not-exist" PKG_ROOT_OVERRIDE="$workspace/deb-root" "$REPO_DIR/scripts/build-deb.sh" >/dev/null 2>&1; then
+    if PATH="$bin_dir:$PATH" APP_DIR_OVERRIDE="$workspace/does-not-exist" PKG_ROOT_OVERRIDE="$workspace/deb-root" bash "$REPO_DIR/scripts/build-deb.sh" >/dev/null 2>&1; then
         fail "build-deb.sh should fail when APP_DIR is missing"
     fi
 
-    if APP_DIR_OVERRIDE="$rpm_app_dir" PACKAGED_RUNTIME_SOURCE="$workspace/does-not-exist.sh" "$REPO_DIR/scripts/build-rpm.sh" >"$rpm_log" 2>&1; then
+    if APP_DIR_OVERRIDE="$rpm_app_dir" PACKAGED_RUNTIME_SOURCE="$workspace/does-not-exist.sh" bash "$REPO_DIR/scripts/build-rpm.sh" >"$rpm_log" 2>&1; then
         fail "build-rpm.sh should fail when PACKAGED_RUNTIME_SOURCE is missing"
     fi
     assert_contains "$rpm_log" "Missing packaged launcher runtime helper"
@@ -304,7 +510,7 @@ test_make_build_app_uses_installer_download_flow_by_default() {
     mkdir -p "$workspace"
 
     cat > "$workspace/install.sh" <<'SCRIPT'
-#!/bin/bash
+#!/usr/bin/env bash
 set -eu
 printf '%s\n' "$#" > "$TEST_INSTALL_LOG"
 if [ "$#" -gt 0 ]; then
@@ -404,7 +610,7 @@ test_managed_node_runtime_source_install() {
     mkdir -p "$source_dir/bin" "$install_dir/resources"
     for binary in node npm npx; do
         cat > "$source_dir/bin/$binary" <<'SCRIPT'
-#!/bin/bash
+#!/usr/bin/env bash
 case "$(basename "$0")" in
     node) echo v22.22.2 ;;
     *) echo 10.9.7 ;;
@@ -444,9 +650,16 @@ test_launcher_template_sanity() {
     assert_contains "$REPO_DIR/scripts/lib/rebuild-report.sh" "write_rebuild_report_json"
     assert_contains "$REPO_DIR/install.sh" "MIN_BETTER_SQLITE3_VERSION_FOR_ELECTRON_41=\"12.9.0\""
     assert_contains "$REPO_DIR/scripts/lib/native-modules.sh" "better_sqlite3_build_version"
+    assert_contains "$REPO_DIR/scripts/lib/native-modules.sh" "prune_native_module_build_artifacts"
+    assert_contains "$REPO_DIR/scripts/lib/native-modules.sh" 'find "$build_dir" -type f ! -name'
+    assert_contains "$REPO_DIR/scripts/lib/native-modules.sh" 'find "$module_dir" -type f -name'
     assert_contains "$REPO_DIR/scripts/lib/native-modules.sh" "CODEX_ELECTRON_CACHE_DIR"
     assert_contains "$REPO_DIR/scripts/lib/native-modules.sh" "--continue-at -"
-    assert_contains "$REPO_DIR/launcher/start.sh.template" 'python3 -m http.server "$CODEX_LINUX_WEBVIEW_PORT" --bind 127.0.0.1'
+    assert_file_exists "$REPO_DIR/launcher/webview-server.py"
+    assert_contains "$REPO_DIR/launcher/webview-server.py" "Cache-Control"
+    assert_contains "$REPO_DIR/launcher/webview-server.py" "If-Modified-Since"
+    assert_contains "$REPO_DIR/install.sh" "webview-server.py"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" 'python3 "$SCRIPT_DIR/.codex-linux/webview-server.py" "$CODEX_LINUX_WEBVIEW_PORT" --bind 127.0.0.1'
     assert_contains "$REPO_DIR/launcher/start.sh.template" "WEBVIEW_PID_FILE"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "owned_webview_server_pid"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "discover_webview_server_pid"
@@ -492,6 +705,10 @@ if "using_second_instance_handoff" not in source or "needs_cold_start" not in so
     raise SystemExit("launcher must have an explicit second-instance handoff mode")
 if "second_instance_handoff_ready" not in runtime_body:
     raise SystemExit("second-instance handoff must skip cold-start setup")
+if "clear_bundled_marketplace_tmp_cache\nmonitor_bundled_marketplace_tmp_permissions\nreconcile_runtime_state" in runtime_body:
+    raise SystemExit("warm-start path must not clear bundled marketplace temp cache")
+if not re.search(r'if needs_cold_start; then\s+clear_bundled_marketplace_tmp_cache\s+# The runtime marketplace is populated asynchronously.*?monitor_bundled_marketplace_tmp_permissions\s+sync_browser_use_bundled_plugin_cache', runtime_body, re.S):
+    raise SystemExit("bundled marketplace cleanup must run only on cold start immediately before plugin sync")
 if 'if needs_cold_start && [ -z "${CODEX_CLI_PATH:-}" ]; then' not in runtime_body:
     raise SystemExit("second-instance handoff must skip CLI lookup")
 if 'if needs_cold_start && [ -z "$CODEX_CLI_PATH" ]; then' not in runtime_body:
@@ -535,14 +752,14 @@ source_path, output_path = sys.argv[1:3]
 source = open(source_path, encoding="utf-8").read()
 start = source.index("is_wsl_environment() {")
 end = source.index("configure_side_by_side_app_env() {")
-probe = "#!/bin/bash\n" + source[start:end] + r'''
+probe = "#!/usr/bin/env bash\n" + source[start:end] + r'''
 set -Eeuo pipefail
 
 CODEX_LINUX_APP_ID="${CODEX_LINUX_APP_ID:-codex-desktop}"
 APP_STATE_DIR="${APP_STATE_DIR:-/tmp/codex-launcher-probe-state}"
 
 print_state() {
-    printf 'mode=%s wslg=%s ozone_platform=%s ozone_hint=%s gpu=%s gpu_arg=%s comp=%s gl_added=%s launch=' \
+    printf 'mode=%s wslg=%s ozone_platform=%s ozone_hint=%s gpu=%s gpu_arg=%s comp=%s gl_added=%s renderer_accessibility=%s launch=' \
         "$ELECTRON_RENDERING_MODE" \
         "$ELECTRON_WSLG_DETECTED" \
         "${ELECTRON_OZONE_PLATFORM:-}" \
@@ -550,7 +767,8 @@ print_state() {
         "$ELECTRON_GPU_ENABLED" \
         "$ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS" \
         "$ELECTRON_GPU_COMPOSITING_DISABLED" \
-        "$ELECTRON_GL_SWITCH_ADDED"
+        "$ELECTRON_GL_SWITCH_ADDED" \
+        "$ELECTRON_RENDERER_ACCESSIBILITY_FORCED"
     for arg in "${ELECTRON_LAUNCH_ARGS[@]}"; do
         printf '<%s>' "$arg"
     done
@@ -582,6 +800,7 @@ PY
     [[ "$output" == *"electron=<--use-gl=angle>"* ]] || fail "launcher must pass Electron args after -- without the separator: $output"
     [[ "$output" != *"electron=<--><--use-gl=angle>"* ]] || fail "launcher must not pass the -- separator to Electron: $output"
     [[ "$output" == *"<--ozone-platform=x11>"* ]] || fail "launcher --x11 must still set the Electron ozone platform: $output"
+    [[ "$output" == *"renderer_accessibility=1"* && "$output" == *"<--force-renderer-accessibility>"* ]] || fail "default Linux profile must still force renderer accessibility: $output"
 
     output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=default "$launcher_probe" probe -- --ozone-platform=x11)"
     [[ "$output" == *"electron=<--ozone-platform=x11>"* ]] || fail "pass-through ozone platform must reach Electron: $output"
@@ -591,6 +810,13 @@ PY
     [[ "$output" == *"mode=wslg"* && "$output" == *"comp=0"* && "$output" == *"gl_added=1"* ]] || fail "forced WSLg profile must disable GPU compositing default and add ANGLE: $output"
     [[ "$output" == *"<--ozone-platform=x11>"* && "$output" == *"electron=<--use-gl=angle>"* ]] || fail "forced WSLg profile must use X11 and ANGLE by default: $output"
     [[ "$output" != *"<--disable-gpu-compositing>"* ]] || fail "forced WSLg profile must not add disable-gpu-compositing by default: $output"
+    [[ "$output" == *"renderer_accessibility=0"* && "$output" != *"<--force-renderer-accessibility>"* ]] || fail "forced WSLg profile must skip renderer accessibility by default: $output"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wslg CODEX_FORCE_RENDERER_ACCESSIBILITY=1 "$launcher_probe" probe)"
+    [[ "$output" == *"renderer_accessibility=1"* && "$output" == *"<--force-renderer-accessibility>"* ]] || fail "CODEX_FORCE_RENDERER_ACCESSIBILITY=1 must force renderer accessibility under WSLg: $output"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=default CODEX_FORCE_RENDERER_ACCESSIBILITY=0 "$launcher_probe" probe)"
+    [[ "$output" == *"renderer_accessibility=0"* && "$output" != *"<--force-renderer-accessibility>"* ]] || fail "CODEX_FORCE_RENDERER_ACCESSIBILITY=0 must disable renderer accessibility under default Linux: $output"
 
     output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wslg "$launcher_probe" probe --wayland --use-gl=desktop)"
     [[ "$output" == *"<--ozone-platform=wayland>"* && "$output" == *"electron=<--use-gl=desktop>"* ]] || fail "explicit rendering args must override WSLg defaults: $output"
@@ -627,6 +853,7 @@ PY
     assert_contains "$REPO_DIR/launcher/start.sh.template" '--ozone-platform-hint="$ELECTRON_OZONE_HINT"'
     assert_contains "$REPO_DIR/launcher/start.sh.template" "--disable-gpu-sandbox"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "--force-renderer-accessibility"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" "CODEX_FORCE_RENDERER_ACCESSIBILITY=auto|0|1"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "PACKAGED_RUNTIME_HELPER"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "--allow-install-missing"
     assert_contains "$REPO_DIR/scripts/lib/process-detection.sh" "CODEX_INSTALL_ALLOW_RUNNING"
@@ -640,6 +867,9 @@ PY
     assert_contains "$REPO_DIR/launcher/start.sh.template" "run_update_manager"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "sync_browser_use_bundled_plugin_cache"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "sync_chrome_bundled_plugin_cache"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" "make_tree_owner_writable"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" "clear_bundled_marketplace_tmp_cache"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" "monitor_bundled_marketplace_tmp_permissions"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "extension-id.json"
     assert_contains "$REPO_DIR/launcher/start.sh.template" ".config/BraveSoftware/Brave-Browser/NativeMessagingHosts"
     assert_contains "$REPO_DIR/launcher/start.sh.template" ".config/chromium/NativeMessagingHosts"
@@ -711,6 +941,7 @@ test_side_by_side_launcher_identity() {
     bash -c 'source "$1"; validate_app_identity; create_start_script' _ "$REPO_DIR/install.sh"
 
     assert_file_exists "$app_dir/start.sh"
+    assert_file_exists "$app_dir/.codex-linux/webview-server.py"
     assert_contains "$app_dir/start.sh" "CODEX_LINUX_APP_ID=codex-cua-lab"
     assert_contains "$app_dir/start.sh" "CODEX_LINUX_APP_DISPLAY_NAME=Codex\\\\ CUA\\\\ Lab"
     assert_contains "$app_dir/start.sh" 'CODEX_LINUX_WEBVIEW_PORT=${CODEX_WEBVIEW_PORT:-5176}'
@@ -724,12 +955,12 @@ test_side_by_side_launcher_identity() {
     assert_contains "$app_dir/start.sh" '--user-data-dir="${CODEX_ELECTRON_USER_DATA_DIR:-$APP_STATE_DIR/electron-user-data}"'
     assert_contains "$app_dir/start.sh" "--force-renderer-accessibility"
     assert_contains "$app_dir/start.sh" 'LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/$CODEX_LINUX_APP_ID"'
-    XDG_CACHE_HOME="$workspace/cache" XDG_STATE_HOME="$workspace/state" XDG_RUNTIME_DIR="$workspace/runtime" "$app_dir/start.sh" --help >"$help_log"
+    XDG_CACHE_HOME="$workspace/cache" XDG_STATE_HOME="$workspace/state" XDG_RUNTIME_DIR="$workspace/runtime" bash "$app_dir/start.sh" --help >"$help_log"
     assert_contains "$help_log" "Launches the Codex CUA Lab app."
     assert_contains "$help_log" "codex-cua-lab/launcher.log"
 
     ln -s "$app_dir/start.sh" "$bin_dir/codex-cua-lab"
-    XDG_CACHE_HOME="$workspace/cache" XDG_STATE_HOME="$workspace/state" XDG_RUNTIME_DIR="$workspace/runtime" "$bin_dir/codex-cua-lab" --help >"$symlink_help_log"
+    XDG_CACHE_HOME="$workspace/cache" XDG_STATE_HOME="$workspace/state" XDG_RUNTIME_DIR="$workspace/runtime" bash "$bin_dir/codex-cua-lab" --help >"$symlink_help_log"
     assert_contains "$symlink_help_log" "Launches the Codex CUA Lab app."
 }
 
@@ -747,6 +978,7 @@ test_browser_use_node_repl_fallback_runtime() {
     local archive="$workspace/runtime.tar.xz"
     local output_log="$workspace/output.log"
     local archive_sha
+    local true_bin
 
     mkdir -p "$workspace" "$install_dir/resources" "$archive_root/codex-primary-runtime/dependencies/bin"
     make_fake_browser_use_upstream_app "$app_dir"
@@ -755,7 +987,8 @@ test_browser_use_node_repl_fallback_runtime() {
     printf '\xfe\xed\xfa\xcf' > "$app_dir/Contents/Resources/node_repl"
     chmod +x "$app_dir/Contents/Resources/node_repl"
 
-    cp /bin/true "$archive_root/codex-primary-runtime/dependencies/bin/node_repl"
+    true_bin="$(type -P true)"
+    cp "$true_bin" "$archive_root/codex-primary-runtime/dependencies/bin/node_repl"
     chmod 0755 "$archive_root/codex-primary-runtime/dependencies/bin/node_repl"
     tar -cJf "$archive" -C "$archive_root" codex-primary-runtime
     archive_sha="$(sha256sum "$archive" | awk '{print $1}')"
@@ -790,11 +1023,41 @@ test_browser_use_node_repl_fallback_runtime() {
 
     assert_file_exists "$install_dir/resources/node_repl"
     assert_file_exists "$install_dir/resources/plugins/openai-bundled/plugins/browser-use/scripts/browser-client.mjs"
-    cmp -s /bin/true "$install_dir/resources/node_repl" || fail "Expected fallback node_repl to come from the runtime archive"
+    cmp -s "$true_bin" "$install_dir/resources/node_repl" || fail "Expected fallback node_repl to come from the runtime archive"
     assert_contains "$install_dir/resources/plugins/openai-bundled/plugins/browser-use/scripts/browser-client.mjs" "codexLinuxSiteStatusAllowlistFallback"
     assert_contains "$output_log" "Browser Use node_repl runtime is not a Linux executable for x86_64; skipping"
     assert_not_contains "$output_log" "WARN.*Browser Use node_repl runtime is not a Linux executable"
     assert_contains "$output_log" "Downloading Browser Use node_repl fallback runtime"
+}
+
+test_browser_use_node_repl_glibc_pidfd_patch_static() {
+    info "Checking Browser Use node_repl glibc pidfd patch scope"
+    assert_contains "$REPO_DIR/scripts/lib/bundled-plugins.sh" "patch_browser_use_node_repl_glibc_pidfd_symbols"
+    assert_contains "$REPO_DIR/scripts/lib/bundled-plugins.sh" "is_browser_use_node_repl_ldd_output_compatible"
+    assert_contains "$REPO_DIR/scripts/lib/bundled-plugins.sh" "install_browser_use_node_repl_executable_resource"
+    assert_contains "$REPO_DIR/scripts/lib/bundled-plugins.sh" "pidfd_spawnp"
+    assert_contains "$REPO_DIR/scripts/lib/bundled-plugins.sh" "pidfd_getpid"
+    assert_contains "$REPO_DIR/scripts/lib/bundled-plugins.sh" "GLIBC_2.39"
+    assert_contains "$REPO_DIR/scripts/lib/bundled-plugins.sh" "GLIBC_2.34"
+    assert_contains "$REPO_DIR/scripts/lib/bundled-plugins.sh" "non-pidfd GLIBC_2.39 references remain"
+    assert_contains "$REPO_DIR/scripts/lib/bundled-plugins.sh" 'ldd "$destination"'
+}
+
+test_browser_use_node_repl_ldd_output_compatibility() {
+    info "Checking Browser Use node_repl ldd output compatibility gate"
+    # shellcheck disable=SC1091
+    source "$REPO_DIR/scripts/lib/bundled-plugins.sh"
+
+    if is_browser_use_node_repl_ldd_output_compatible "/node_repl: /lib/x86_64-linux-gnu/libc.so.6: version 'GLIBC_2.39' not found (required by /node_repl)"; then
+        fail "Expected ldd GLIBC version errors to be rejected"
+    fi
+
+    if is_browser_use_node_repl_ldd_output_compatible "libmissing.so => not found"; then
+        fail "Expected unresolved ldd libraries to be rejected"
+    fi
+
+    is_browser_use_node_repl_ldd_output_compatible "libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6" \
+        || fail "Expected ordinary ldd output to be accepted"
 }
 
 make_fake_chrome_upstream_app() {
@@ -2187,7 +2450,10 @@ main() {
     test_common_helper_sourcing
     test_deb_builder_smoke
     test_deb_builder_respects_package_identity
+    test_deb_builder_without_updater
+    test_no_updater_cleanup_helper_removes_inactive_user_enablement
     test_rpm_builder_smoke
+    test_pacman_builder_without_updater_transition_hook
     test_missing_input_failure
     test_make_build_app_uses_installer_download_flow_by_default
     test_upstream_build_app_workflow_tracks_dmg_metadata
@@ -2195,6 +2461,8 @@ main() {
     test_installer_keeps_electron_fallback_for_bad_metadata
     test_managed_node_runtime_source_install
     test_browser_use_node_repl_fallback_runtime
+    test_browser_use_node_repl_glibc_pidfd_patch_static
+    test_browser_use_node_repl_ldd_output_compatibility
     test_chrome_plugin_staging
     test_chrome_native_host_manifest_writer
     test_launcher_template_sanity

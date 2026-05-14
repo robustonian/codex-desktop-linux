@@ -48,6 +48,7 @@ The current working flow is:
 - `bundled-plugins.sh` — Browser Use, Chrome, and Linux Computer Use plugin staging; Chrome native-host injection; Linux Computer Use backend build; COSMIC helper build; bundled-plugin marketplace generation.
 - `patch-chrome-plugin.js` — Linux compatibility patcher for the upstream bundled Chrome plugin scripts. Adds Linux manifest checks, Chrome/Brave/Chromium native-host manifest coverage, Linux browser profile fallback, and Brave/Chromium-aware diagnostics when upstream has not already shipped them.
 - `linux-update-bridge-patch.js` — injects the Electron-side bridge that lets the in-app menu trigger the local `codex-update-manager` (status read, install-after-quit shell helper, `codexLinuxQuitForUpdate` glue).
+- `linux-target-context.js` — Linux target detection used by patch descriptors. Reads `/etc/os-release` plus env overrides and exposes helpers such as `matchesId()`, `packageFormatIs()`, `packageManagerIs()`, `desktopMatches()`, and `versionAtLeast()`.
 - `patch-report.js` — shared helpers for building `patch-report.json` (status capture, warning capture, `recordPatch`, `writePatchReport`).
 - `rebuild-report.sh` — writes `rebuild-report.json` (DMG path, Electron version, patch report, app dir) used by the rebuild candidate flow.
 - `package-common.sh` — shared shell helpers used by the native package builders (versioning, payload staging, user-service helper installation).
@@ -56,7 +57,9 @@ The current working flow is:
 ### Patch registry (`scripts/patches/`)
 
 - `scripts/patch-linux-window-ui.js` — ASAR patcher CLI and compatibility export surface. Implementation lives under `scripts/patches/`.
-- `scripts/patches/registry.js` — source of truth for patch order and CI policy. Builds main-bundle, webview-asset, and Computer Use UI asset patch lists; drives `patchExtractedApp` and `patchMainBundleSource`. Adds enabled `linux-features/*/patch.js` patches at the end of the main-bundle list.
+- `scripts/patches/engine.js` — auto-discovers `scripts/patches/core/**/patch.js`, normalizes patch descriptors, enforces duplicate-id checks, applies target filters, and records structured patch-report metadata.
+- `scripts/patches/core/` — source of truth for shipped Linux compatibility patch descriptors, grouped by target namespace (`all-linux/`, `distro/`, `package/`, `desktop/`). Add new shipped patchers as `patch.js` descriptors here; each descriptor declares phase/order/CI policy and self-filters with `appliesTo(context)` when it is distro/package/desktop-specific.
+- `scripts/patches/registry.js` — orchestrates discovered core descriptors, enabled `linux-features/*/patch.js` descriptors, and the aggregate `main-process-ui` report entry; drives `patchExtractedApp` and `patchMainBundleSource`.
 - `scripts/patches/main-process.js` — Linux quit guard, single-instance, tray, file-manager, window options, set-icon, opaque background, avatar overlay passthrough, Chrome extension status, Browser Use NodeREPL approval, and other main-process needles.
 - `scripts/patches/computer-use.js` — Linux Computer Use plugin gate (default-on) and the opt-in UI patches; owns `isComputerUseUiEnabled()`.
 - `scripts/patches/launch-actions.js` — launch-action Unix-domain socket listener, hotkey-window prewarm, settings persistence, tray-close setting.
@@ -141,7 +144,7 @@ The current working flow is:
 - `linux-features/features.example.json` — empty `{ "enabled": [] }` template. The active `linux-features/features.json` is gitignored so per-developer choices do not leak into commits.
 - `linux-features/example-feature/` — disabled-by-default sample: `feature.json`, `README.md`, optional `patch.js` (`applyMainBundlePatch(source, context)`), optional `stage.sh` (run with `SCRIPT_DIR`/`INSTALL_DIR`/`WORK_DIR`/`ARCH`/`CODEX_UPSTREAM_APP_DIR`), optional `test.js`. Run feature tests with `node --test linux-features/*/test.js`.
 
-Core Linux compatibility patches still live in `scripts/patches/`. Use `linux-features/` for additions that are useful for some users but should not ship to every Linux build.
+Core Linux compatibility patch descriptors live in `scripts/patches/core/`. Use `linux-features/` for additions that are useful for some users but should not ship to every Linux build.
 
 ### User-local install (`contrib/user-local-install/`)
 
@@ -191,7 +194,7 @@ This path is for users who do not want a system-wide native package; the daily-d
 - CLI preflight:
   Before Electron launches, the generated launcher asks `codex-update-manager` to verify the installed Codex CLI, prompt to install it when it is missing, and update it if the npm package is newer. Terminal launches prompt inline; GUI launches prefer `kdialog` on KDE/Plasma, otherwise `zenity`, before falling back to an actionable desktop notification. Missing-CLI automatic installation is launcher-scoped: the daemon and `codex-update-manager status` report `cli_status: NotInstalled` and may notify, but they do not attempt installation on their own. The check is best-effort: it uses a 1-hour cooldown for npm registry lookups, caches local CLI version reads to keep startup light, falls back to `npm install -g --prefix ~/.local` if a global install fails, and warns instead of blocking app launch when the refresh attempt does not succeed.
 - ASAR patches are independent and fail-soft:
-  `scripts/patches/registry.js` is the source of truth for patch order and CI policy. Each patch function has its own regex-driven needles, an idempotency check, and a `console.warn` fall-back when the upstream bundle drifts. Current groups: main-process shell/window patches, webview asset patches, keybinds settings, launch actions, Computer Use gates, package metadata, and any opt-in `linux-features/` patches that have been enabled. The wrapper `scripts/patch-linux-window-ui.js` keeps the old CLI and test export surface. When adding a new needle, mirror this pattern — never `throw` unless the existing patch is intentionally required.
+  `scripts/patches/core/**/patch.js` descriptors are the source of truth for shipped patch order, phase, target filter, and CI policy; `scripts/patches/registry.js` discovers and orchestrates them. Each patch function has its own regex-driven needles, an idempotency check, and a `console.warn` fall-back when the upstream bundle drifts. Current groups: main-process shell/window patches, webview asset patches, keybinds settings, launch actions, Computer Use gates, package metadata, and any opt-in `linux-features/` patches that have been enabled. The wrapper `scripts/patch-linux-window-ui.js` keeps the old CLI and test export surface. When adding a new needle, mirror this pattern — never `throw` unless the existing patch is intentionally required.
 - Patch reporting and CI gate:
   `scripts/lib/patch-report.js` produces `patch-report.json` for each install (and `rebuild-report.sh` rolls it into `rebuild-report.json` under `dist-next/rebuild/`). `scripts/ci/validate-patch-report.js` reads that report and fails upstream-build CI when a `required-upstream` patch is missing or skipped. Mark new patches with `ciPolicy: REQUIRED_UPSTREAM` only when their absence should block CI.
 - Linux features framework:

@@ -153,6 +153,220 @@ install_linux_executable_resource() {
     install -m 0755 "$source" "$destination"
 }
 
+patch_browser_use_node_repl_glibc_pidfd_symbols() {
+    local file="$1"
+    python3 - "$file" <<'PY'
+import pathlib
+import struct
+import sys
+
+# node_repl only needs these pidfd symbols opportunistically. Keeping their
+# GLIBC_2.39 version binding makes the whole binary fail to load on glibc
+# 2.34-2.38.
+
+path = pathlib.Path(sys.argv[1])
+data = bytearray(path.read_bytes())
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+def read_cstr(blob, offset):
+    if offset < 0 or offset >= len(blob):
+        return ""
+    end = blob.find(b"\0", offset)
+    if end == -1:
+        end = len(blob)
+    return blob[offset:end].decode("utf-8", "replace")
+
+
+def elf_hash(name):
+    value = 0
+    for byte in name.encode("utf-8"):
+        value = (value << 4) + byte
+        high = value & 0xF0000000
+        if high:
+            value ^= high >> 24
+            value &= ~high
+    return value & 0xFFFFFFFF
+
+
+if len(data) < 64 or data[:4] != b"\x7fELF":
+    sys.exit(0)
+if data[4] != 2 or data[5] != 1:
+    sys.exit(0)
+
+e_machine = struct.unpack_from("<H", data, 18)[0]
+if e_machine != 62:
+    sys.exit(0)
+
+e_shoff = struct.unpack_from("<Q", data, 40)[0]
+e_shentsize = struct.unpack_from("<H", data, 58)[0]
+e_shnum = struct.unpack_from("<H", data, 60)[0]
+e_shstrndx = struct.unpack_from("<H", data, 62)[0]
+
+if e_shoff == 0 or e_shentsize < 64 or e_shnum == 0 or e_shstrndx >= e_shnum:
+    sys.exit(0)
+if e_shoff + (e_shnum * e_shentsize) > len(data):
+    fail("ELF section table is outside file bounds")
+
+sections = []
+for index in range(e_shnum):
+    offset = e_shoff + (index * e_shentsize)
+    fields = struct.unpack_from("<IIQQQQIIQQ", data, offset)
+    sections.append(
+        {
+            "name_offset": fields[0],
+            "type": fields[1],
+            "offset": fields[4],
+            "size": fields[5],
+            "link": fields[6],
+            "entsize": fields[9],
+        }
+    )
+
+shstr = sections[e_shstrndx]
+shstr_data = data[shstr["offset"] : shstr["offset"] + shstr["size"]]
+by_name = {
+    read_cstr(shstr_data, section["name_offset"]): section for section in sections
+}
+
+dynsym = by_name.get(".dynsym")
+dynstr = by_name.get(".dynstr")
+versym = by_name.get(".gnu.version")
+verneed = by_name.get(".gnu.version_r")
+if not dynsym or not dynstr or not versym or not verneed:
+    sys.exit(0)
+if dynsym["entsize"] < 24:
+    fail("ELF dynamic symbol table has an unsupported entry size")
+
+dynstr_data = data[dynstr["offset"] : dynstr["offset"] + dynstr["size"]]
+glibc_234_offset = dynstr_data.find(b"GLIBC_2.34\0")
+if glibc_234_offset < 0:
+    sys.exit(0)
+glibc_234_name_offset = glibc_234_offset
+glibc_234_hash = elf_hash("GLIBC_2.34")
+
+version_names = {}
+version_aux_offsets = {}
+cursor = verneed["offset"]
+end = verneed["offset"] + verneed["size"]
+while cursor and cursor + 16 <= end:
+    vn_version, vn_cnt, _vn_file, vn_aux, vn_next = struct.unpack_from(
+        "<HHIII", data, cursor
+    )
+    if vn_version == 0 or vn_cnt == 0:
+        break
+    aux_cursor = cursor + vn_aux
+    for _ in range(vn_cnt):
+        if aux_cursor + 16 > end:
+            fail("ELF version need auxiliary record is outside section bounds")
+        _hash, _flags, other, name_offset, aux_next = struct.unpack_from(
+            "<IHHII", data, aux_cursor
+        )
+        version_names[other] = read_cstr(dynstr_data, name_offset)
+        version_aux_offsets[other] = aux_cursor
+        if aux_next == 0:
+            break
+        aux_cursor += aux_next
+    if vn_next == 0:
+        break
+    cursor += vn_next
+
+target_names = {"pidfd_spawnp", "pidfd_getpid"}
+target_version_ids = set()
+non_target_glibc_239_refs = []
+patched_symbols = 0
+symbol_count = dynsym["size"] // dynsym["entsize"]
+for index in range(symbol_count):
+    symbol_offset = dynsym["offset"] + (index * dynsym["entsize"])
+    if symbol_offset + 24 > len(data):
+        fail("ELF dynamic symbol entry is outside file bounds")
+    name_offset, info, _other, shndx = struct.unpack_from("<IBBH", data, symbol_offset)
+    name = read_cstr(dynstr_data, name_offset)
+    if not name:
+        continue
+    versym_offset = versym["offset"] + (index * 2)
+    if versym_offset + 2 > versym["offset"] + versym["size"]:
+        fail("ELF version symbol entry is outside section bounds")
+    raw_version = struct.unpack_from("<H", data, versym_offset)[0]
+    version_id = raw_version & 0x7FFF
+    if version_names.get(version_id) != "GLIBC_2.39":
+        continue
+    bind = info >> 4
+    is_weak_undefined = bind == 2 and shndx == 0
+    if name in target_names and is_weak_undefined:
+        struct.pack_into("<H", data, versym_offset, 1)
+        target_version_ids.add(version_id)
+        patched_symbols += 1
+    else:
+        non_target_glibc_239_refs.append(name)
+
+if non_target_glibc_239_refs:
+    fail(
+        "non-pidfd GLIBC_2.39 references remain: "
+        + ", ".join(sorted(set(non_target_glibc_239_refs)))
+    )
+
+if patched_symbols == 0:
+    sys.exit(0)
+
+for version_id in target_version_ids:
+    aux_offset = version_aux_offsets.get(version_id)
+    if aux_offset is None:
+        fail("GLIBC_2.39 version need record was not found")
+    struct.pack_into("<I", data, aux_offset, glibc_234_hash)
+    struct.pack_into("<I", data, aux_offset + 8, glibc_234_name_offset)
+
+path.write_bytes(data)
+print("patched")
+PY
+}
+
+is_browser_use_node_repl_ldd_output_compatible() {
+    local output="$1"
+    ! printf '%s\n' "$output" | grep -Eq "=> not found|version .* not found"
+}
+
+install_browser_use_node_repl_executable_resource() {
+    local source="$1"
+    local destination="$2"
+    local label="$3"
+    local log_level="${4:-warn}"
+    local ldd_output
+    local patch_status
+
+    if ! install_linux_executable_resource "$source" "$destination" "$label" "$log_level"; then
+        return 1
+    fi
+
+    if ! patch_status="$(patch_browser_use_node_repl_glibc_pidfd_symbols "$destination" 2>&1)"; then
+        warn "Browser Use $label has unsupported GLIBC_2.39 runtime references; skipping"
+        [ -z "$patch_status" ] || warn "$patch_status"
+        rm -f "$destination"
+        return 1
+    fi
+
+    if [ "$patch_status" = "patched" ]; then
+        info "Patched Browser Use $label for glibc 2.34+ compatibility"
+    fi
+
+    if command -v ldd >/dev/null 2>&1; then
+        if ! ldd_output="$(ldd "$destination" 2>&1)" \
+            || ! is_browser_use_node_repl_ldd_output_compatible "$ldd_output"; then
+            if [ "$log_level" = "info" ]; then
+                info "Browser Use $label is not compatible with this host runtime; skipping"
+            else
+                warn "Browser Use $label is not compatible with this host runtime; skipping"
+            fi
+            rm -f "$destination"
+            return 1
+        fi
+    fi
+}
+
 browser_use_node_repl_runtime_url() {
     case "$ARCH" in
         x86_64)
@@ -219,7 +433,7 @@ install_node_repl_from_primary_runtime_archive() {
         return 1
     fi
 
-    install_linux_executable_resource "$source" "$destination" "node_repl fallback runtime"
+    install_browser_use_node_repl_executable_resource "$source" "$destination" "node_repl fallback runtime"
 }
 
 install_browser_use_node_repl_resource() {
@@ -232,17 +446,17 @@ install_browser_use_node_repl_resource() {
         "${CODEX_NODE_REPL_PATH:-}"
     do
         [ -n "$source" ] || continue
-        if install_linux_executable_resource "$source" "$destination" "node_repl runtime"; then
+        if install_browser_use_node_repl_executable_resource "$source" "$destination" "node_repl runtime"; then
             return 0
         fi
     done
 
     source="${XDG_CACHE_HOME:-$HOME/.cache}/codex-runtimes/codex-primary-runtime/dependencies/bin/node_repl"
-    if [ -f "$source" ] && install_linux_executable_resource "$source" "$destination" "node_repl runtime"; then
+    if [ -f "$source" ] && install_browser_use_node_repl_executable_resource "$source" "$destination" "node_repl runtime"; then
         return 0
     fi
 
-    if [ -n "$upstream_source" ] && install_linux_executable_resource "$upstream_source" "$destination" "node_repl runtime" "info"; then
+    if [ -n "$upstream_source" ] && install_browser_use_node_repl_executable_resource "$upstream_source" "$destination" "node_repl runtime" "info"; then
         return 0
     fi
 

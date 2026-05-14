@@ -39,6 +39,7 @@ const report = {
   mainBundle: patchReport.mainBundle ?? null,
   iconAsset: patchReport.iconAsset ?? null,
   desktopName: patchReport.desktopName ?? null,
+  linuxTarget: patchReport.linuxTarget ?? null,
   patches: patchReport.patches ?? [],
   patchReportPath: path.resolve(patchReportPath),
 };

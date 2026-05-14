@@ -9,8 +9,14 @@ const {
   enabledLinuxFeatureIds,
   enabledLinuxFeatureStageHooks,
   loadEnabledLinuxFeatures,
+  loadLinuxFeaturePatchDescriptors,
   loadLinuxFeatureMainBundlePatches,
 } = require("./lib/linux-features.js");
+const {
+  detectLinuxTargetContext,
+  linuxTargetSummary,
+  parseOsRelease,
+} = require("./lib/linux-target-context.js");
 const {
   applyLinuxAppUpdaterBridgePatch,
   applyLinuxAppUpdaterMenuPatch,
@@ -43,7 +49,6 @@ const {
   applyLinuxTrayCloseSettingPatch,
 } = require("./patches/launch-actions.js");
 const {
-  applyLinuxAvatarOverlayMousePassthroughPatch,
   applyBrowserUseNodeReplApprovalPatch,
   applyLinuxBrowserUseIabVisibleOnCreatePatch,
   applyLinuxChromeExtensionStatusPatch,
@@ -62,10 +67,20 @@ const {
   applyLinuxWindowOptionsPatch,
 } = require("./patches/main-process.js");
 const {
+  applyLinuxAvatarOverlayMousePassthroughPatch,
+} = require("./patches/avatar-overlay.js");
+const {
   patchPackageJson,
   resolveDesktopName,
 } = require("./patches/package-json.js");
 const {
+  discoverCorePatchDescriptors,
+  normalizePatchDescriptors,
+} = require("./patches/engine.js");
+const {
+  corePatchDescriptors,
+  createMainBundleContext,
+  legacyCorePatchDescriptors,
   patchExtractedApp,
   patchMainBundleSource,
 } = require("./patches/registry.js");
@@ -153,11 +168,20 @@ module.exports = {
   applyLinuxWillQuitDrainTimeoutPatch,
   applyLinuxWindowOptionsPatch,
   createPatchReport,
+  corePatchDescriptors,
+  createMainBundleContext,
+  detectLinuxTargetContext,
+  discoverCorePatchDescriptors,
   enabledLinuxFeatureIds,
   enabledLinuxFeatureStageHooks,
   isComputerUseUiEnabled,
+  legacyCorePatchDescriptors,
+  linuxTargetSummary,
   loadEnabledLinuxFeatures,
+  loadLinuxFeaturePatchDescriptors,
   loadLinuxFeatureMainBundlePatches,
+  normalizePatchDescriptors,
+  parseOsRelease,
   patchCommentPreloadBundle,
   patchExtractedApp,
   patchKeybindsSettingsAssets,

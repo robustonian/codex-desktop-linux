@@ -175,7 +175,7 @@ Override the dev identity with `DEV_APP_ID`, `DEV_APP_NAME`, and `CODEX_WEBVIEW_
 
 ## Auto-update Manager
 
-The native package installs a companion `systemd --user` service named `codex-update-manager`.
+By default, the native package installs a companion `systemd --user` service named `codex-update-manager`.
 
 - It checks upstream `Codex.dmg` on daemon startup, every 6 hours, and in the background on app launch when stale.
 - When a new DMG is available, it rebuilds a local native package with `/opt/codex-desktop/update-builder`.
@@ -209,6 +209,26 @@ Runtime files live in standard XDG locations:
 ~/.cache/codex-update-manager/
 ~/.cache/codex-desktop/launcher.log
 ~/.local/state/codex-desktop/app.pid
+```
+
+### Manual-update packages
+
+For installs that must not include a resident updater, build the native package with:
+
+```bash
+PACKAGE_WITH_UPDATER=0 make package
+make install
+```
+
+That package omits `codex-update-manager`, the user service unit, updater polkit policy, `/opt/codex-desktop/update-builder`, desktop updater actions, and launcher updater startup checks. The packaged launcher still exports desktop-entry hints for window/icon association, but it does not enable, start, or probe the updater. Installing a no-updater package over a default package also stops and disables any existing `codex-update-manager.service` for active user managers and removes stale per-user enablement links for inactive users.
+
+Manual updates should come from a checkout you have chosen to trust:
+
+```bash
+git pull --ff-only
+make build-app
+PACKAGE_WITH_UPDATER=0 make package
+make install
 ```
 
 ## Build from source / custom DMG
@@ -317,11 +337,11 @@ Override the package version with `PACKAGE_VERSION=YYYY.MM.DD.HHMMSS+commitish .
 
 The packaging scripts only repackage what's already in `codex-app/`. They do not download or extract the DMG themselves.
 
-Native packages bundle the managed Node.js runtime and do not hard-depend on distro `nodejs` / `npm`. Packages still pull in `polkit` (or `policykit-1` on older Debian/Ubuntu) plus `pkexec` for privileged update installs.
+Native packages bundle the managed Node.js runtime and do not hard-depend on distro `nodejs` / `npm`. Packages built with the default updater pull in `polkit` (or `policykit-1` on older Debian/Ubuntu) plus `pkexec` for privileged update installs; `PACKAGE_WITH_UPDATER=0` packages do not install those updater-specific artifacts.
 
 ### Updater service controls
 
-After installing a native package:
+After installing a default native package with the updater enabled:
 
 ```bash
 make service-enable           # enable + start the systemd --user service
@@ -383,14 +403,14 @@ make clean-state
 5. It downloads the matching Linux Electron runtime (cached under `~/.cache/codex-desktop/electron/`)
 6. It writes the Linux launcher into `codex-app/start.sh` (body sourced from `launcher/start.sh.template`)
 7. `scripts/build-{deb,rpm,pacman}.sh` packages `codex-app/` into a native artifact
-8. The installed package provides `codex-update-manager` plus a `systemd --user` service unit
-9. The updater watches for newer upstream DMGs and rebuilds future Linux packages locally
+8. Default native packages provide `codex-update-manager` plus a `systemd --user` service unit
+9. The updater watches for newer upstream DMGs and rebuilds future Linux packages locally, unless the package was built with `PACKAGE_WITH_UPDATER=0`
 
 The installer replaces the macOS Electron binary with a Linux build, recompiles native modules, and removes macOS-only pieces such as `sparkle`.
 
 The launcher serves extracted webview assets from `content/webview/` on `127.0.0.1` (`5175` by default, `5176` for the dev app), validates the origin, then starts Electron. Warm-start launches hand off actions such as `--new-chat` over a Unix-domain socket instead of spawning a second app process.
 
-Native-package-only launcher behavior, such as desktop-entry hints and update-manager startup, lives in `packaging/linux/codex-packaged-runtime.sh`.
+Native-package-only launcher behavior, such as desktop-entry hints and default update-manager startup, lives in `packaging/linux/codex-packaged-runtime.sh`.
 
 The current evaluation for a future Rust replacement of the local webview server lives in `docs/webview-server-evaluation.md`.
 

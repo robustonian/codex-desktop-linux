@@ -8,7 +8,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     env, fs,
     fs::OpenOptions,
-    os::unix::net::UnixStream,
+    os::unix::net::{UnixDatagram, UnixStream},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -599,7 +599,17 @@ fn socket_connect_result(path: &Path) -> std::result::Result<(), String> {
 
     match UnixStream::connect(path) {
         Ok(_) => Ok(()),
-        Err(error) => Err(format!("{}: {error}", path.display())),
+        Err(stream_error) => {
+            match UnixDatagram::unbound().and_then(|socket| socket.connect(path)) {
+                Ok(()) => Ok(()),
+                Err(datagram_error) => Err(format!(
+                    "{}: stream: {}; datagram: {}",
+                    path.display(),
+                    stream_error,
+                    datagram_error
+                )),
+            }
+        }
     }
 }
 
@@ -943,6 +953,25 @@ mod tests {
 
         assert!(check.ok, "{check:?}");
         drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ydotool_socket_check_accepts_datagram_socket() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-computer-use-diagnostics-dgram-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp diagnostics dir");
+        let socket = dir.join("ydotool.sock");
+        let datagram =
+            std::os::unix::net::UnixDatagram::bind(&socket).expect("bind temp datagram socket");
+
+        let check = socket_connect_check(&socket);
+
+        assert!(check.ok, "{check:?}");
+        drop(datagram);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

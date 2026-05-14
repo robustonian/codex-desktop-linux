@@ -123,22 +123,121 @@ function resolveFeatureEntrypoint(feature, key) {
   return entrypoint;
 }
 
+function loadFeatureEntrypointModule(feature, key) {
+  const entrypoint = resolveFeatureEntrypoint(feature, key);
+  if (entrypoint == null) {
+    return null;
+  }
+
+  try {
+    return {
+      entrypoint,
+      moduleExports: require(entrypoint),
+    };
+  } catch (error) {
+    console.warn(`WARN: Could not load Linux feature '${feature.id}' ${key}: ${error.message}`);
+    return null;
+  }
+}
+
+function featureContext(context, feature) {
+  return { ...context, feature };
+}
+
+function prefixedFeaturePatchId(feature, descriptorId) {
+  return descriptorId.startsWith(`feature:${feature.id}`)
+    ? descriptorId
+    : `feature:${feature.id}:${descriptorId}`;
+}
+
+function wrapFeaturePatchDescriptor(feature, descriptor, sourcePath, index, featureIndex) {
+  if (descriptor == null || typeof descriptor !== "object") {
+    console.warn(`WARN: Linux feature '${feature.id}' patch descriptor ${index + 1} must be an object`);
+    return null;
+  }
+  if (typeof descriptor.apply !== "function") {
+    console.warn(`WARN: Linux feature '${feature.id}' patch descriptor ${index + 1} must export apply`);
+    return null;
+  }
+
+  const descriptorId = descriptor.id ?? descriptor.name;
+  if (typeof descriptorId !== "string" || descriptorId.length === 0) {
+    console.warn(`WARN: Linux feature '${feature.id}' patch descriptor ${index + 1} must have id or name`);
+    return null;
+  }
+
+  const wrapped = {
+    ...descriptor,
+    id: prefixedFeaturePatchId(feature, descriptorId),
+    ciPolicy: descriptor.ciPolicy ?? "optional",
+    order: descriptor.order ?? 20_000 + featureIndex * 100 + index * 10,
+    sourcePath,
+    apply: (target, context) => descriptor.apply(target, featureContext(context, feature)),
+  };
+
+  if (typeof descriptor.appliesTo === "function") {
+    wrapped.appliesTo = (context) => descriptor.appliesTo(featureContext(context, feature));
+  }
+  if (typeof descriptor.enabled === "function") {
+    wrapped.enabled = (context) => descriptor.enabled(featureContext(context, feature));
+  }
+  if (typeof descriptor.targetSummary === "function") {
+    wrapped.targetSummary = (context) => descriptor.targetSummary(featureContext(context, feature));
+  }
+  if (typeof descriptor.status === "function") {
+    wrapped.status = (result, warnings, context) =>
+      descriptor.status(result, warnings, featureContext(context, feature));
+  }
+
+  return wrapped;
+}
+
+function featurePatchDescriptorListFromExports(feature, moduleExports, sourcePath, featureIndex) {
+  const exported = moduleExports?.descriptors ??
+    moduleExports?.patches ??
+    moduleExports?.default ??
+    moduleExports;
+  if (exported == null) {
+    console.warn(`WARN: Linux feature '${feature.id}' patchDescriptors entrypoint must export descriptors`);
+    return [];
+  }
+
+  const descriptors = Array.isArray(exported) ? exported : [exported];
+  return descriptors
+    .map((descriptor, index) =>
+      wrapFeaturePatchDescriptor(feature, descriptor, sourcePath, index, featureIndex),
+    )
+    .filter(Boolean);
+}
+
+function loadLinuxFeaturePatchDescriptors(options = {}) {
+  const descriptors = [];
+  for (const [featureIndex, feature] of loadEnabledLinuxFeatures(options).entries()) {
+    const loaded = loadFeatureEntrypointModule(feature, "patchDescriptors");
+    if (loaded == null) {
+      continue;
+    }
+    descriptors.push(
+      ...featurePatchDescriptorListFromExports(
+        feature,
+        loaded.moduleExports,
+        loaded.entrypoint,
+        featureIndex,
+      ),
+    );
+  }
+  return descriptors;
+}
+
 function loadLinuxFeatureMainBundlePatches(options = {}) {
   const patches = [];
   for (const feature of loadEnabledLinuxFeatures(options)) {
-    const entrypoint = resolveFeatureEntrypoint(feature, "mainBundlePatch");
-    if (entrypoint == null) {
+    const loaded = loadFeatureEntrypointModule(feature, "mainBundlePatch");
+    if (loaded == null) {
       continue;
     }
 
-    let moduleExports;
-    try {
-      moduleExports = require(entrypoint);
-    } catch (error) {
-      console.warn(`WARN: Could not load Linux feature '${feature.id}' mainBundlePatch: ${error.message}`);
-      continue;
-    }
-
+    const moduleExports = loaded.moduleExports;
     const apply = moduleExports.applyMainBundlePatch ?? moduleExports.apply ?? moduleExports;
     if (typeof apply !== "function") {
       console.warn(`WARN: Linux feature '${feature.id}' mainBundlePatch must export a function`);
@@ -189,6 +288,7 @@ module.exports = {
   enabledLinuxFeatureIds,
   enabledLinuxFeatureStageHooks,
   loadEnabledLinuxFeatures,
+  loadLinuxFeaturePatchDescriptors,
   loadLinuxFeatureMainBundlePatches,
   linuxFeaturesConfigPath,
   linuxFeaturesRoot,

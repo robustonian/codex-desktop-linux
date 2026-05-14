@@ -205,6 +205,14 @@ assert_contains_file() {
     grep -q -- "$pattern" "$path" || error "Expected '$pattern' in $path"
 }
 
+assert_not_contains_file() {
+    local path="$1"
+    local pattern="$2"
+    if grep -q -- "$pattern" "$path"; then
+        error "Did not expect '$pattern' in $path"
+    fi
+}
+
 prepare_package_fixture() {
     rm -rf codex-app dist
     tests/fixtures/create-packaged-app-fixture.sh codex-app
@@ -270,11 +278,40 @@ run_deb_job() {
     assert_contains_file /tmp/deb-contents.txt './usr/bin/codex-update-manager'
     assert_contains_file /tmp/deb-contents.txt './usr/lib/systemd/user/codex-update-manager.service'
     assert_contains_file /tmp/deb-contents.txt './opt/codex-desktop/update-builder/install.sh'
+    assert_contains_file /tmp/deb-contents.txt './opt/codex-desktop/update-builder/launcher/webview-server.py'
     assert_contains_file /tmp/deb-contents.txt './opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh'
+
+    rm -rf dist
+    CARGO_TARGET_DIR="$target_dir" \
+    PACKAGE_WITH_UPDATER=0 \
+    PACKAGE_VERSION="$CI_PACKAGE_VERSION" \
+        ./scripts/build-deb.sh
+
+    local deb_no_updater_file
+    deb_no_updater_file="$(package_file_or_fail 'codex-desktop_*.deb')"
+    dpkg-deb -c "$deb_no_updater_file" | tee /tmp/deb-no-updater-contents.txt >/dev/null
+    rm -rf /tmp/deb-no-updater-control
+    rm -rf /tmp/deb-no-updater-payload
+    mkdir -p /tmp/deb-no-updater-control /tmp/deb-no-updater-payload
+    dpkg-deb -e "$deb_no_updater_file" /tmp/deb-no-updater-control
+    dpkg-deb -x "$deb_no_updater_file" /tmp/deb-no-updater-payload
+    assert_not_contains_file /tmp/deb-no-updater-contents.txt './usr/bin/codex-update-manager'
+    assert_not_contains_file /tmp/deb-no-updater-contents.txt './usr/lib/systemd/user/codex-update-manager.service'
+    assert_not_contains_file /tmp/deb-no-updater-contents.txt './usr/share/polkit-1/actions/com.github.ilysenko.codex-desktop-linux.update.policy'
+    assert_not_contains_file /tmp/deb-no-updater-contents.txt './opt/codex-desktop/update-builder/'
+    assert_contains_file /tmp/deb-no-updater-contents.txt './opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh'
+    assert_contains_file /tmp/deb-no-updater-contents.txt './opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh'
+    assert_contains_file /tmp/deb-no-updater-payload/opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh 'codex_no_updater_cleanup_user_enablement_links'
+    assert_contains_file /tmp/deb-no-updater-payload/opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh 'default.target.wants'
+    assert_contains_file /tmp/deb-no-updater-control/postinst 'codex_no_updater_cleanup_update_manager_service'
+    assert_contains_file /tmp/deb-no-updater-control/prerm 'codex_no_updater_cleanup_update_manager_service'
+    assert_not_contains_file /tmp/deb-no-updater-control/postinst 'update-builder'
+    assert_not_contains_file /tmp/deb-no-updater-control/prerm 'update-builder'
 
     append_summary "Debian Package Validation" \
         "Built: \`$(basename "$deb_file")\`" \
-        "Verified updater binary, user service, update-builder bundle, and packaged runtime helper."
+        "Verified updater binary, user service, update-builder bundle, and packaged runtime helper." \
+        "Verified PACKAGE_WITH_UPDATER=0 omits updater artifacts."
 }
 
 run_rpm_job() {
@@ -296,11 +333,33 @@ run_rpm_job() {
     assert_contains_file /tmp/rpm-contents.txt '/usr/bin/codex-update-manager'
     assert_contains_file /tmp/rpm-contents.txt '/usr/lib/systemd/user/codex-update-manager.service'
     assert_contains_file /tmp/rpm-contents.txt '/opt/codex-desktop/update-builder/install.sh'
+    assert_contains_file /tmp/rpm-contents.txt '/opt/codex-desktop/update-builder/launcher/webview-server.py'
     assert_contains_file /tmp/rpm-contents.txt '/opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh'
+
+    rm -rf dist
+    CARGO_TARGET_DIR="$target_dir" \
+    PACKAGE_WITH_UPDATER=0 \
+    PACKAGE_VERSION="$CI_PACKAGE_VERSION" \
+        ./scripts/build-rpm.sh
+
+    local rpm_no_updater_file
+    rpm_no_updater_file="$(package_file_or_fail 'codex-desktop-*.rpm')"
+    rpm -qlp "$rpm_no_updater_file" | tee /tmp/rpm-no-updater-contents.txt >/dev/null
+    rpm -qp --scripts "$rpm_no_updater_file" | tee /tmp/rpm-no-updater-scripts.txt >/dev/null
+    assert_not_contains_file /tmp/rpm-no-updater-contents.txt '/usr/bin/codex-update-manager'
+    assert_not_contains_file /tmp/rpm-no-updater-contents.txt '/usr/lib/systemd/user/codex-update-manager.service'
+    assert_not_contains_file /tmp/rpm-no-updater-contents.txt '/usr/share/polkit-1/actions/com.github.ilysenko.codex-desktop-linux.update.policy'
+    assert_not_contains_file /tmp/rpm-no-updater-contents.txt '/opt/codex-desktop/update-builder/'
+    assert_contains_file /tmp/rpm-no-updater-contents.txt '/opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh'
+    assert_contains_file /tmp/rpm-no-updater-contents.txt '/opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh'
+    assert_contains_file /tmp/rpm-no-updater-scripts.txt 'codex_no_updater_cleanup_update_manager_service'
+    assert_not_contains_file /tmp/rpm-no-updater-scripts.txt 'update-builder'
+    assert_not_contains_file /tmp/rpm-no-updater-scripts.txt 'codex_ensure_user_service_running'
 
     append_summary "RPM Package Validation" \
         "Built: \`$(basename "$rpm_file")\`" \
-        "Verified updater binary, user service, update-builder bundle, and packaged runtime helper."
+        "Verified updater binary, user service, update-builder bundle, and packaged runtime helper." \
+        "Verified PACKAGE_WITH_UPDATER=0 omits updater artifacts."
 }
 
 run_pacman_job() {
@@ -323,11 +382,37 @@ run_pacman_job() {
     assert_contains_file /tmp/pacman-contents.txt 'usr/bin/codex-update-manager'
     assert_contains_file /tmp/pacman-contents.txt 'usr/lib/systemd/user/codex-update-manager.service'
     assert_contains_file /tmp/pacman-contents.txt 'opt/codex-desktop/update-builder/install.sh'
+    assert_contains_file /tmp/pacman-contents.txt 'opt/codex-desktop/update-builder/launcher/webview-server.py'
     assert_contains_file /tmp/pacman-contents.txt 'opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh'
+
+    rm -rf dist
+    CARGO_TARGET_DIR="$target_dir" \
+    PACKAGE_WITH_UPDATER=0 \
+    PACKAGE_VERSION="$CI_PACKAGE_VERSION" \
+        ./scripts/build-pacman.sh
+
+    local pkg_no_updater_file
+    pkg_no_updater_file="$(package_file_or_fail 'codex-desktop-*.pkg.tar.*')"
+    pacman -Qlp "$pkg_no_updater_file" | tee /tmp/pacman-no-updater-contents.txt >/dev/null
+    tar -xOf "$pkg_no_updater_file" .INSTALL | tee /tmp/pacman-no-updater-install.txt >/dev/null
+    tar -xOf "$pkg_no_updater_file" opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh | tee /tmp/pacman-no-updater-cleanup.txt >/dev/null
+    assert_not_contains_file /tmp/pacman-no-updater-contents.txt 'usr/bin/codex-update-manager'
+    assert_not_contains_file /tmp/pacman-no-updater-contents.txt 'usr/lib/systemd/user/codex-update-manager.service'
+    assert_not_contains_file /tmp/pacman-no-updater-contents.txt 'usr/share/polkit-1/actions/com.github.ilysenko.codex-desktop-linux.update.policy'
+    assert_not_contains_file /tmp/pacman-no-updater-contents.txt 'opt/codex-desktop/update-builder/'
+    assert_contains_file /tmp/pacman-no-updater-contents.txt 'opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh'
+    assert_contains_file /tmp/pacman-no-updater-contents.txt 'opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh'
+    assert_contains_file /tmp/pacman-no-updater-cleanup.txt 'codex_no_updater_cleanup_user_enablement_links'
+    assert_contains_file /tmp/pacman-no-updater-cleanup.txt 'default.target.wants'
+    assert_contains_file /tmp/pacman-no-updater-install.txt 'codex_no_updater_cleanup_update_manager_service'
+    assert_contains_file /tmp/pacman-no-updater-install.txt 'post_upgrade'
+    assert_contains_file /tmp/pacman-no-updater-install.txt 'pre_remove'
+    assert_not_contains_file /tmp/pacman-no-updater-install.txt 'update-builder'
 
     append_summary "Pacman Package Validation" \
         "Built: \`$(basename "$pkg_file")\`" \
-        "Verified updater binary, user service, update-builder bundle, and packaged runtime helper."
+        "Verified updater binary, user service, update-builder bundle, and packaged runtime helper." \
+        "Verified PACKAGE_WITH_UPDATER=0 omits updater artifacts."
 }
 
 run_install_deps_job_as_root() {

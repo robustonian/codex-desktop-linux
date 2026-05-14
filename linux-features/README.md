@@ -24,12 +24,18 @@ Each feature directory should include:
 
 - `feature.json` — metadata and entrypoints
 - `README.md` — what it does, how to test it, and known risks
-- optional `patch.js` — exports `applyMainBundlePatch(source, context)`
+- optional `patch.js` — exports `applyMainBundlePatch(source, context)`, or
+  descriptor patches when `feature.json` uses `entrypoints.patchDescriptors`
 - optional `stage.sh` — install/build staging hook
 - optional `test.js` — self-contained tests for the feature
 
 `stage.sh` hooks run with `SCRIPT_DIR`, `INSTALL_DIR`, `WORK_DIR`, `ARCH`, and
 `CODEX_UPSTREAM_APP_DIR` in the environment.
+
+Descriptor patches use the same shape as `scripts/patches/core/**/patch.js`.
+They can target `main-bundle`, `webview-asset`, or `extracted-app` phases.
+Feature descriptor ids are namespaced as `feature:<feature-id>:<descriptor-id>`
+in patch reports and are optional by default.
 
 Feature self-tests live inside each feature directory. Run them with:
 
