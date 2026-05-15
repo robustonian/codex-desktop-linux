@@ -19,6 +19,12 @@ better_sqlite3_build_version() {
                 return
             fi
             ;;
+        42.*)
+            if version_lt "$detected_version" "$MIN_BETTER_SQLITE3_VERSION_FOR_ELECTRON_42"; then
+                echo "$MIN_BETTER_SQLITE3_VERSION_FOR_ELECTRON_42"
+                return
+            fi
+            ;;
     esac
 
     echo "$detected_version"
@@ -35,6 +41,72 @@ prune_native_module_build_artifacts() {
     find "$build_dir" -type f ! -name "*.node" -delete 2>/dev/null || true
     find "$build_dir" -type d -empty -delete 2>/dev/null || true
     find "$module_dir" -type f -name "*.target.mk" -delete 2>/dev/null || true
+}
+
+patch_better_sqlite3_for_electron_42() {
+    local module_dir="$1"
+
+    case "$ELECTRON_VERSION" in
+        42.*) ;;
+        *) return 0 ;;
+    esac
+
+    info "Applying better-sqlite3 Electron 42 compatibility patch"
+    BETTER_SQLITE3_MODULE_DIR="$module_dir" node <<'NODE'
+const fs = require("fs");
+const path = require("path");
+
+const moduleDir = process.env.BETTER_SQLITE3_MODULE_DIR;
+
+function patchFile(relativePath, patch) {
+  const file = path.join(moduleDir, relativePath);
+  let source = fs.readFileSync(file, "utf8");
+  const original = source;
+
+  source = patch(source, file);
+
+  if (source !== original) {
+    fs.writeFileSync(file, source);
+  }
+}
+
+function replaceExact(source, before, after, file) {
+  if (source.includes(after)) {
+    return source;
+  }
+  if (!source.includes(before)) {
+    throw new Error(`Could not find Electron 42 better-sqlite3 patch target in ${file}`);
+  }
+  return source.replace(before, after);
+}
+
+patchFile("src/util/macros.cpp", (source, file) =>
+  replaceExact(
+    source,
+    "info.Data().As<v8::External>()->Value()",
+    "info.Data().As<v8::External>()->Value(v8::kExternalPointerTypeTagDefault)",
+    file
+  )
+);
+
+patchFile("src/better_sqlite3.cpp", (source, file) =>
+  replaceExact(
+    source,
+    "v8::External::New(isolate, addon)",
+    "v8::External::New(isolate, addon, v8::kExternalPointerTypeTagDefault)",
+    file
+  )
+);
+
+patchFile("src/util/helpers.cpp", (source, file) =>
+  replaceExact(
+    source,
+    "\t\tfunc,\n\t\t0,\n\t\tdata",
+    "\t\tfunc,\n\t\tnullptr,\n\t\tdata",
+    file
+  )
+);
+NODE
 }
 
 build_native_modules() {
@@ -64,6 +136,7 @@ build_native_modules() {
     info "Installing fresh sources from npm..."
     npm install "electron@$ELECTRON_VERSION" --save-dev --ignore-scripts 2>&1 >&2
     npm install "better-sqlite3@$bs3_build_ver" "node-pty@$npty_ver" --ignore-scripts 2>&1 >&2
+    patch_better_sqlite3_for_electron_42 "$build_dir/node_modules/better-sqlite3"
 
     info "Compiling for Electron v$ELECTRON_VERSION (this takes ~1 min)..."
     info "Using Electron headers: $ELECTRON_HEADERS_URL"

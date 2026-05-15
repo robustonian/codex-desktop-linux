@@ -649,7 +649,9 @@ test_launcher_template_sanity() {
     assert_contains "$REPO_DIR/scripts/lib/asar-patch.sh" "CODEX_PATCH_REPORT_JSON"
     assert_contains "$REPO_DIR/scripts/lib/rebuild-report.sh" "write_rebuild_report_json"
     assert_contains "$REPO_DIR/install.sh" "MIN_BETTER_SQLITE3_VERSION_FOR_ELECTRON_41=\"12.9.0\""
+    assert_contains "$REPO_DIR/install.sh" "MIN_BETTER_SQLITE3_VERSION_FOR_ELECTRON_42=\"12.10.0\""
     assert_contains "$REPO_DIR/scripts/lib/native-modules.sh" "better_sqlite3_build_version"
+    assert_contains "$REPO_DIR/scripts/lib/native-modules.sh" "patch_better_sqlite3_for_electron_42"
     assert_contains "$REPO_DIR/scripts/lib/native-modules.sh" "prune_native_module_build_artifacts"
     assert_contains "$REPO_DIR/scripts/lib/native-modules.sh" 'find "$build_dir" -type f ! -name'
     assert_contains "$REPO_DIR/scripts/lib/native-modules.sh" 'find "$module_dir" -type f -name'
