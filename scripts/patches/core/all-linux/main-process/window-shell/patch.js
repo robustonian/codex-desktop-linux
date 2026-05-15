@@ -1,0 +1,79 @@
+"use strict";
+
+const {
+  applyLinuxWindowOptionsPatch,
+  applyLinuxMenuPatch,
+  applyLinuxSetIconPatch,
+  applyLinuxOpaqueBackgroundPatch,
+  applyLinuxFileManagerPatch,
+  applyLinuxTrayPatch,
+  applyLinuxSingleInstancePatch,
+  applyLinuxGitOriginsSourceFallbackPatch,
+} = require("../../../../main-process.js");
+const { applyLinuxAvatarOverlayMousePassthroughPatch } = require("../../../../avatar-overlay.js");
+
+module.exports = [
+  {
+    id: "linux-window-options",
+    phase: "main-bundle",
+    order: 50,
+    ciPolicy: "optional",
+    apply: (source, context) => applyLinuxWindowOptionsPatch(source, context.iconAsset),
+  },
+  {
+    id: "linux-menu",
+    phase: "main-bundle",
+    order: 60,
+    ciPolicy: "optional",
+    apply: applyLinuxMenuPatch,
+  },
+  {
+    id: "linux-set-icon",
+    phase: "main-bundle",
+    order: 70,
+    ciPolicy: "optional",
+    apply: (source, context) => applyLinuxSetIconPatch(source, context.iconAsset),
+  },
+  {
+    id: "linux-opaque-background",
+    phase: "main-bundle",
+    order: 80,
+    ciPolicy: "optional",
+    apply: applyLinuxOpaqueBackgroundPatch,
+  },
+  {
+    id: "linux-avatar-overlay-mouse-passthrough",
+    phase: "main-bundle",
+    order: 90,
+    ciPolicy: "optional",
+    apply: applyLinuxAvatarOverlayMousePassthroughPatch,
+  },
+  {
+    id: "linux-file-manager",
+    phase: "main-bundle",
+    order: 100,
+    ciPolicy: "required-upstream",
+    apply: applyLinuxFileManagerPatch,
+  },
+  {
+    id: "linux-tray",
+    phase: "main-bundle",
+    order: 110,
+    ciPolicy: "optional",
+    apply: (source, context) => applyLinuxTrayPatch(source, context.iconPathExpression),
+  },
+  {
+    id: "linux-single-instance",
+    phase: "main-bundle",
+    order: 120,
+    ciPolicy: "optional",
+    apply: applyLinuxSingleInstancePatch,
+  },
+  {
+    id: "linux-git-origins-source-fallback",
+    phase: "main-bundle",
+    order: 240,
+    ciPolicy: "optional",
+    apply: applyLinuxGitOriginsSourceFallbackPatch,
+  },
+];

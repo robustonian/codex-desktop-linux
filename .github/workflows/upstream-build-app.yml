@@ -9,6 +9,8 @@ on:
       - Makefile
       - scripts/patch-linux-window-ui.js
       - scripts/patch-linux-window-ui.test.js
+      - scripts/patches/**
+      - scripts/ci/validate-patch-report.js
       - .github/workflows/upstream-build-app.yml
   push:
     branches:
@@ -18,6 +20,8 @@ on:
       - Makefile
       - scripts/patch-linux-window-ui.js
       - scripts/patch-linux-window-ui.test.js
+      - scripts/patches/**
+      - scripts/ci/validate-patch-report.js
       - .github/workflows/upstream-build-app.yml
   workflow_dispatch:
 
@@ -128,13 +132,18 @@ jobs:
           JSON
 
       - name: Build app from upstream DMG
-        run: make build-app DMG=/tmp/codex-upstream-ci/Codex.dmg
+        run: CODEX_PATCH_REPORT_JSON="$GITHUB_WORKSPACE/patch-report.json" make build-app DMG=/tmp/codex-upstream-ci/Codex.dmg
+
+      - name: Validate required upstream patches
+        run: node scripts/ci/validate-patch-report.js patch-report.json --profile upstream-build
 
       - name: Upload upstream DMG metadata artifact
         uses: actions/upload-artifact@v4
         with:
           name: upstream-dmg-metadata
-          path: upstream-dmg-metadata.json
+          path: |
+            upstream-dmg-metadata.json
+            patch-report.json
 
       - name: Write build summary
         run: |
@@ -150,4 +159,5 @@ jobs:
             echo "- Tested At (UTC): \`${{ steps.local-dmg.outputs.tested_at_utc }}\`"
             echo "- Cache Hit: \`${{ steps.dmg-cache.outputs.cache-hit || 'false' }}\`"
             echo "- Build command: \`make build-app DMG=/tmp/codex-upstream-ci/Codex.dmg\`"
+            echo "- Patch report: \`patch-report.json\`"
           } >> "$GITHUB_STEP_SUMMARY"

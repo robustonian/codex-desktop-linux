@@ -38,13 +38,17 @@ main() {
     ensure_app_layout
     ensure_file_exists "$CONTROL_TEMPLATE" "control template"
     ensure_file_exists "$DESKTOP_TEMPLATE" "desktop template"
-    ensure_file_exists "$UPDATER_SERVICE_SOURCE" "updater service template"
-    ensure_file_exists "$USER_SERVICE_HELPER_TEMPLATE" "updater user service helper"
     ensure_file_exists "$ICON_SOURCE" "icon"
-    ensure_file_exists "$PRERM_TEMPLATE" "Debian prerm template"
-    ensure_file_exists "$POSTRM_TEMPLATE" "Debian postrm template"
-    ensure_file_exists "$POSTINST_TEMPLATE" "Debian postinst template"
-    ensure_file_exists "$PACKAGED_RUNTIME_SOURCE" "packaged launcher runtime helper"
+    if package_with_updater_enabled; then
+        ensure_file_exists "$UPDATER_SERVICE_SOURCE" "updater service template"
+        ensure_file_exists "$USER_SERVICE_HELPER_TEMPLATE" "updater user service helper"
+        ensure_file_exists "$PRERM_TEMPLATE" "Debian prerm template"
+        ensure_file_exists "$POSTRM_TEMPLATE" "Debian postrm template"
+        ensure_file_exists "$POSTINST_TEMPLATE" "Debian postinst template"
+        ensure_file_exists "$PACKAGED_RUNTIME_SOURCE" "packaged launcher runtime helper"
+    else
+        info "Building package without codex-update-manager (PACKAGE_WITH_UPDATER=0)"
+    fi
     command -v dpkg-deb >/dev/null 2>&1 || error "dpkg-deb is required"
     command -v dpkg >/dev/null 2>&1 || error "dpkg is required"
 
@@ -61,7 +65,7 @@ main() {
         "$PKG_ROOT/opt"
 
     stage_common_package_files "$PKG_ROOT"
-    stage_update_builder_bundle "$PKG_ROOT"
+    stage_optional_update_builder_bundle "$PKG_ROOT"
     write_launcher_stub "$PKG_ROOT"
 
     sed \
@@ -69,11 +73,27 @@ main() {
         -e "s/__VERSION__/$PACKAGE_VERSION/g" \
         -e "s/__ARCH__/$arch/g" \
         "$CONTROL_TEMPLATE" > "$PKG_ROOT/DEBIAN/control"
+    if ! package_with_updater_enabled; then
+        sed -i \
+            -e 's/pkexec | policykit-1, //g' \
+            -e 's/polkitd | policykit-1, //g' \
+            -e '/Local auto-updates rebuild a Linux package/d' \
+            -e '/use the bundled managed Node.js runtime plus the local packaging toolchain/d' \
+            "$PKG_ROOT/DEBIAN/control"
+        cat >> "$PKG_ROOT/DEBIAN/control" <<'CONTROL'
+ This package was built without codex-update-manager. Update manually from a trusted checkout.
+CONTROL
+    fi
     chmod 0644 "$PKG_ROOT/DEBIAN/control"
-    sed -e "s|/opt/codex-desktop|/opt/$PACKAGE_NAME|g" "$POSTINST_TEMPLATE" > "$PKG_ROOT/DEBIAN/postinst"
-    cp "$PRERM_TEMPLATE" "$PKG_ROOT/DEBIAN/prerm"
-    cp "$POSTRM_TEMPLATE" "$PKG_ROOT/DEBIAN/postrm"
-    chmod 0755 "$PKG_ROOT/DEBIAN/postinst" "$PKG_ROOT/DEBIAN/prerm" "$PKG_ROOT/DEBIAN/postrm"
+    if package_with_updater_enabled; then
+        sed -e "s|/opt/codex-desktop|/opt/$PACKAGE_NAME|g" "$POSTINST_TEMPLATE" > "$PKG_ROOT/DEBIAN/postinst"
+        cp "$PRERM_TEMPLATE" "$PKG_ROOT/DEBIAN/prerm"
+        cp "$POSTRM_TEMPLATE" "$PKG_ROOT/DEBIAN/postrm"
+        chmod 0755 "$PKG_ROOT/DEBIAN/postinst" "$PKG_ROOT/DEBIAN/prerm" "$PKG_ROOT/DEBIAN/postrm"
+    else
+        write_no_updater_deb_postinst "$PKG_ROOT/DEBIAN/postinst"
+        write_no_updater_deb_prerm "$PKG_ROOT/DEBIAN/prerm"
+    fi
 
     mkdir -p "$DIST_DIR"
     info "Building $output_file"

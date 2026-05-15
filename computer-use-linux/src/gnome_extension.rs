@@ -1,5 +1,7 @@
 use crate::diagnostics::hydrate_session_bus_env;
-use crate::windows::{list_extension_windows, window_permission_hint, WindowInfo};
+use crate::identity;
+use crate::windowing::backends::gnome::list_extension_windows;
+use crate::windows::{window_permission_hint, WindowInfo};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::{
@@ -8,11 +10,9 @@ use std::{
     process::Command,
 };
 
-pub const UUID: &str = "codex-window-control@openai.com";
-const METADATA_JSON: &str =
-    include_str!("../gnome-shell-extension/codex-window-control@openai.com/metadata.json");
-const EXTENSION_JS: &str =
-    include_str!("../gnome-shell-extension/codex-window-control@openai.com/extension.js");
+pub const UUID: &str = identity::GNOME_EXTENSION_UUID;
+const METADATA_JSON: &str = include_str!("../gnome-shell-extension/metadata.json");
+const EXTENSION_JS: &str = include_str!("../gnome-shell-extension/extension.js");
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct WindowTargetingSetupReport {
@@ -89,19 +89,35 @@ pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
 fn write_extension_files(extension_dir: &Path) -> Result<(), String> {
     fs::create_dir_all(extension_dir)
         .map_err(|error| format!("failed to create {}: {error}", extension_dir.display()))?;
-    fs::write(extension_dir.join("metadata.json"), METADATA_JSON).map_err(|error| {
+    let metadata_json = render_extension_asset(METADATA_JSON);
+    let extension_js = render_extension_asset(EXTENSION_JS);
+
+    fs::write(extension_dir.join("metadata.json"), metadata_json).map_err(|error| {
         format!(
             "failed to write {}: {error}",
             extension_dir.join("metadata.json").display()
         )
     })?;
-    fs::write(extension_dir.join("extension.js"), EXTENSION_JS).map_err(|error| {
+    fs::write(extension_dir.join("extension.js"), extension_js).map_err(|error| {
         format!(
             "failed to write {}: {error}",
             extension_dir.join("extension.js").display()
         )
     })?;
     Ok(())
+}
+
+fn render_extension_asset(asset: &str) -> String {
+    asset
+        .replace(
+            identity::DEFAULT_GNOME_EXTENSION_UUID,
+            identity::GNOME_EXTENSION_UUID,
+        )
+        .replace(identity::DEFAULT_DBUS_SERVICE, identity::DBUS_SERVICE)
+        .replace(
+            identity::DEFAULT_DBUS_OBJECT_PATH,
+            identity::DBUS_OBJECT_PATH,
+        )
 }
 
 fn run_gnome_extensions_enable() -> SetupCommandReport {
@@ -266,7 +282,7 @@ mod tests {
     fn enabled_extensions_literal_adds_uuid_to_existing_list() {
         assert_eq!(
             enabled_extensions_literal("['ubuntu-dock@ubuntu.com']").unwrap(),
-            "['ubuntu-dock@ubuntu.com', 'codex-window-control@openai.com']"
+            format!("['ubuntu-dock@ubuntu.com', '{UUID}']")
         );
     }
 
@@ -274,14 +290,35 @@ mod tests {
     fn enabled_extensions_literal_handles_empty_typed_array() {
         assert_eq!(
             enabled_extensions_literal("@as []").unwrap(),
-            "['codex-window-control@openai.com']"
+            format!("['{UUID}']")
         );
     }
 
     #[test]
     fn enabled_extensions_literal_is_idempotent() {
-        let value = "['codex-window-control@openai.com']";
+        let value = format!("['{UUID}']");
 
-        assert_eq!(enabled_extensions_literal(value).unwrap(), value);
+        assert_eq!(enabled_extensions_literal(&value).unwrap(), value);
+    }
+
+    #[test]
+    fn rendered_metadata_uses_build_identity() {
+        let rendered = render_extension_asset(METADATA_JSON);
+
+        assert!(rendered.contains(&format!("\"uuid\": \"{UUID}\"")));
+    }
+
+    #[test]
+    fn rendered_extension_uses_build_identity() {
+        let rendered = render_extension_asset(EXTENSION_JS);
+
+        assert!(rendered.contains(&format!(
+            "const SERVICE_NAME = '{service}'",
+            service = identity::DBUS_SERVICE
+        )));
+        assert!(rendered.contains(&format!(
+            "const OBJECT_PATH = '{path}'",
+            path = identity::DBUS_OBJECT_PATH
+        )));
     }
 }

@@ -27,7 +27,6 @@ patch_asar() {
 
     # Build native modules in clean environment and copy back
     build_native_modules "$WORK_DIR/app-extracted"
-    rm -f "$WORK_DIR/app-extracted/node_modules/node-pty/build/Makefile"
 
     info "Patching Linux window and shell behavior..."
     if [ -n "${CODEX_PATCH_REPORT_JSON:-}" ]; then

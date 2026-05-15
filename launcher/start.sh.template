@@ -75,6 +75,14 @@ Options:
 Default launch keeps Electron GPU enabled and lets Electron choose the platform.
 Extra flags are passed directly to Electron.
 
+Environment:
+  CODEX_LINUX_RENDERING_MODE=auto|default|wslg
+                              Auto-detect WSLg, keep generic Linux defaults, or force the WSLg profile
+  CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=0|1
+                              Override the launcher's default --disable-gpu-compositing decision
+  CODEX_FORCE_RENDERER_ACCESSIBILITY=auto|0|1
+                              Override --force-renderer-accessibility; auto skips it under WSLg
+
 Logs: ${XDG_CACHE_HOME:-$HOME/.cache}/$CODEX_LINUX_APP_ID/launcher.log
 HELP
     exit 0
@@ -104,6 +112,53 @@ log_phase() {
     local elapsed_ms
     elapsed_ms="$(($(now_ms) - LAUNCHER_START_MS))"
     echo "[$(date -Is)] launcher_phase=$phase elapsedMs=$elapsed_ms"
+}
+
+make_tree_owner_writable() {
+    local path="$1"
+
+    [ -e "$path" ] || return 0
+    chmod -R u+rwX "$path" 2>/dev/null || true
+}
+
+remove_tree_if_exists() {
+    local path="$1"
+
+    [ -e "$path" ] || return 0
+    make_tree_owner_writable "$path"
+    rm -rf "$path"
+}
+
+fix_bundled_marketplace_tmp_permissions() {
+    local codex_home="${CODEX_HOME:-$HOME/.codex}"
+    local marketplace_tmp_root="$codex_home/.tmp/bundled-marketplaces"
+
+    [ -d "$marketplace_tmp_root" ] || return 0
+    find "$marketplace_tmp_root" -type d -exec chmod u+rwx {} + 2>/dev/null || true
+    find "$marketplace_tmp_root" -type f -exec chmod u+rw {} + 2>/dev/null || true
+}
+
+clear_bundled_marketplace_tmp_cache() {
+    local codex_home="${CODEX_HOME:-$HOME/.codex}"
+    local marketplace_tmp_root="$codex_home/.tmp/bundled-marketplaces"
+    local path
+
+    fix_bundled_marketplace_tmp_permissions
+    for path in "$marketplace_tmp_root"/openai-bundled "$marketplace_tmp_root"/openai-bundled.staging-*; do
+        [ -e "$path" ] || continue
+        remove_tree_if_exists "$path"
+    done
+}
+
+monitor_bundled_marketplace_tmp_permissions() {
+    (
+        local i=0
+        while [ "$i" -lt 300 ]; do
+            fix_bundled_marketplace_tmp_permissions
+            sleep 0.1
+            i=$((i + 1))
+        done
+    ) &
 }
 
 import_graphical_env_entry() {
@@ -291,7 +346,7 @@ prepend_managed_node_runtime_to_path() {
     export CODEX_MANAGED_NODE_RUNTIME_DIR="$SCRIPT_DIR/resources/node-runtime"
 }
 
-browser_use_plugin_version() {
+bundled_plugin_version() {
     local plugin_json="$1"
 
     python3 - "$plugin_json" <<'PY'
@@ -312,6 +367,7 @@ PY
 
 sync_browser_use_bundled_plugin_cache() {
     local source_plugin="$SCRIPT_DIR/resources/plugins/openai-bundled/plugins/browser-use"
+    local source_marketplace="$SCRIPT_DIR/resources/plugins/openai-bundled/.agents/plugins/marketplace.json"
     local plugin_json="$source_plugin/.codex-plugin/plugin.json"
     local source_client="$source_plugin/scripts/browser-client.mjs"
     local codex_home="${CODEX_HOME:-$HOME/.codex}"
@@ -321,11 +377,23 @@ sync_browser_use_bundled_plugin_cache() {
     local cache_client
     local cache_parent
     local tmp_plugin
+    local marketplace_root
+    local marketplace_plugins_dir
 
     [ -f "$plugin_json" ] || return 0
     [ -f "$source_client" ] || return 0
 
-    version="$(browser_use_plugin_version "$plugin_json" 2>/dev/null || true)"
+    marketplace_root="$codex_home/.tmp/bundled-marketplaces/openai-bundled"
+    marketplace_plugins_dir="$marketplace_root/.agents/plugins"
+    if [ -f "$source_marketplace" ]; then
+        mkdir -p "$marketplace_plugins_dir"
+        rm -f "$marketplace_plugins_dir/marketplace.json"
+        cp "$source_marketplace" "$marketplace_plugins_dir/marketplace.json" && \
+            chmod u+w "$marketplace_plugins_dir/marketplace.json" || \
+            echo "Browser Use bundled marketplace sync failed; continuing with existing marketplace cache."
+    fi
+
+    version="$(bundled_plugin_version "$plugin_json" 2>/dev/null || true)"
     [ -n "$version" ] || return 0
 
     cache_root="$codex_home/plugins/cache/openai-bundled/browser-use"
@@ -338,17 +406,274 @@ sync_browser_use_bundled_plugin_cache() {
 
     cache_parent="$(dirname "$cache_plugin")"
     tmp_plugin="$cache_parent/.browser-use-$version.tmp.$$"
-    rm -rf "$tmp_plugin"
+    remove_tree_if_exists "$tmp_plugin"
     mkdir -p "$cache_parent"
 
     if cp -R "$source_plugin" "$tmp_plugin"; then
+        make_tree_owner_writable "$tmp_plugin"
         find "$tmp_plugin" -type f -name '*:com.apple.*' -delete
-        rm -rf "$cache_plugin"
+        remove_tree_if_exists "$cache_plugin"
         mv "$tmp_plugin" "$cache_plugin"
         echo "Browser Use plugin cache synced from bundled resources: $cache_plugin"
     else
-        rm -rf "$tmp_plugin"
+        remove_tree_if_exists "$tmp_plugin"
         echo "Browser Use plugin cache sync failed; continuing with existing cache."
+    fi
+}
+
+chrome_extension_host_arch() {
+    case "$(uname -m)" in
+        x86_64) echo "x64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        *) return 1 ;;
+    esac
+}
+
+write_chrome_native_host_manifests() {
+    local host_path="$1"
+    local plugin_dir="$2"
+
+    python3 - "$host_path" "$HOME" "$plugin_dir" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+host_path = sys.argv[1]
+home = pathlib.Path(sys.argv[2])
+plugin_dir = pathlib.Path(sys.argv[3])
+scripts_dir = plugin_dir / "scripts"
+
+extension_id = None
+host_name = None
+
+extension_id_json = scripts_dir / "extension-id.json"
+try:
+    data = json.loads(extension_id_json.read_text(encoding="utf-8"))
+    extension_id = data.get("extensionId")
+    host_name = data.get("extensionHostName")
+except OSError:
+    pass
+
+if extension_id is None or host_name is None:
+    install_manifest = (scripts_dir / "installManifest.mjs").read_text(encoding="utf-8")
+    extension_id_match = re.search(r'extensionId\s*:\s*"([a-p]{32})"', install_manifest)
+    host_name_match = re.search(r'extensionHostName\s*:\s*"([A-Za-z0-9_.]+)"', install_manifest)
+    if extension_id is None and extension_id_match is not None:
+        extension_id = extension_id_match.group(1)
+    if host_name is None and host_name_match is not None:
+        host_name = host_name_match.group(1)
+
+if not isinstance(extension_id, str) or re.fullmatch(r"[a-p]{32}", extension_id) is None:
+    raise SystemExit("Invalid Chrome extension id in bundled plugin metadata")
+if not isinstance(host_name, str) or re.fullmatch(r"[A-Za-z0-9_.]+", host_name) is None:
+    raise SystemExit("Invalid Chrome native host name in bundled plugin metadata")
+
+manifest_name = f"{host_name}.json"
+manifest = {
+    "name": host_name,
+    "description": "Codex chrome native messaging host",
+    "type": "stdio",
+    "path": host_path,
+    "allowed_origins": [f"chrome-extension://{extension_id}/"],
+}
+text = json.dumps(manifest, separators=(",", ":"))
+
+for relative in (
+    ".config/google-chrome/NativeMessagingHosts",
+    ".config/BraveSoftware/Brave-Browser/NativeMessagingHosts",
+    ".config/chromium/NativeMessagingHosts",
+):
+    directory = home / relative
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / manifest_name
+    try:
+        if path.read_text(encoding="utf-8") == text:
+            continue
+    except OSError:
+        pass
+    path.write_text(text, encoding="utf-8")
+PY
+}
+
+sync_chrome_bundled_plugin_cache() {
+    local source_plugin="$SCRIPT_DIR/resources/plugins/openai-bundled/plugins/chrome"
+    local source_marketplace="$SCRIPT_DIR/resources/plugins/openai-bundled/.agents/plugins/marketplace.json"
+    local plugin_json="$source_plugin/.codex-plugin/plugin.json"
+    local codex_home="${CODEX_HOME:-$HOME/.codex}"
+    local extension_arch
+    local source_host
+    local source_client
+    local source_install_manifest
+    local version
+    local cache_root
+    local cache_plugin
+    local cache_host
+    local cache_client
+    local cache_install_manifest
+    local cache_parent
+    local tmp_plugin
+    local marketplace_root
+    local marketplace_plugins_dir
+    local marketplace_plugin_link
+    local host_path
+    local needs_copy=1
+
+    [ -f "$plugin_json" ] || return 0
+    [ -d "$source_plugin" ] || return 0
+
+    if ! extension_arch="$(chrome_extension_host_arch)"; then
+        return 0
+    fi
+
+    source_host="$source_plugin/extension-host/linux/$extension_arch/extension-host"
+    source_client="$source_plugin/scripts/browser-client.mjs"
+    source_install_manifest="$source_plugin/scripts/installManifest.mjs"
+    [ -x "$source_host" ] || return 0
+    [ -f "$source_client" ] || return 0
+    [ -f "$source_install_manifest" ] || return 0
+
+    version="$(bundled_plugin_version "$plugin_json" 2>/dev/null || true)"
+    [ -n "$version" ] || return 0
+
+    cache_root="$codex_home/plugins/cache/openai-bundled/chrome"
+    cache_plugin="$cache_root/$version"
+    cache_host="$cache_plugin/extension-host/linux/$extension_arch/extension-host"
+    cache_client="$cache_plugin/scripts/browser-client.mjs"
+    cache_install_manifest="$cache_plugin/scripts/installManifest.mjs"
+
+    if [ -f "$cache_plugin/.codex-plugin/plugin.json" ] && \
+        [ -f "$cache_host" ] && \
+        [ -f "$cache_client" ] && \
+        [ -f "$cache_install_manifest" ] && \
+        cmp -s "$plugin_json" "$cache_plugin/.codex-plugin/plugin.json" && \
+        cmp -s "$source_host" "$cache_host" && \
+        cmp -s "$source_client" "$cache_client" && \
+        cmp -s "$source_install_manifest" "$cache_install_manifest"; then
+        needs_copy=0
+    fi
+
+    if [ "$needs_copy" -eq 0 ]; then
+        local relative
+        for relative in \
+            scripts/check-extension-installed.js \
+            scripts/check-native-host-manifest.js \
+            scripts/chrome-is-running.js \
+            scripts/extension-id.json \
+            scripts/installed-browsers.js \
+            scripts/open-chrome-window.js; do
+            [ -f "$source_plugin/$relative" ] || continue
+            if [ ! -f "$cache_plugin/$relative" ] || ! cmp -s "$source_plugin/$relative" "$cache_plugin/$relative"; then
+                needs_copy=1
+                break
+            fi
+        done
+    fi
+
+    if [ "$needs_copy" -eq 1 ]; then
+        cache_parent="$(dirname "$cache_plugin")"
+        tmp_plugin="$cache_parent/.chrome-$version.tmp.$$"
+        remove_tree_if_exists "$tmp_plugin"
+        mkdir -p "$cache_parent"
+
+        if cp -R "$source_plugin" "$tmp_plugin"; then
+            make_tree_owner_writable "$tmp_plugin"
+            find "$tmp_plugin" -type f -name '*:com.apple.*' -delete
+            remove_tree_if_exists "$cache_plugin"
+            mv "$tmp_plugin" "$cache_plugin"
+            echo "Chrome plugin cache synced from bundled resources: $cache_plugin"
+        else
+            remove_tree_if_exists "$tmp_plugin"
+            echo "Chrome plugin cache sync failed; continuing with existing cache."
+            return 0
+        fi
+    fi
+
+    if [ -e "$cache_root/latest" ] && [ ! -L "$cache_root/latest" ]; then
+        remove_tree_if_exists "$cache_root/latest"
+    fi
+    ln -sfn "$version" "$cache_root/latest"
+
+    marketplace_root="$codex_home/.tmp/bundled-marketplaces/openai-bundled"
+    marketplace_plugins_dir="$marketplace_root/.agents/plugins"
+    marketplace_plugin_link="$marketplace_root/plugins/chrome"
+    mkdir -p "$marketplace_plugins_dir" "$marketplace_root/plugins"
+    if [ -f "$source_marketplace" ]; then
+        rm -f "$marketplace_plugins_dir/marketplace.json"
+        cp "$source_marketplace" "$marketplace_plugins_dir/marketplace.json" && \
+            chmod u+w "$marketplace_plugins_dir/marketplace.json" || \
+            echo "Chrome bundled marketplace sync failed; continuing with existing marketplace cache."
+    fi
+    if [ -e "$marketplace_plugin_link" ] && [ ! -L "$marketplace_plugin_link" ]; then
+        remove_tree_if_exists "$marketplace_plugin_link"
+    fi
+    ln -sfn "$cache_root/latest" "$marketplace_plugin_link"
+
+    host_path="$cache_root/latest/extension-host/linux/$extension_arch/extension-host"
+    [ -x "$host_path" ] || return 0
+    write_chrome_native_host_manifests "$host_path" "$cache_root/latest" || \
+        echo "Chrome native host manifest sync failed; continuing with existing browser manifests."
+}
+
+sync_computer_use_bundled_plugin_cache() {
+    local source_plugin="$SCRIPT_DIR/resources/plugins/openai-bundled/plugins/computer-use"
+    local source_marketplace="$SCRIPT_DIR/resources/plugins/openai-bundled/.agents/plugins/marketplace.json"
+    local plugin_json="$source_plugin/.codex-plugin/plugin.json"
+    local source_backend="$source_plugin/bin/codex-computer-use-linux"
+    local source_cosmic_helper="$source_plugin/bin/codex-computer-use-cosmic"
+    local codex_home="${CODEX_HOME:-$HOME/.codex}"
+    local version
+    local cache_root
+    local cache_plugin
+    local cache_backend
+    local cache_cosmic_helper
+    local cache_parent
+    local tmp_plugin
+    local marketplace_root
+    local marketplace_plugins_dir
+
+    [ -f "$plugin_json" ] || return 0
+    [ -f "$source_backend" ] || return 0
+    [ -f "$source_cosmic_helper" ] || return 0
+
+    marketplace_root="$codex_home/.tmp/bundled-marketplaces/openai-bundled"
+    marketplace_plugins_dir="$marketplace_root/.agents/plugins"
+    if [ -f "$source_marketplace" ]; then
+        mkdir -p "$marketplace_plugins_dir"
+        rm -f "$marketplace_plugins_dir/marketplace.json"
+        cp "$source_marketplace" "$marketplace_plugins_dir/marketplace.json" && \
+            chmod u+w "$marketplace_plugins_dir/marketplace.json" || \
+            echo "Computer Use bundled marketplace sync failed; continuing with existing marketplace cache."
+    fi
+
+    version="$(bundled_plugin_version "$plugin_json" 2>/dev/null || true)"
+    [ -n "$version" ] || return 0
+
+    cache_root="$codex_home/plugins/cache/openai-bundled/computer-use"
+    cache_plugin="$cache_root/$version"
+    cache_backend="$cache_plugin/bin/codex-computer-use-linux"
+    cache_cosmic_helper="$cache_plugin/bin/codex-computer-use-cosmic"
+
+    if [ -f "$cache_backend" ] && [ -f "$cache_cosmic_helper" ] && \
+        cmp -s "$source_backend" "$cache_backend" && \
+        cmp -s "$source_cosmic_helper" "$cache_cosmic_helper"; then
+        return 0
+    fi
+
+    cache_parent="$(dirname "$cache_plugin")"
+    tmp_plugin="$cache_parent/.computer-use-$version.tmp.$$"
+    remove_tree_if_exists "$tmp_plugin"
+    mkdir -p "$cache_parent"
+
+    if cp -R "$source_plugin" "$tmp_plugin"; then
+        make_tree_owner_writable "$tmp_plugin"
+        find "$tmp_plugin" -type f -name '*:com.apple.*' -delete
+        remove_tree_if_exists "$cache_plugin"
+        mv "$tmp_plugin" "$cache_plugin"
+        echo "Computer Use plugin cache synced from bundled resources: $cache_plugin"
+    else
+        remove_tree_if_exists "$tmp_plugin"
+        echo "Computer Use plugin cache sync failed; continuing with existing cache."
     fi
 }
 
@@ -400,9 +725,11 @@ run_cli_preflight() {
 
     local -a preflight_args=(
         cli-preflight
-        --cli-path "$CODEX_CLI_PATH"
         --print-path
     )
+    if [ -n "${CODEX_CLI_PATH:-}" ]; then
+        preflight_args+=(--cli-path "$CODEX_CLI_PATH")
+    fi
     if [ "$allow_install_missing" = "1" ]; then
         preflight_args+=(--allow-install-missing)
     fi
@@ -428,7 +755,11 @@ run_cli_preflight_background() {
     fi
 
     (
-        if ! run_update_manager cli-preflight --cli-path "$CODEX_CLI_PATH" --print-path >/dev/null 2>&1; then
+        local -a args=(cli-preflight --print-path)
+        if [ -n "${CODEX_CLI_PATH:-}" ]; then
+            args+=(--cli-path "$CODEX_CLI_PATH")
+        fi
+        if ! run_update_manager "${args[@]}" >/dev/null 2>&1; then
             echo "Codex CLI background preflight failed. Continuing with the current CLI."
         fi
     ) &
@@ -444,7 +775,11 @@ run_gui_cli_prompt() {
     fi
 
     local refreshed_path=""
-    if ! refreshed_path="$(run_update_manager prompt-install-cli --cli-path "$CODEX_CLI_PATH" --print-path)"; then
+    local -a args=(prompt-install-cli --print-path)
+    if [ -n "${CODEX_CLI_PATH:-}" ]; then
+        args+=(--cli-path "$CODEX_CLI_PATH")
+    fi
+    if ! refreshed_path="$(run_update_manager "${args[@]}")"; then
         return 1
     fi
 
@@ -515,6 +850,7 @@ find_codex_cli() {
 
     local candidate
     for candidate in \
+        "$HOME/.bun/bin/codex" \
         "$HOME/.nvm/versions/node/current/bin/codex" \
         "$HOME/.nvm/versions/node"/*/bin/codex \
         "$HOME/.local/share/pnpm/codex" \
@@ -773,7 +1109,7 @@ pid_has_webview_server_cmdline() {
     [ -d "/proc/$pid" ] || return 1
     pid_is_current_user "$pid" || return 1
     cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
-    [[ "$cmdline" == *"http.server $CODEX_LINUX_WEBVIEW_PORT"* ]]
+    [[ "$cmdline" == *"http.server $CODEX_LINUX_WEBVIEW_PORT"* || "$cmdline" == *"webview-server.py $CODEX_LINUX_WEBVIEW_PORT"* ]]
 }
 
 pid_is_webview_server() {
@@ -970,7 +1306,7 @@ ensure_webview_server() {
     stop_owned_webview_server
 
     cd "$WEBVIEW_DIR"
-    python3 -m http.server "$CODEX_LINUX_WEBVIEW_PORT" --bind 127.0.0.1 &
+    python3 "$SCRIPT_DIR/.codex-linux/webview-server.py" "$CODEX_LINUX_WEBVIEW_PORT" --bind 127.0.0.1 &
     STARTED_WEBVIEW_PID=$!
     echo "$STARTED_WEBVIEW_PID" > "$WEBVIEW_PID_FILE"
 
@@ -1007,18 +1343,200 @@ clear_stale_pid_file() {
     fi
 }
 
+reconcile_runtime_state() {
+    local live_app_pid=""
+    local webview_pid=""
+
+    if live_app_pid="$(find_running_app_pid)" || { [ -S "$LAUNCH_ACTION_SOCKET" ] && live_app_pid="$(discover_running_app_pid)"; }; then
+        echo "$live_app_pid" > "$APP_PID_FILE"
+        return 0
+    fi
+
+    clear_stale_pid_file
+
+    if [ -e "$LAUNCH_ACTION_SOCKET" ]; then
+        rm -f "$LAUNCH_ACTION_SOCKET"
+    fi
+
+    if [ ! -f "$WEBVIEW_PID_FILE" ]; then
+        return 0
+    fi
+
+    webview_pid="$(cat "$WEBVIEW_PID_FILE" 2>/dev/null || true)"
+    if [ -z "$webview_pid" ] || { ! pid_is_webview_server "$webview_pid" && ! pid_is_stale_webview_server "$webview_pid"; }; then
+        rm -f "$WEBVIEW_PID_FILE"
+    fi
+}
+
+is_wsl_environment() {
+    if [ -n "${WSL_INTEROP:-}" ] || [ -n "${WSL_DISTRO_NAME:-}" ]; then
+        return 0
+    fi
+
+    grep -qiE "(microsoft|wsl)" /proc/sys/kernel/osrelease 2>/dev/null
+}
+
+is_wslg_session() {
+    is_wsl_environment || return 1
+
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        return 0
+    fi
+
+    [ -n "${DISPLAY:-}" ] && [ -e /mnt/wslg ]
+}
+
+normalize_linux_rendering_mode() {
+    case "${CODEX_LINUX_RENDERING_MODE:-auto}" in
+        auto|default|wslg)
+            echo "${CODEX_LINUX_RENDERING_MODE:-auto}"
+            ;;
+        *)
+            echo "Invalid CODEX_LINUX_RENDERING_MODE='${CODEX_LINUX_RENDERING_MODE:-}'; using auto" >&2
+            echo "auto"
+            ;;
+    esac
+}
+
+truthy_env_value() {
+    case "${1:-}" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+falsey_env_value() {
+    case "${1:-}" in
+        0|false|FALSE|no|NO|off|OFF) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+scan_electron_rendering_arg() {
+    case "$1" in
+        --ozone-platform|--ozone-platform=*|--ozone-platform-hint|--ozone-platform-hint=*)
+            ELECTRON_OZONE_SWITCH_IN_ARGS=1
+            ;;
+        --use-gl|--use-gl=*|--use-angle|--use-angle=*)
+            ELECTRON_GL_SWITCH_PROVIDED=1
+            ;;
+        --disable-gpu|--disable-gpu=*)
+            ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS=1
+            ;;
+        --disable-gpu-compositing|--disable-gpu-compositing=*)
+            ELECTRON_GPU_COMPOSITING_SWITCH_PROVIDED=1
+            ;;
+    esac
+}
+
+apply_electron_rendering_profile() {
+    local requested_mode
+    requested_mode="$(normalize_linux_rendering_mode)"
+
+    ELECTRON_RENDERING_MODE="$requested_mode"
+    ELECTRON_WSLG_DETECTED=0
+    if is_wslg_session; then
+        ELECTRON_WSLG_DETECTED=1
+    fi
+
+    case "$requested_mode" in
+        auto)
+            if [ "$ELECTRON_WSLG_DETECTED" -eq 1 ]; then
+                ELECTRON_RENDERING_MODE="wslg"
+            else
+                ELECTRON_RENDERING_MODE="default"
+            fi
+            ;;
+        default)
+            return 0
+            ;;
+    esac
+
+    [ "$ELECTRON_RENDERING_MODE" = "wslg" ] || return 0
+
+    if [ "$ELECTRON_PLATFORM_EXPLICIT" -eq 0 ] && [ "$ELECTRON_OZONE_SWITCH_IN_ARGS" -eq 0 ]; then
+        ELECTRON_OZONE_PLATFORM="x11"
+        ELECTRON_OZONE_HINT=""
+    fi
+
+    if [ "$ELECTRON_GL_SWITCH_PROVIDED" -eq 0 ] && [ "$ELECTRON_GPU_ENABLED" = "1" ] && [ "$ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS" -eq 0 ]; then
+        ELECTRON_ARGS+=(--use-gl=angle)
+        ELECTRON_GL_SWITCH_PROVIDED=1
+        ELECTRON_GL_SWITCH_ADDED=1
+    fi
+}
+
+should_disable_gpu_compositing() {
+    if [ "$ELECTRON_GPU_COMPOSITING_SWITCH_PROVIDED" -eq 1 ]; then
+        return 0
+    fi
+
+    if [ -n "${CODEX_ELECTRON_DISABLE_GPU_COMPOSITING:-}" ]; then
+        if truthy_env_value "$CODEX_ELECTRON_DISABLE_GPU_COMPOSITING"; then
+            return 0
+        fi
+        if falsey_env_value "$CODEX_ELECTRON_DISABLE_GPU_COMPOSITING"; then
+            return 1
+        fi
+        echo "Invalid CODEX_ELECTRON_DISABLE_GPU_COMPOSITING='${CODEX_ELECTRON_DISABLE_GPU_COMPOSITING:-}'; using rendering profile default" >&2
+    fi
+
+    [ "$ELECTRON_RENDERING_MODE" != "wslg" ]
+}
+
+should_force_renderer_accessibility() {
+    if [ -n "${CODEX_FORCE_RENDERER_ACCESSIBILITY:-}" ]; then
+        if truthy_env_value "$CODEX_FORCE_RENDERER_ACCESSIBILITY"; then
+            return 0
+        fi
+        if falsey_env_value "$CODEX_FORCE_RENDERER_ACCESSIBILITY"; then
+            return 1
+        fi
+        case "$CODEX_FORCE_RENDERER_ACCESSIBILITY" in
+            auto|AUTO|Auto) ;;
+            *)
+                echo "Invalid CODEX_FORCE_RENDERER_ACCESSIBILITY='${CODEX_FORCE_RENDERER_ACCESSIBILITY:-}'; using rendering profile default" >&2
+                ;;
+        esac
+    fi
+
+    [ "$ELECTRON_RENDERING_MODE" != "wslg" ]
+}
+
 set_electron_defaults() {
     ELECTRON_OZONE_PLATFORM=""
     ELECTRON_OZONE_HINT="auto"
     ELECTRON_GPU_ENABLED=1
+    ELECTRON_RENDERING_MODE="default"
+    ELECTRON_WSLG_DETECTED=0
+    ELECTRON_PLATFORM_EXPLICIT=0
+    ELECTRON_OZONE_SWITCH_IN_ARGS=0
+    ELECTRON_GL_SWITCH_PROVIDED=0
+    ELECTRON_GL_SWITCH_ADDED=0
+    ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS=0
+    ELECTRON_GPU_COMPOSITING_DISABLED=0
+    ELECTRON_GPU_COMPOSITING_SWITCH_PROVIDED=0
+    ELECTRON_RENDERER_ACCESSIBILITY_FORCED=0
     ELECTRON_ARGS=()
+    local passthrough=0
 
     while [ "$#" -gt 0 ]; do
+        if [ "$passthrough" -eq 1 ]; then
+            ELECTRON_ARGS+=("$1")
+            scan_electron_rendering_arg "$1"
+            shift
+            continue
+        fi
+
         case "$1" in
+            --)
+                passthrough=1
+                ;;
             --safe-mode)
                 ELECTRON_OZONE_PLATFORM="x11"
                 ELECTRON_OZONE_HINT=""
                 ELECTRON_GPU_ENABLED=0
+                ELECTRON_PLATFORM_EXPLICIT=1
                 ;;
             --disable-gpu)
                 ELECTRON_GPU_ENABLED=0
@@ -1029,21 +1547,26 @@ set_electron_defaults() {
             --x11)
                 ELECTRON_OZONE_PLATFORM="x11"
                 ELECTRON_OZONE_HINT=""
+                ELECTRON_PLATFORM_EXPLICIT=1
                 ;;
             --wayland)
                 ELECTRON_OZONE_PLATFORM="wayland"
                 ELECTRON_OZONE_HINT=""
+                ELECTRON_PLATFORM_EXPLICIT=1
                 ;;
             --ozone-platform=*)
                 ELECTRON_OZONE_PLATFORM="${1#--ozone-platform=}"
                 ELECTRON_OZONE_HINT=""
+                ELECTRON_PLATFORM_EXPLICIT=1
                 ;;
             --ozone-platform-hint=*)
                 ELECTRON_OZONE_HINT="${1#--ozone-platform-hint=}"
                 ELECTRON_OZONE_PLATFORM=""
+                ELECTRON_PLATFORM_EXPLICIT=1
                 ;;
             *)
                 ELECTRON_ARGS+=("$1")
+                scan_electron_rendering_arg "$1"
                 ;;
         esac
         shift
@@ -1069,6 +1592,8 @@ set_electron_defaults() {
         ELECTRON_OZONE_HINT=""
         echo "Detected Sommelier (SOMMELIER_VERSION=$SOMMELIER_VERSION); forcing --ozone-platform=x11 (Wayland windows are not visible under ChromeOS Crostini)"
     fi
+
+    apply_electron_rendering_profile
 }
 
 build_electron_launch_args() {
@@ -1078,8 +1603,14 @@ build_electron_launch_args() {
         --app-id="$CODEX_LINUX_APP_ID"
         --disable-dev-shm-usage
         --disable-gpu-sandbox
-        --disable-gpu-compositing
     )
+
+    if should_disable_gpu_compositing; then
+        ELECTRON_LAUNCH_ARGS+=(--disable-gpu-compositing)
+        ELECTRON_GPU_COMPOSITING_DISABLED=1
+    else
+        ELECTRON_GPU_COMPOSITING_DISABLED=0
+    fi
 
     if [ "$CODEX_LINUX_APP_ID" != "codex-desktop" ]; then
         ELECTRON_LAUNCH_ARGS+=(--user-data-dir="${CODEX_ELECTRON_USER_DATA_DIR:-$APP_STATE_DIR/electron-user-data}")
@@ -1089,7 +1620,7 @@ build_electron_launch_args() {
 
     if [ -n "$ELECTRON_OZONE_PLATFORM" ]; then
         ELECTRON_LAUNCH_ARGS+=(--ozone-platform="$ELECTRON_OZONE_PLATFORM")
-    elif [ -n "$ELECTRON_OZONE_HINT" ]; then
+    elif [ -n "$ELECTRON_OZONE_HINT" ] && [ "$ELECTRON_OZONE_SWITCH_IN_ARGS" -eq 0 ]; then
         ELECTRON_LAUNCH_ARGS+=(--ozone-platform-hint="$ELECTRON_OZONE_HINT")
     fi
 
@@ -1097,8 +1628,11 @@ build_electron_launch_args() {
         ELECTRON_LAUNCH_ARGS+=(--disable-gpu --disable-features=Vulkan)
     fi
 
-    if [ "${CODEX_FORCE_RENDERER_ACCESSIBILITY:-1}" = "1" ]; then
+    if should_force_renderer_accessibility; then
         ELECTRON_LAUNCH_ARGS+=(--force-renderer-accessibility)
+        ELECTRON_RENDERER_ACCESSIBILITY_FORCED=1
+    else
+        ELECTRON_RENDERER_ACCESSIBILITY_FORCED=0
     fi
 
     if [ "$ELECTRON_OZONE_PLATFORM" = "wayland" ]; then
@@ -1139,12 +1673,12 @@ launch_electron() {
     build_electron_launch_args
 
     if [ "$WARM_START" -eq 1 ]; then
-        echo "Electron warm-start handoff: pid=$RUNNING_APP_PID ozone_platform=${ELECTRON_OZONE_PLATFORM:-default} ozone_hint=${ELECTRON_OZONE_HINT:-none} gpu_enabled=$ELECTRON_GPU_ENABLED"
+        echo "Electron warm-start handoff: pid=$RUNNING_APP_PID rendering_mode=$ELECTRON_RENDERING_MODE wslg_detected=$ELECTRON_WSLG_DETECTED ozone_platform=${ELECTRON_OZONE_PLATFORM:-default} ozone_hint=${ELECTRON_OZONE_HINT:-none} gpu_enabled=$ELECTRON_GPU_ENABLED gpu_disable_arg=$ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS gpu_compositing_disabled=$ELECTRON_GPU_COMPOSITING_DISABLED gl_switch_added=$ELECTRON_GL_SWITCH_ADDED renderer_accessibility_forced=$ELECTRON_RENDERER_ACCESSIBILITY_FORCED"
         "$SCRIPT_DIR/electron" "${ELECTRON_LAUNCH_ARGS[@]}" "${ELECTRON_ARGS[@]}"
         return $?
     fi
 
-    echo "Electron launch mode: ozone_platform=${ELECTRON_OZONE_PLATFORM:-default} ozone_hint=${ELECTRON_OZONE_HINT:-none} gpu_enabled=$ELECTRON_GPU_ENABLED"
+    echo "Electron launch mode: rendering_mode=$ELECTRON_RENDERING_MODE wslg_detected=$ELECTRON_WSLG_DETECTED ozone_platform=${ELECTRON_OZONE_PLATFORM:-default} ozone_hint=${ELECTRON_OZONE_HINT:-none} gpu_enabled=$ELECTRON_GPU_ENABLED gpu_disable_arg=$ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS gpu_compositing_disabled=$ELECTRON_GPU_COMPOSITING_DISABLED gl_switch_added=$ELECTRON_GL_SWITCH_ADDED renderer_accessibility_forced=$ELECTRON_RENDERER_ACCESSIBILITY_FORCED"
     "$SCRIPT_DIR/electron" "${ELECTRON_LAUNCH_ARGS[@]}" "${ELECTRON_ARGS[@]}" &
     ELECTRON_PID=$!
     if [ -n "${RUNNING_APP_PID:-}" ] && pid_matches_executable "$RUNNING_APP_PID" "$SCRIPT_DIR/electron"; then
@@ -1166,7 +1700,7 @@ configure_side_by_side_app_env
 load_packaged_runtime_helper
 prepend_managed_node_runtime_to_path
 register_url_scheme_handlers
-clear_stale_pid_file
+reconcile_runtime_state
 detect_warm_start
 trap cleanup_launcher EXIT
 
@@ -1229,7 +1763,13 @@ fi
 
 export_packaged_runtime_env
 if needs_cold_start; then
+    clear_bundled_marketplace_tmp_cache
+    # The runtime marketplace is populated asynchronously and can briefly
+    # recreate read-only plugin cache trees before the sync below replaces them.
+    monitor_bundled_marketplace_tmp_permissions
     sync_browser_use_bundled_plugin_cache
+    sync_chrome_bundled_plugin_cache
+    sync_computer_use_bundled_plugin_cache
 fi
 resolve_browser_use_runtime_env
 

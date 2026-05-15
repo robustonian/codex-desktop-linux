@@ -6,6 +6,10 @@ default_rebuild_report_dir() {
 
 prepare_rebuild_report_dir() {
     local report_dir="$1"
+    case "$report_dir" in
+        /*) ;;
+        *) report_dir="$PWD/$report_dir" ;;
+    esac
     mkdir -p "$report_dir"
     echo "$report_dir"
 }
@@ -35,6 +39,7 @@ const report = {
   mainBundle: patchReport.mainBundle ?? null,
   iconAsset: patchReport.iconAsset ?? null,
   desktopName: patchReport.desktopName ?? null,
+  linuxTarget: patchReport.linuxTarget ?? null,
   patches: patchReport.patches ?? [],
   patchReportPath: path.resolve(patchReportPath),
 };

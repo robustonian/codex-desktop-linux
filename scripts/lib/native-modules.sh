@@ -24,6 +24,19 @@ better_sqlite3_build_version() {
     echo "$detected_version"
 }
 
+prune_native_module_build_artifacts() {
+    local module_dir="$1"
+    local build_dir="$module_dir/build"
+
+    [ -d "$build_dir" ] || return 0
+
+    # node-gyp leaves Makefiles/configs/objects with absolute build paths.
+    # The packaged runtime only needs the compiled .node binaries.
+    find "$build_dir" -type f ! -name "*.node" -delete 2>/dev/null || true
+    find "$build_dir" -type d -empty -delete 2>/dev/null || true
+    find "$module_dir" -type f -name "*.target.mk" -delete 2>/dev/null || true
+}
+
 build_native_modules() {
     local app_extracted="$1"
 
@@ -65,6 +78,8 @@ build_native_modules() {
     rm -rf "$app_extracted/node_modules/node-pty"
     cp -r "$build_dir/node_modules/better-sqlite3" "$app_extracted/node_modules/"
     cp -r "$build_dir/node_modules/node-pty" "$app_extracted/node_modules/"
+    prune_native_module_build_artifacts "$app_extracted/node_modules/better-sqlite3"
+    prune_native_module_build_artifacts "$app_extracted/node_modules/node-pty"
 }
 
 # ---- Download Linux Electron ----
@@ -107,4 +122,3 @@ download_electron() {
 
     info "Electron ready"
 }
-

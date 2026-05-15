@@ -53,10 +53,14 @@ main() {
     [ -x "$APP_DIR/start.sh" ] || error "Missing launcher: $APP_DIR/start.sh"
     [ -f "$SPEC_TEMPLATE" ] || error "Missing spec template: $SPEC_TEMPLATE"
     [ -f "$DESKTOP_TEMPLATE" ] || error "Missing desktop template: $DESKTOP_TEMPLATE"
-    [ -f "$UPDATER_SERVICE_SOURCE" ] || error "Missing updater service template: $UPDATER_SERVICE_SOURCE"
-    [ -f "$USER_SERVICE_HELPER_TEMPLATE" ] || error "Missing updater user service helper: $USER_SERVICE_HELPER_TEMPLATE"
     [ -f "$ICON_SOURCE" ] || error "Missing icon: $ICON_SOURCE"
-    [ -f "$PACKAGED_RUNTIME_SOURCE" ] || error "Missing packaged launcher runtime helper: $PACKAGED_RUNTIME_SOURCE"
+    if package_with_updater_enabled; then
+        [ -f "$UPDATER_SERVICE_SOURCE" ] || error "Missing updater service template: $UPDATER_SERVICE_SOURCE"
+        [ -f "$USER_SERVICE_HELPER_TEMPLATE" ] || error "Missing updater user service helper: $USER_SERVICE_HELPER_TEMPLATE"
+        [ -f "$PACKAGED_RUNTIME_SOURCE" ] || error "Missing packaged launcher runtime helper: $PACKAGED_RUNTIME_SOURCE"
+    else
+        info "Building package without codex-update-manager (PACKAGE_WITH_UPDATER=0)"
+    fi
     command -v rpmbuild >/dev/null 2>&1 || error "rpmbuild is required (install rpm-build)"
 
     ensure_updater_binary
@@ -75,7 +79,7 @@ main() {
     local staging_root="$build_root/STAGING"
 
     stage_common_package_files "$staging_root"
-    stage_update_builder_bundle "$staging_root"
+    stage_optional_update_builder_bundle "$staging_root"
 
     cat > "$staging_root/usr/bin/$PACKAGE_NAME" <<SCRIPT
 #!/bin/bash
@@ -90,6 +94,7 @@ SCRIPT
         -e "s/__RPM_RELEASE__/$rpm_rel/g" \
         -e "s|__RPM_STAGING_DIR__|$staging_root|g" \
         -e "s/__ARCH__/$arch/g" \
+        -e "s/__PACKAGE_WITH_UPDATER__/$(package_with_updater_enabled && echo 1 || echo 0)/g" \
         "$SPEC_TEMPLATE" > "$spec_file"
 
     local rpmbuild_dir="$build_root/rpmbuild"

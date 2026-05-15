@@ -37,12 +37,16 @@ pacman_version_parts() {
 main() {
 	ensure_app_layout
 	ensure_file_exists "$PKGBUILD_TEMPLATE" "PKGBUILD template"
-	ensure_file_exists "$INSTALL_HOOKS" "install hooks"
 	ensure_file_exists "$DESKTOP_TEMPLATE" "desktop template"
-	ensure_file_exists "$UPDATER_SERVICE_SOURCE" "updater service template"
-	ensure_file_exists "$USER_SERVICE_HELPER_TEMPLATE" "updater user service helper"
 	ensure_file_exists "$ICON_SOURCE" "icon"
-	ensure_file_exists "$PACKAGED_RUNTIME_SOURCE" "packaged launcher runtime helper"
+	if package_with_updater_enabled; then
+		ensure_file_exists "$INSTALL_HOOKS" "install hooks"
+		ensure_file_exists "$UPDATER_SERVICE_SOURCE" "updater service template"
+		ensure_file_exists "$USER_SERVICE_HELPER_TEMPLATE" "updater user service helper"
+		ensure_file_exists "$PACKAGED_RUNTIME_SOURCE" "packaged launcher runtime helper"
+	else
+		info "Building package without codex-update-manager (PACKAGE_WITH_UPDATER=0)"
+	fi
 	command -v makepkg >/dev/null 2>&1 || error "makepkg is required (part of pacman)"
 
 	if [ "$(id -u)" -eq 0 ]; then
@@ -63,7 +67,7 @@ main() {
 	local staging_root="$build_root/staging"
 
 	stage_common_package_files "$staging_root"
-	stage_update_builder_bundle "$staging_root"
+	stage_optional_update_builder_bundle "$staging_root"
 	write_launcher_stub "$staging_root"
 
 	sed \
@@ -73,8 +77,15 @@ main() {
 		-e "s|__STAGING_DIR__|$staging_root|g" \
 		-e "s/__ARCH__/$arch/g" \
 		"$PKGBUILD_TEMPLATE" >"$build_root/PKGBUILD"
-	sed -e "s|/opt/codex-desktop|/opt/$PACKAGE_NAME|g" \
-		"$INSTALL_HOOKS" >"$build_root/${PACKAGE_NAME}.install"
+	if package_with_updater_enabled; then
+		sed -e "s|/opt/codex-desktop|/opt/$PACKAGE_NAME|g" \
+			"$INSTALL_HOOKS" >"$build_root/${PACKAGE_NAME}.install"
+	else
+		write_no_updater_pacman_install_hooks "$build_root/${PACKAGE_NAME}.install"
+		sed -i \
+			-e "/'polkit'/d" \
+			"$build_root/PKGBUILD"
+	fi
 
 	mkdir -p "$DIST_DIR"
 	info "Building ${PACKAGE_NAME}-${PACMAN_PKGVER}-${PACMAN_PKGREL}-${arch}.pkg.tar.zst"
