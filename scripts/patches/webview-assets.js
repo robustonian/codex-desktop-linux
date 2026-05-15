@@ -83,6 +83,56 @@ function applyLinuxAppSunsetPatch(currentSource) {
   return currentSource;
 }
 
+function applyLinuxRemoteControlConfigGatePatch(currentSource) {
+  if (currentSource.includes("features.remote_control")) {
+    return currentSource;
+  }
+
+  const remoteConnectionsFunctionMatch = currentSource.match(
+    /function\s+([A-Za-z_$][\w$]*)\(\)\{let\s+[A-Za-z_$][\w$]*=\(0,[A-Za-z_$][\w$]*\.c\)\(3\),\{data:([A-Za-z_$][\w$]*)\}=([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\),[A-Za-z_$][\w$]*=([A-Za-z_$][\w$]*)\(`4114442250`\);if\(\2\?\.config\[`features\.remote_connections`\]===!0\)return!0;/u,
+  );
+
+  const remoteControlGateRegex = /function\s+([A-Za-z_$][\w$]*)\(\)\{return\s+([A-Za-z_$][\w$]*)\(`1042620455`\)\}/u;
+  const remoteControlGateMatch = currentSource.match(remoteControlGateRegex);
+  if (remoteConnectionsFunctionMatch != null && remoteControlGateMatch != null) {
+    const [
+      ,
+      ,
+      configVar,
+      useConfigQueryFn,
+      configQueryArg,
+      hostConfigFn,
+      hostConfigArg,
+      statsigFn,
+    ] = remoteConnectionsFunctionMatch;
+    const [, remoteControlFunctionName, remoteControlStatsigFn] = remoteControlGateMatch;
+    if (statsigFn === remoteControlStatsigFn) {
+      return currentSource.replace(
+        remoteControlGateRegex,
+        `function ${remoteControlFunctionName}(){let{data:codexLinuxRemoteControlConfig}=${useConfigQueryFn}(${configQueryArg},${hostConfigFn}(${hostConfigArg})),codexLinuxRemoteControlStatsig=${remoteControlStatsigFn}(\`1042620455\`);if(codexLinuxRemoteControlConfig?.config[\`features.remote_control\`]===!0)return!0;let codexLinuxRemoteControlFeatures=codexLinuxRemoteControlConfig?.config.features;return typeof codexLinuxRemoteControlFeatures==\`object\`&&!!codexLinuxRemoteControlFeatures&&!Array.isArray(codexLinuxRemoteControlFeatures)?Object.getOwnPropertyDescriptor(codexLinuxRemoteControlFeatures,\`remote_control\`)?.value===!0||codexLinuxRemoteControlStatsig:codexLinuxRemoteControlStatsig}`,
+      );
+    }
+  }
+
+  const fallbackGateMatch = currentSource.match(remoteControlGateRegex);
+  if (remoteConnectionsFunctionMatch != null && fallbackGateMatch != null) {
+    const [, remoteConnectionsFunctionName] = remoteConnectionsFunctionMatch;
+    const [, remoteControlFunctionName, remoteControlStatsigFn] = fallbackGateMatch;
+    return currentSource.replace(
+      remoteControlGateRegex,
+      `function ${remoteControlFunctionName}(){return ${remoteConnectionsFunctionName}()||${remoteControlStatsigFn}(\`1042620455\`)}`,
+    );
+  }
+
+  if (currentSource.includes("1042620455")) {
+    console.warn(
+      "WARN: Could not find remote control visibility gate needle — skipping Linux remote control config gate patch",
+    );
+  }
+
+  return currentSource;
+}
+
 function applyBrowserAnnotationScreenshotPatch(currentSource) {
   let patchedSource = currentSource;
 
@@ -160,5 +210,6 @@ module.exports = {
   applyBrowserAnnotationScreenshotPatch,
   applyLinuxAppSunsetPatch,
   applyLinuxOpaqueWindowsDefaultPatch,
+  applyLinuxRemoteControlConfigGatePatch,
   patchCommentPreloadBundle,
 };

@@ -33,6 +33,8 @@ const {
   applyLinuxMenuPatch,
   applyLinuxAppSunsetPatch,
   applyLinuxOpaqueBackgroundPatch,
+  applyLinuxRemoteControlConfigGatePatch,
+  applyLinuxRemoteControlConfigPreservationPatch,
   applyLinuxSetIconPatch,
   applyLinuxSingleInstancePatch,
   applyLinuxTrayCloseSettingPatch,
@@ -254,11 +256,13 @@ test("default core patch descriptors are grouped and unique", () => {
     "linux-settings-persistence",
     "linux-launch-actions",
     "linux-hotkey-window-prewarm",
+    "linux-remote-control-config-preservation",
     "linux-git-origins-source-fallback",
     "linux-app-sunset-gate",
     "opaque-window-default-general-settings",
     "opaque-window-default-webview-index",
     "opaque-window-default-resolved-theme",
+    "linux-remote-control-config-gate",
     "linux-computer-use-ui-availability",
     "linux-computer-use-install-flow",
     "linux-app-updater-bridge",
@@ -400,6 +404,28 @@ function appSunsetBundleWithDriftingAliasFixture() {
 
 function appSunsetBundleWithDriftingGateFixture() {
   return appSunsetBundleFixture().replace("if(ms(`2929582856`)){", "if(ms?.(`2929582856`)){");
+}
+
+function remoteConnectionVisibilityBundleFixture() {
+  return [
+    "import{_ as e}from\"./app-server-manager-signals.js\";",
+    "import{t}from\"./compiler-runtime.js\";",
+    "import{V as n,p as r,z as i}from\"./vscode-api.js\";",
+    "import{S as a}from\"./config-queries.js\";",
+    "import{o}from\"./statsig.js\";",
+    "var s=t();",
+    "function c(){let t=(0,s.c)(3),{data:r}=i(a,n(e)),c=o(`4114442250`);if(r?.config[`features.remote_connections`]===!0)return!0;let l=r?.config.features;if(typeof l!=`object`||!l||Array.isArray(l))return c;let u;return t[0]!==l||t[1]!==c?(u=Object.getOwnPropertyDescriptor(l,`remote_connections`)?.value===!0||c,t[0]=l,t[1]=c,t[2]=u):u=t[2],u}",
+    "function l(){return o(`1042620455`)}",
+    "export{c as n,l as r};",
+  ].join("");
+}
+
+function remoteControlConfigRemovalBundleFixture() {
+  return [
+    "var pV=`config.toml`;",
+    "async function mV({codexHome:e,hostConfig:n,logger:r=t.Jr()}){if(n.kind===`local`)try{await hV(i.default.join(e??t.Rr({hostConfig:n,preferWsl:t.Kr(n)}),pV))&&r.info(`Removed remote_control from config before app-server start`)}catch(e){r.warning(`Failed to remove remote_control before app-server start`,{safe:{},sensitive:{error:e}})}}",
+    "async function hV(e){return true}",
+  ].join("");
 }
 
 function appUpdaterBundleFixture() {
@@ -1008,6 +1034,31 @@ test("warns when the app sunset key is present but the gate shape drifts", () =>
   assert.deepEqual(warnings, [
     "WARN: Could not find app sunset gate needle — skipping Linux app sunset patch",
   ]);
+});
+
+test("allows remote control visibility to follow config on Linux", () => {
+  const patched = applyPatchTwice(
+    applyLinuxRemoteControlConfigGatePatch,
+    remoteConnectionVisibilityBundleFixture(),
+  );
+
+  assert.match(patched, /features\.remote_control/);
+  assert.match(
+    patched,
+    /Object\.getOwnPropertyDescriptor\(codexLinuxRemoteControlFeatures,`remote_control`\)\?\.value===!0\|\|codexLinuxRemoteControlStatsig/,
+  );
+  assert.doesNotMatch(patched, /function l\(\)\{return o\(`1042620455`\)\}/);
+});
+
+test("preserves remote_control config before local app-server start on Linux", () => {
+  const patched = applyPatchTwice(
+    applyLinuxRemoteControlConfigPreservationPatch,
+    remoteControlConfigRemovalBundleFixture(),
+  );
+
+  assert.match(patched, /let codexLinuxPreserveRemoteControlConfig=process\.platform===`linux`;/);
+  assert.match(patched, /if\(!codexLinuxPreserveRemoteControlConfig&&n\.kind===`local`\)try\{/);
+  assert.doesNotMatch(patched, /if\(n\.kind===`local`\)try\{/);
 });
 
 test("adds Linux package updater behind the existing app updater manager", () => {

@@ -60,6 +60,7 @@ const {
   applyLinuxMenuPatch,
   applyLinuxOpaqueBackgroundPatch,
   applyLinuxQuitGuardPatch,
+  applyLinuxRemoteControlConfigPreservationPatch,
   applyLinuxSetIconPatch,
   applyLinuxSingleInstancePatch,
   applyLinuxTrayPatch,
@@ -88,6 +89,7 @@ const {
   applyBrowserAnnotationScreenshotPatch,
   applyLinuxAppSunsetPatch,
   applyLinuxOpaqueWindowsDefaultPatch,
+  applyLinuxRemoteControlConfigGatePatch,
   patchCommentPreloadBundle,
 } = require("./patches/webview-assets.js");
 
@@ -159,6 +161,8 @@ module.exports = {
   applyLinuxMenuPatch,
   applyLinuxOpaqueBackgroundPatch,
   applyLinuxOpaqueWindowsDefaultPatch,
+  applyLinuxRemoteControlConfigGatePatch,
+  applyLinuxRemoteControlConfigPreservationPatch,
   applyLinuxQuitGuardPatch,
   applyLinuxSetIconPatch,
   applyLinuxSettingsPersistencePatch,

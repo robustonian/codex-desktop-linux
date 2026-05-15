@@ -799,6 +799,37 @@ function applyLinuxGitOriginsSourceFallbackPatch(currentSource) {
   return currentSource;
 }
 
+function applyLinuxRemoteControlConfigPreservationPatch(currentSource) {
+  const marker = "codexLinuxPreserveRemoteControlConfig";
+  if (currentSource.includes(marker)) {
+    return currentSource;
+  }
+
+  const logNeedle = "Removed remote_control from config before app-server start";
+  const logIndex = currentSource.indexOf(logNeedle);
+  if (logIndex === -1) {
+    console.warn(
+      "WARN: Could not find remote_control config removal log — skipping remote control preservation patch",
+    );
+    return currentSource;
+  }
+
+  const guardRegex =
+    /if\(([A-Za-z_$][\w$]*)\.kind===`local`\)try\{(?=[\s\S]{0,800}?Removed remote_control from config before app-server start)/;
+  const guardMatch = currentSource.match(guardRegex);
+  if (guardMatch == null) {
+    console.warn(
+      "WARN: Could not find remote_control config removal guard — skipping remote control preservation patch",
+    );
+    return currentSource;
+  }
+
+  return currentSource.replace(
+    guardRegex,
+    `let ${marker}=process.platform===\`linux\`;if(!${marker}&&$1.kind===\`local\`)try{`,
+  );
+}
+
 module.exports = {
   applyBrowserUseNodeReplApprovalPatch,
   applyLinuxBrowserUseIabVisibleOnCreatePatch,
@@ -811,6 +842,7 @@ module.exports = {
   applyLinuxMenuPatch,
   applyLinuxOpaqueBackgroundPatch,
   applyLinuxQuitGuardPatch,
+  applyLinuxRemoteControlConfigPreservationPatch,
   applyLinuxSetIconPatch,
   applyLinuxSingleInstancePatch,
   applyLinuxTrayPatch,
