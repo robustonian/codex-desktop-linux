@@ -261,6 +261,7 @@ test("default core patch descriptors are grouped and unique", () => {
     "linux-app-sunset-gate",
     "opaque-window-default-general-settings",
     "opaque-window-default-webview-index",
+    "opaque-window-default-webview-app-main",
     "opaque-window-default-resolved-theme",
     "linux-remote-control-config-gate",
     "linux-computer-use-ui-availability",

@@ -8,11 +8,14 @@ const path = require("node:path");
 function applyLinuxOpaqueWindowsDefaultPatch(currentSource) {
   let patchedSource = currentSource;
 
+  const linuxPlatformCheck =
+    "(typeof navigator<`u`&&((navigator.userAgentData?.platform??navigator.platform??navigator.userAgent).toLowerCase().includes(`linux`)))";
+
   const mergeNeedle = "opaqueWindows:e?.opaqueWindows??n.opaqueWindows,semanticColors:";
   const mergePatch =
-    "opaqueWindows:e?.opaqueWindows??(typeof navigator<`u`&&((navigator.userAgentData?.platform??navigator.platform??navigator.userAgent).toLowerCase().includes(`linux`))?!0:n.opaqueWindows),semanticColors:";
+    `opaqueWindows:e?.opaqueWindows??(${linuxPlatformCheck}?!0:n.opaqueWindows),semanticColors:`;
 
-  if (patchedSource.includes("opaqueWindows:e?.opaqueWindows??(typeof navigator<`u`&&")) {
+  if (patchedSource.includes("opaqueWindows:e?.opaqueWindows??((typeof navigator<`u`&&")) {
     // Already patched.
   } else if (patchedSource.includes(mergeNeedle)) {
     patchedSource = patchedSource.replace(mergeNeedle, mergePatch);
@@ -41,6 +44,18 @@ function applyLinuxOpaqueWindowsDefaultPatch(currentSource) {
     patchedSource = patchedSource.replace(currentSettingsNeedle, currentSettingsPatch);
   }
 
+  const currentSettingsRegex =
+    /(\{canImportThemeString:[^{}]+setThemePatch:([A-Za-z_$][\w$]*),theme:([A-Za-z_$][\w$]*)\}=([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)),([A-Za-z_$][\w$]*)=/u;
+  if (patchedSource.includes("codexLinuxIsPlatform()") || patchedSource.includes("codexLinuxOpaqueThemeDefault")) {
+    // Already patched by the current-shape fallback.
+  } else {
+    patchedSource = patchedSource.replace(
+      currentSettingsRegex,
+      (_match, prefix, _setThemeVar, themeVar, _themeHookVar, _variantVar, nextVar) =>
+        `${prefix};let codexLinuxIsPlatform=()=>${linuxPlatformCheck},codexLinuxOpaqueThemeDefault=${themeVar}?.opaqueWindows==null&&codexLinuxIsPlatform();${themeVar}=codexLinuxOpaqueThemeDefault?{...${themeVar},opaqueWindows:!0}:${themeVar};let ${nextVar}=`,
+    );
+  }
+
   const runtimeNeedle =
     "let T=o===`light`?C:w,E;if(T.opaqueWindows&&!XZ()){";
   const runtimePatch =
@@ -58,6 +73,28 @@ function applyLinuxOpaqueWindowsDefaultPatch(currentSource) {
     // Already patched.
   } else if (patchedSource.includes(currentRuntimeNeedle)) {
     patchedSource = patchedSource.replace(currentRuntimeNeedle, currentRuntimePatch);
+  }
+
+  const appMainRuntimeRegex =
+    /(let\{data:([A-Za-z_$][\w$]*)\}=[^;]*APPEARANCE_LIGHT_CHROME_THEME[\s\S]{0,1200}?let\{data:([A-Za-z_$][\w$]*)\}=[^;]*APPEARANCE_DARK_CHROME_THEME[\s\S]{0,2000}?let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)===`light`\?([A-Za-z_$][\w$]*):([A-Za-z_$][\w$]*)),([A-Za-z_$][\w$]*);/u;
+  if (patchedSource.includes("codexLinuxDefaultOpaqueWindows")) {
+    // Already patched by the app-main fallback.
+  } else {
+    patchedSource = patchedSource.replace(
+      appMainRuntimeRegex,
+      (
+        _match,
+        prefix,
+        lightThemeVar,
+        darkThemeVar,
+        resolvedThemeVar,
+        appearanceVar,
+        _lightResolvedVar,
+        _darkResolvedVar,
+        nextVar,
+      ) =>
+        `${prefix};document.documentElement.dataset.codexOs===\`linux\`&&(((${appearanceVar}===\`light\`?${lightThemeVar}:${darkThemeVar})?.opaqueWindows)==null&&(${resolvedThemeVar}={...${resolvedThemeVar},opaqueWindows:!0}));let codexLinuxDefaultOpaqueWindows,${nextVar};`,
+    );
   }
 
   return patchedSource;

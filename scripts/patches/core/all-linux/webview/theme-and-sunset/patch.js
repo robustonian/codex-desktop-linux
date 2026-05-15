@@ -37,6 +37,16 @@ module.exports = [
     apply: applyLinuxOpaqueWindowsDefaultPatch,
   },
   {
+    id: "opaque-window-default-webview-app-main",
+    phase: "webview-asset",
+    order: 1025,
+    ciPolicy: "optional",
+    pattern: /^app-main-.*\.js$/,
+    missingDescription: "webview app-main bundle",
+    skipDescription: "translucent sidebar default patch",
+    apply: applyLinuxOpaqueWindowsDefaultPatch,
+  },
+  {
     id: "opaque-window-default-resolved-theme",
     phase: "webview-asset",
     order: 1030,
