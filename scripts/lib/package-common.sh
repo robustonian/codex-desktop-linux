@@ -38,6 +38,45 @@ package_with_updater_enabled() {
     esac
 }
 
+package_node_binary() {
+    local managed_node="${APP_DIR:-}/resources/node-runtime/bin/node"
+    if [ -x "$managed_node" ] && [ "$("$managed_node" -e 'process.stdout.write("ok")' 2>/dev/null || true)" = "ok" ]; then
+        printf '%s\n' "$managed_node"
+        return 0
+    fi
+
+    command -v node >/dev/null 2>&1 || error "node is required"
+    command -v node
+}
+
+stage_update_builder_linux_features_config() {
+    local update_builder_root="$1"
+    local helper="$REPO_DIR/scripts/lib/linux-features.js"
+    local target="$update_builder_root/linux-features/features.json"
+    local node_bin
+
+    [ -f "$helper" ] || error "Missing Linux features helper: $helper"
+
+    node_bin="$(package_node_binary)"
+    "$node_bin" - "$helper" "$target" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+
+const helperPath = path.resolve(process.argv[2]);
+const targetPath = path.resolve(process.argv[3]);
+const { enabledLinuxFeatureIds } = require(helperPath);
+
+const enabled = enabledLinuxFeatureIds();
+if (enabled.length === 0) {
+  fs.rmSync(targetPath, { force: true });
+  process.exit(0);
+}
+
+fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+fs.writeFileSync(targetPath, `${JSON.stringify({ enabled }, null, 2)}\n`);
+NODE
+}
+
 render_desktop_entry() {
     local target="$1"
     local package_name
@@ -49,21 +88,53 @@ render_desktop_entry() {
     display_name="$(sed_escape_replacement "${PACKAGE_DISPLAY_NAME:-Codex Desktop}")"
     comment="$(sed_escape_replacement "${PACKAGE_COMMENT:-Run Codex Desktop on Linux}")"
 
-    sed \
-        -e "s/codex-desktop/$package_name/g" \
-        -e "s/^Name=.*/Name=$display_name/g" \
-        -e "s/^Comment=.*/Comment=$comment/g" \
-        "$DESKTOP_TEMPLATE" > "$rendered_target"
+    awk \
+        -v package_name="$package_name" \
+        -v display_name="$display_name" \
+        -v comment="$comment" '
+            BEGIN { in_desktop_entry = 0 }
+            /^\[Desktop Entry\]$/ {
+                in_desktop_entry = 1
+                gsub(/codex-desktop/, package_name)
+                print
+                next
+            }
+            /^\[/ {
+                in_desktop_entry = 0
+            }
+            {
+                gsub(/codex-desktop/, package_name)
+                if (in_desktop_entry && /^Name=/) {
+                    print "Name=" display_name
+                    next
+                }
+                if (in_desktop_entry && /^Comment=/) {
+                    print "Comment=" comment
+                    next
+                }
+                print
+            }
+        ' "$DESKTOP_TEMPLATE" > "$rendered_target"
     if package_with_updater_enabled; then
         mv "$rendered_target" "$target"
     else
         awk '
+            BEGIN { actions_rewritten = 0 }
             /^\[Desktop Action CheckForUpdates\]$/ { skip = 1; next }
             /^\[Desktop Action InstallReadyUpdate\]$/ { skip = 1; next }
             /^\[/ { skip = 0 }
             skip { next }
-            /^Actions=/ { next }
+            /^Actions=/ {
+                print "Actions=new-window;"
+                actions_rewritten = 1
+                next
+            }
             { print }
+            END {
+                if (actions_rewritten == 0) {
+                    print "Actions=new-window;"
+                }
+            }
         ' "$rendered_target" > "$target"
         rm -f "$rendered_target"
     fi
@@ -180,6 +251,13 @@ SCRIPT
     chmod 0644 "$target"
 }
 
+render_desktop_entry_doctor_helper() {
+    local target="$1"
+
+    cp "$REPO_DIR/packaging/linux/codex-desktop-entry-doctor.sh" "$target"
+    chmod 0644 "$target"
+}
+
 write_no_updater_deb_postinst() {
     local target="$1"
     local package_name
@@ -194,10 +272,16 @@ if command -v update-desktop-database >/dev/null 2>&1; then
 fi
 
 CLEANUP_HELPER="/opt/$package_name/.codex-linux/codex-no-updater-transition-cleanup.sh"
+DESKTOP_ENTRY_DOCTOR="/opt/$package_name/.codex-linux/codex-desktop-entry-doctor.sh"
 if [ -f "\$CLEANUP_HELPER" ]; then
     # shellcheck source=/opt/$package_name/.codex-linux/codex-no-updater-transition-cleanup.sh
     . "\$CLEANUP_HELPER"
     codex_no_updater_cleanup_update_manager_service || true
+fi
+if [ -f "\$DESKTOP_ENTRY_DOCTOR" ]; then
+    # shellcheck source=/opt/$package_name/.codex-linux/codex-desktop-entry-doctor.sh
+    . "\$DESKTOP_ENTRY_DOCTOR"
+    codex_desktop_repair_system_package_shadow_entries $package_name || true
 fi
 
 exit 0
@@ -233,6 +317,7 @@ write_no_updater_pacman_install_hooks() {
     package_name="$(sed_escape_replacement "$PACKAGE_NAME")"
     cat > "$target" <<SCRIPT
 CLEANUP_HELPER="/opt/$package_name/.codex-linux/codex-no-updater-transition-cleanup.sh"
+DESKTOP_ENTRY_DOCTOR="/opt/$package_name/.codex-linux/codex-desktop-entry-doctor.sh"
 
 codex_no_updater_cleanup_if_present() {
     if [ -f "\$CLEANUP_HELPER" ]; then
@@ -242,10 +327,19 @@ codex_no_updater_cleanup_if_present() {
     fi
 }
 
+codex_desktop_repair_if_present() {
+    if [ -f "\$DESKTOP_ENTRY_DOCTOR" ]; then
+        # shellcheck source=/opt/$package_name/.codex-linux/codex-desktop-entry-doctor.sh
+        . "\$DESKTOP_ENTRY_DOCTOR"
+        codex_desktop_repair_system_package_shadow_entries $package_name || true
+    fi
+}
+
 post_install() {
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
     fi
+    codex_desktop_repair_if_present
     codex_no_updater_cleanup_if_present
 }
 
@@ -341,6 +435,7 @@ stage_common_package_files() {
     cp -aT "$APP_DIR" "$app_root"
     mkdir -p "$app_root/.codex-linux"
     cp "$ICON_SOURCE" "$app_root/.codex-linux/$PACKAGE_NAME.png"
+    render_desktop_entry_doctor_helper "$app_root/.codex-linux/codex-desktop-entry-doctor.sh"
     render_desktop_entry "$root/usr/share/applications/$PACKAGE_NAME.desktop"
     cp "$ICON_SOURCE" "$root/usr/share/icons/hicolor/256x256/apps/$PACKAGE_NAME.png"
     if package_with_updater_enabled; then
@@ -377,10 +472,13 @@ stage_update_builder_bundle() {
     cp "$REPO_DIR/Cargo.toml" "$update_builder_root/Cargo.toml"
     cp "$REPO_DIR/Cargo.lock" "$update_builder_root/Cargo.lock"
     cp -r "$REPO_DIR/computer-use-linux" "$update_builder_root/computer-use-linux"
+    cp -r "$REPO_DIR/read-aloud-linux" "$update_builder_root/read-aloud-linux"
     cp -r "$REPO_DIR/updater" "$update_builder_root/updater"
     mkdir -p "$update_builder_root/plugins/openai-bundled/plugins"
     cp -r "$REPO_DIR/plugins/openai-bundled/plugins/computer-use" \
         "$update_builder_root/plugins/openai-bundled/plugins/computer-use"
+    cp -r "$REPO_DIR/plugins/openai-bundled/plugins/read-aloud" \
+        "$update_builder_root/plugins/openai-bundled/plugins/read-aloud"
     cp "$REPO_DIR/scripts/build-deb.sh" "$update_builder_root/scripts/build-deb.sh"
     cp "$REPO_DIR/scripts/build-rpm.sh" "$update_builder_root/scripts/build-rpm.sh"
     cp "$REPO_DIR/scripts/build-pacman.sh" "$update_builder_root/scripts/build-pacman.sh"
@@ -406,6 +504,8 @@ stage_update_builder_bundle() {
     cp "$REPO_DIR/packaging/linux/control" "$update_builder_root/packaging/linux/control"
     cp "$REPO_DIR/packaging/linux/codex-desktop.spec" "$update_builder_root/packaging/linux/codex-desktop.spec"
     cp "$REPO_DIR/packaging/linux/codex-desktop.desktop" "$update_builder_root/packaging/linux/codex-desktop.desktop"
+    cp "$REPO_DIR/packaging/linux/codex-desktop-entry-doctor.sh" \
+        "$update_builder_root/packaging/linux/codex-desktop-entry-doctor.sh"
     cp "$REPO_DIR/packaging/linux/codex-packaged-runtime.sh" "$update_builder_root/packaging/linux/codex-packaged-runtime.sh"
     cp "$REPO_DIR/packaging/linux/com.github.ilysenko.codex-desktop-linux.update.policy" \
         "$update_builder_root/packaging/linux/com.github.ilysenko.codex-desktop-linux.update.policy"
@@ -417,7 +517,7 @@ stage_update_builder_bundle() {
     cp "$REPO_DIR/packaging/linux/codex-update-manager.postinst" "$update_builder_root/packaging/linux/codex-update-manager.postinst"
     cp "$REPO_DIR/packaging/linux/codex-update-manager.prerm" "$update_builder_root/packaging/linux/codex-update-manager.prerm"
     cp -r "$REPO_DIR/linux-features/." "$update_builder_root/linux-features/"
-    rm -f "$update_builder_root/linux-features/features.json"
+    stage_update_builder_linux_features_config "$update_builder_root"
     cp "$REPO_DIR/packaging/linux/codex-update-manager.postrm" "$update_builder_root/packaging/linux/codex-update-manager.postrm"
     cp "$REPO_DIR/assets/codex.png" "$update_builder_root/assets/codex.png"
     if [ -d "$node_runtime_source" ]; then

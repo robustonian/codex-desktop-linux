@@ -1,0 +1,35 @@
+{
+  "name": "read-aloud",
+  "version": "0.1.0-linux-alpha1",
+  "description": "Read Codex responses aloud on Linux through an opt-in local voice backend.",
+  "author": {
+    "name": "avifenesh"
+  },
+  "homepage": "https://github.com/ilysenko/codex-desktop-linux",
+  "license": "MIT",
+  "keywords": [
+    "read-aloud",
+    "voice",
+    "tts",
+    "linux",
+    "kokoro"
+  ],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Read Aloud",
+    "shortDescription": "Read assistant responses aloud",
+    "longDescription": "Linux Read Aloud lets Codex speak text through a local opt-in voice backend. It uses a user-provided or downloaded Kokoro model when available, and it only speaks when the user or agent explicitly asks it to.",
+    "developerName": "avifenesh",
+    "category": "Productivity",
+    "websiteURL": "https://github.com/avifenesh",
+    "privacyPolicyURL": "https://openai.com/policies/row-privacy-policy/",
+    "termsOfServiceURL": "https://openai.com/policies/row-terms-of-use/",
+    "logo": "./assets/app-icon.png",
+    "defaultPrompt": [
+      "Check whether Read Aloud is ready",
+      "Read your last response aloud"
+    ],
+    "brandColor": "#155E75",
+    "screenshots": []
+  }
+}

@@ -1,0 +1,1032 @@
+#!/usr/bin/env node
+"use strict";
+
+const assert = require("node:assert/strict");
+const { spawnSync } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const test = require("node:test");
+const {
+  applyAppMainRoutePatch,
+  applyGeneralSettingsPatch,
+  applyGeneralSettingsWrapperPatch,
+  applyAssistantRenderPatch,
+  applyIndexRuntimePatch,
+  applyMainBundlePatch,
+  applySettingsAssetPatch,
+  applySettingsPageNavPatch,
+  applySettingsPatch,
+  applySettingsSectionsNavPatch,
+  applySettingsSharedNavPatch,
+} = require("./patch.js");
+
+function twice(fn, source) {
+  const patched = fn(source);
+  assert.equal(fn(patched), patched);
+  return patched;
+}
+
+test("main bundle patch adds a Linux read aloud handler", () => {
+  const source = [
+    "let e=require(`node:child_process`),f=require(`node:fs`),p=require(`node:path`),o=require(`node:os`);",
+    "var h={handlers:{\"set-vs-context\":async()=>{},\"native-desktop-apps\":async()=>({apps:[]})}};",
+  ].join("");
+  const patched = twice(applyMainBundlePatch, source);
+  assert.match(patched, /"linux-read-aloud":async/);
+  assert.match(patched, /function codexLinuxReadAloudSpeak\(input,options=\{\}\)/);
+  assert.match(patched, /options\?\.requireEnabled!==!1/);
+  assert.match(patched, /function codexLinuxReadAloudConfig/);
+  assert.match(patched, /function codexLinuxReadAloudSetup/);
+  assert.match(patched, /function codexLinuxReadAloudNativeFallbackEnabled/);
+  assert.match(patched, /function codexLinuxReadAloudSetupResult/);
+  assert.match(patched, /codex-linux-read-aloud-kokoro-model/);
+  assert.match(patched, /codex-linux-read-aloud-kokoro-python/);
+  assert.match(patched, /codex-linux-read-aloud-kokoro-speed/);
+  assert.match(patched, /codex-linux-read-aloud-kokoro-voices/);
+  assert.match(patched, /CODEX_LINUX_SETTINGS_FILE/);
+  assert.match(patched, /CODEX_LINUX_APP_ID/);
+  assert.match(patched, /CODEX_LINUX_READ_ALOUD_KOKORO_SPEED/);
+  assert.match(patched, /kokoro-unavailable/);
+  assert.match(patched, /piper-unavailable/);
+  assert.match(patched, /not-explicit/);
+  assert.match(patched, /action===`setup`/);
+  assert.match(patched, /source===`button`/);
+  assert.match(patched, /codexLinuxReadAloudSpeak\(e\.text,\{requireEnabled:!1\}\)/);
+  assert.match(patched, /constants\.X_OK/);
+  assert.match(patched, /kokoro-stdin/);
+  assert.match(patched, /kokoro-v1\.0\.onnx/);
+  assert.match(patched, /huggingface\.co\/zijuncheng\/kokoro_model_v1\.0\/resolve\/main\/kokoro-v1\.0\.onnx/);
+  assert.match(patched, /huggingface\.co\/zijuncheng\/kokoro_model_v1\.0\/resolve\/main\/voices-v1\.0\.bin/);
+  assert.match(patched, /download too small/);
+  assert.match(patched, /User-Agent/);
+  assert.doesNotMatch(patched, /readd-stdin/);
+  assert.doesNotMatch(patched, /\|\|\s*`female1`/);
+  assert.match(patched, /spd-say/);
+  assert.match(patched, /espeak-ng/);
+  assert.doesNotThrow(() => new Function("require", "process", patched));
+});
+
+test("webview runtime appends only once", () => {
+  const patched = twice(applyIndexRuntimePatch, "console.log(`index`);");
+  assert.match(patched, /codexLinuxReadAloudClick/);
+  assert.match(patched, /vscode:\/\/codex\/"\+METHOD/);
+  assert.match(patched, /codex-message-from-view/);
+  assert.match(patched, /__codexForwardedViaBridge/);
+  assert.match(patched, /Starting voice/);
+  assert.match(patched, /kokoro-explicit-v5/);
+  assert.match(patched, /codexLinuxConversationIsSpeaking/);
+  assert.match(patched, /codexLinuxConversationStopSpeaking/);
+  assert.match(patched, /speechSynthesis\?\.cancel/);
+  assert.match(patched, /action:"speak",source:"button",text/);
+  assert.match(patched, /codexLinuxReadAloudSetup/);
+  assert.match(patched, /action:"setup",mode/);
+  assert.match(patched, /9e5/);
+  assert.match(applyIndexRuntimePatch("globalThis.codexLinuxReadAloudClick=()=>{};"), /kokoro-explicit-v5/);
+  assert.doesNotMatch(patched, /SpeechSynthesisUtterance/);
+  assert.doesNotMatch(patched, /browser speech/);
+  assert.doesNotMatch(patched, /no-voices/);
+  assert.doesNotMatch(patched, /completed===false/);
+  assert.doesNotThrow(() => new Function("window", "localStorage", patched));
+});
+
+test("kokoro stdin runner compiles and makes a bounded first streaming chunk", (t) => {
+  const python = spawnSync("python3", ["--version"], { encoding: "utf8" });
+  if (python.error) {
+    t.skip("python3 not available");
+    return;
+  }
+
+  const runner = path.join(__dirname, "bin", "kokoro_stdin.py");
+  const compile = spawnSync(
+    "python3",
+    [
+      "-c",
+      [
+        "import pathlib, py_compile, sys, tempfile",
+        "runner = pathlib.Path(sys.argv[1])",
+        "with tempfile.NamedTemporaryFile(suffix='.pyc') as out:",
+        "    py_compile.compile(str(runner), cfile=out.name, doraise=True)",
+      ].join("\n"),
+      runner,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(compile.status, 0, compile.stderr);
+
+  const chunkCheck = spawnSync(
+    "python3",
+    [
+      "-c",
+      [
+        "import importlib.util, sys",
+        "sys.dont_write_bytecode = True",
+        "runner = sys.argv[1]",
+        "spec = importlib.util.spec_from_file_location('kokoro_stdin', runner)",
+        "mod = importlib.util.module_from_spec(spec)",
+        "spec.loader.exec_module(mod)",
+        "text = ('streamingword ' * 40).strip()",
+        "chunks = mod.split_for_streaming(text)",
+        "assert chunks, chunks",
+        "assert len(chunks[0]) <= 50, chunks[0]",
+        "assert all(len(chunk) <= 100 for chunk in chunks[1:]), chunks",
+      ].join("\n"),
+      runner,
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CODEX_LINUX_READ_ALOUD_KOKORO_FIRST_CHARS: "50",
+        CODEX_LINUX_READ_ALOUD_KOKORO_CHUNK_CHARS: "100",
+      },
+    },
+  );
+  assert.equal(chunkCheck.status, 0, chunkCheck.stderr);
+});
+
+test("main handler stores a chosen Kokoro model folder", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-main-"));
+  try {
+    const configHome = path.join(root, "config");
+    const modelDir = path.join(root, "kokoro");
+    fs.mkdirSync(modelDir, { recursive: true });
+    fs.writeFileSync(path.join(modelDir, "kokoro-v1.0.onnx"), "");
+    fs.writeFileSync(path.join(modelDir, "voices-v1.0.bin"), "");
+    const resourcesPath = path.join(root, "resources");
+    const runner = path.join(resourcesPath, "read-aloud", "kokoro-stdin");
+    fs.mkdirSync(path.dirname(runner), { recursive: true });
+    fs.writeFileSync(runner, "");
+    fs.chmodSync(runner, 0o755);
+    const python = path.join(root, ".local", "share", "codex-desktop", "read-aloud", "kokoro-venv", "bin", "python");
+    fs.mkdirSync(path.dirname(python), { recursive: true });
+    fs.writeFileSync(python, "");
+    fs.chmodSync(python, 0o755);
+
+    const source = [
+      "let e=require(`node:child_process`),f=require(`node:fs`),p=require(`node:path`),o=require(`node:os`);",
+      "var h={handlers:{\"set-vs-context\":async()=>{},\"native-desktop-apps\":async()=>({apps:[]})}};",
+    ].join("");
+    const patched = twice(applyMainBundlePatch, source);
+    assert.doesNotMatch(patched, /\bo=o\.createWriteStream\b/);
+    assert.doesNotMatch(patched, /let n=[^;]*,r=p\.join\(n,[^;]*,p=p\.join/);
+
+    const requireStub = (name) => {
+      if (name === "node:child_process") {
+        return {
+          spawnSync: (command, args) => ({
+            status: command === "which" && args?.[0] === "aplay" ? 0 : 1,
+          }),
+        };
+      }
+      if (name === "node:fs") return fs;
+      if (name === "node:path") return path;
+      if (name === "node:os") return { homedir: () => root };
+      if (name === "electron") {
+        return {
+          dialog: {
+            showOpenDialog: async () => ({ canceled: false, filePaths: [modelDir] }),
+          },
+        };
+      }
+      return require(name);
+    };
+    const processStub = {
+      platform: "linux",
+      env: { HOME: root, XDG_CONFIG_HOME: configHome },
+      resourcesPath,
+    };
+    const result = await new Function(
+      "require",
+      "process",
+      `${patched};return codexLinuxReadAloudHandle({action:"setup",mode:"choose-folder"});`,
+    )(requireStub, processStub);
+
+    assert.equal(result.ok, true);
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(configHome, "codex-desktop", "settings.json"), "utf8"),
+    );
+    assert.equal(settings["codex-linux-read-aloud-kokoro-model"], path.join(modelDir, "kokoro-v1.0.onnx"));
+    assert.equal(settings["codex-linux-read-aloud-kokoro-voices"], path.join(modelDir, "voices-v1.0.bin"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("main handler reports when a chosen Kokoro model folder is not speakable yet", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-main-"));
+  try {
+    const configHome = path.join(root, "config");
+    const modelDir = path.join(root, "kokoro");
+    fs.mkdirSync(modelDir, { recursive: true });
+    fs.writeFileSync(path.join(modelDir, "kokoro-v1.0.onnx"), "");
+    fs.writeFileSync(path.join(modelDir, "voices-v1.0.bin"), "");
+
+    const source = [
+      "let e=require(`node:child_process`),f=require(`node:fs`),p=require(`node:path`),o=require(`node:os`);",
+      "var h={handlers:{\"set-vs-context\":async()=>{},\"native-desktop-apps\":async()=>({apps:[]})}};",
+    ].join("");
+    const patched = twice(applyMainBundlePatch, source);
+    const requireStub = (name) => {
+      if (name === "node:child_process") {
+        return { spawnSync: () => ({ status: 1 }) };
+      }
+      if (name === "node:fs") return fs;
+      if (name === "node:path") return path;
+      if (name === "node:os") return { homedir: () => root };
+      if (name === "electron") {
+        return {
+          dialog: {
+            showOpenDialog: async () => ({ canceled: false, filePaths: [modelDir] }),
+          },
+        };
+      }
+      return require(name);
+    };
+    const processStub = {
+      platform: "linux",
+      env: { HOME: root, XDG_CONFIG_HOME: configHome },
+      resourcesPath: path.join(root, "resources"),
+    };
+    const result = await new Function(
+      "require",
+      "process",
+      `${patched};return codexLinuxReadAloudHandle({action:"setup",mode:"choose-folder"});`,
+    )(requireStub, processStub);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "voice-unavailable");
+    assert.deepEqual(result.config.kokoro.missing.sort(), ["aplay", "python", "runner"].sort());
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(configHome, "codex-desktop", "settings.json"), "utf8"),
+    );
+    assert.equal(settings["codex-linux-read-aloud-kokoro-model"], path.join(modelDir, "kokoro-v1.0.onnx"));
+    assert.equal(settings["codex-linux-read-aloud-kokoro-voices"], path.join(modelDir, "voices-v1.0.bin"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("main handler honors Linux app-specific settings paths", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-main-"));
+  try {
+    const configHome = path.join(root, "config");
+    const modelDir = path.join(root, "kokoro");
+    fs.mkdirSync(modelDir, { recursive: true });
+    fs.writeFileSync(path.join(modelDir, "kokoro-v1.0.onnx"), "");
+    fs.writeFileSync(path.join(modelDir, "voices-v1.0.bin"), "");
+    const resourcesPath = path.join(root, "resources");
+    const runner = path.join(resourcesPath, "read-aloud", "kokoro-stdin");
+    fs.mkdirSync(path.dirname(runner), { recursive: true });
+    fs.writeFileSync(runner, "");
+    fs.chmodSync(runner, 0o755);
+    const python = path.join(root, ".local", "share", "codex-desktop", "read-aloud", "kokoro-venv", "bin", "python");
+    fs.mkdirSync(path.dirname(python), { recursive: true });
+    fs.writeFileSync(python, "");
+    fs.chmodSync(python, 0o755);
+
+    const source = [
+      "let e=require(`node:child_process`),f=require(`node:fs`),p=require(`node:path`),o=require(`node:os`);",
+      "var h={handlers:{\"set-vs-context\":async()=>{},\"native-desktop-apps\":async()=>({apps:[]})}};",
+    ].join("");
+    const patched = twice(applyMainBundlePatch, source);
+    const requireStub = (name) => {
+      if (name === "node:child_process") {
+        return {
+          spawnSync: (command, args) => ({
+            status: command === "which" && args?.[0] === "aplay" ? 0 : 1,
+          }),
+        };
+      }
+      if (name === "node:fs") return fs;
+      if (name === "node:path") return path;
+      if (name === "node:os") return { homedir: () => root };
+      if (name === "electron") {
+        return {
+          dialog: {
+            showOpenDialog: async () => ({ canceled: false, filePaths: [modelDir] }),
+          },
+        };
+      }
+      return require(name);
+    };
+    const processStub = {
+      platform: "linux",
+      env: { HOME: root, XDG_CONFIG_HOME: configHome, CODEX_LINUX_APP_ID: "codex-desktop-5" },
+      resourcesPath,
+    };
+    const result = await new Function(
+      "require",
+      "process",
+      `${patched};return codexLinuxReadAloudHandle({action:"setup",mode:"choose-folder"});`,
+    )(requireStub, processStub);
+
+    assert.equal(result.ok, true);
+    assert.equal(
+      fs.existsSync(path.join(configHome, "codex-desktop-5", "settings.json")),
+      true,
+    );
+    assert.equal(fs.existsSync(path.join(configHome, "codex-desktop", "settings.json")), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("main handler reports missing Python during download setup", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-main-"));
+  try {
+    const source = [
+      "let e=require(`node:child_process`),f=require(`node:fs`),p=require(`node:path`),o=require(`node:os`);",
+      "var h={handlers:{\"set-vs-context\":async()=>{},\"native-desktop-apps\":async()=>({apps:[]})}};",
+    ].join("");
+    const patched = twice(applyMainBundlePatch, source);
+    const requireStub = (name) => {
+      if (name === "node:child_process") {
+        return { spawnSync: () => ({ status: 1 }) };
+      }
+      if (name === "node:fs") return fs;
+      if (name === "node:path") return path;
+      if (name === "node:os") return { homedir: () => root };
+      return require(name);
+    };
+    const processStub = {
+      platform: "linux",
+      env: { HOME: root },
+      resourcesPath: path.join(root, "resources"),
+    };
+    const result = await new Function(
+      "require",
+      "process",
+      `${patched};return codexLinuxReadAloudHandle({action:"setup",mode:"download"});`,
+    )(requireStub, processStub);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "python-unavailable");
+    assert.match(result.message, /Python 3\.10-3\.13/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("main handler reads and clamps stored Kokoro pace", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-main-"));
+  try {
+    const configHome = path.join(root, "config");
+    const settingsDir = path.join(configHome, "codex-desktop");
+    fs.mkdirSync(settingsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(settingsDir, "settings.json"),
+      JSON.stringify({ "codex-linux-read-aloud-kokoro-speed": 9 }, null, 2),
+    );
+
+    const source = [
+      "let e=require(`node:child_process`),f=require(`node:fs`),p=require(`node:path`),o=require(`node:os`);",
+      "var h={handlers:{\"set-vs-context\":async()=>{},\"native-desktop-apps\":async()=>({apps:[]})}};",
+    ].join("");
+    const patched = twice(applyMainBundlePatch, source);
+    const requireStub = (name) => {
+      if (name === "node:child_process") {
+        return { spawnSync: () => ({ status: 1 }) };
+      }
+      if (name === "node:fs") return fs;
+      if (name === "node:path") return path;
+      if (name === "node:os") return { homedir: () => root };
+      return require(name);
+    };
+    const processStub = {
+      platform: "linux",
+      env: { HOME: root, XDG_CONFIG_HOME: configHome },
+      resourcesPath: path.join(root, "resources"),
+    };
+    const result = await new Function(
+      "require",
+      "process",
+      `${patched};return codexLinuxReadAloudHandle({action:"config"});`,
+    )(requireStub, processStub);
+
+    assert.equal(result.kokoro.speed, 1.4);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("main handler enables native fallback by default but allows explicit disable", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-main-"));
+  try {
+    const source = [
+      "let e=require(`node:child_process`),f=require(`node:fs`),p=require(`node:path`),o=require(`node:os`);",
+      "var h={handlers:{\"set-vs-context\":async()=>{},\"native-desktop-apps\":async()=>({apps:[]})}};",
+    ].join("");
+    const patched = twice(applyMainBundlePatch, source);
+    const requireStub = (name) => {
+      if (name === "node:child_process") {
+        return { spawnSync: () => ({ status: 1 }) };
+      }
+      if (name === "node:fs") return fs;
+      if (name === "node:path") return path;
+      if (name === "node:os") return { homedir: () => root };
+      return require(name);
+    };
+
+    const defaultConfig = await new Function(
+      "require",
+      "process",
+      `${patched};return codexLinuxReadAloudHandle({action:"config"});`,
+    )(requireStub, {
+      platform: "linux",
+      env: { HOME: root },
+      resourcesPath: path.join(root, "resources"),
+    });
+    const disabledConfig = await new Function(
+      "require",
+      "process",
+      `${patched};return codexLinuxReadAloudHandle({action:"config"});`,
+    )(requireStub, {
+      platform: "linux",
+      env: { HOME: root, CODEX_LINUX_READ_ALOUD_NATIVE_FALLBACK: "0" },
+      resourcesPath: path.join(root, "resources"),
+    });
+
+    assert.equal(defaultConfig.nativeFallback, true);
+    assert.equal(disabledConfig.nativeFallback, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("main handler treats the message button as an explicit speech request", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-main-"));
+  try {
+    const source = [
+      "let e=require(`node:child_process`),f=require(`node:fs`),p=require(`node:path`),o=require(`node:os`);",
+      "var h={handlers:{\"set-vs-context\":async()=>{},\"native-desktop-apps\":async()=>({apps:[]})}};",
+    ].join("");
+    const patched = twice(applyMainBundlePatch, source);
+    const spawned = [];
+    const requireStub = (name) => {
+      if (name === "node:child_process") {
+        return {
+          spawnSync: (command, args) => ({
+            status: command === "which" && args?.[0] === "spd-say" ? 0 : 1,
+          }),
+          spawn: (command, args, options) => {
+            spawned.push({ command, args, options });
+            return {
+              on: () => {},
+              unref: () => {},
+            };
+          },
+        };
+      }
+      if (name === "node:fs") return fs;
+      if (name === "node:path") return path;
+      if (name === "node:os") return { homedir: () => root };
+      return require(name);
+    };
+    const processStub = {
+      platform: "linux",
+      env: { HOME: root },
+      resourcesPath: path.join(root, "resources"),
+    };
+
+    const buttonResult = await new Function(
+      "require",
+      "process",
+      `${patched};return codexLinuxReadAloudHandle({action:"speak",source:"button",text:"hello"});`,
+    )(requireStub, processStub);
+    assert.equal(buttonResult.spoken, true);
+    assert.equal(buttonResult.engine, "spd-say");
+    assert.ok(spawned.some((entry) => entry.command === "spd-say" && entry.args.includes("--")));
+
+    const directResult = await new Function(
+      "require",
+      "process",
+      `${patched};return codexLinuxReadAloudSpeak("hello");`,
+    )(requireStub, processStub);
+    assert.equal(directResult.spoken, false);
+    assert.equal(directResult.reason, "disabled");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("main handler passes the configured Kokoro Python to the runner", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-main-"));
+  try {
+    const resourcesPath = path.join(root, "resources");
+    const runner = path.join(resourcesPath, "read-aloud", "kokoro-stdin");
+    fs.mkdirSync(path.dirname(runner), { recursive: true });
+    fs.writeFileSync(runner, "");
+    fs.chmodSync(runner, 0o755);
+    const python = path.join(root, "venv", "bin", "python");
+    fs.mkdirSync(path.dirname(python), { recursive: true });
+    fs.writeFileSync(python, "");
+    fs.chmodSync(python, 0o755);
+    const model = path.join(root, "kokoro", "kokoro-v1.0.onnx");
+    const voices = path.join(root, "kokoro", "voices-v1.0.bin");
+    fs.mkdirSync(path.dirname(model), { recursive: true });
+    fs.writeFileSync(model, "");
+    fs.writeFileSync(voices, "");
+
+    const source = [
+      "let e=require(`node:child_process`),f=require(`node:fs`),p=require(`node:path`),o=require(`node:os`);",
+      "var h={handlers:{\"set-vs-context\":async()=>{},\"native-desktop-apps\":async()=>({apps:[]})}};",
+    ].join("");
+    const patched = twice(applyMainBundlePatch, source);
+    const spawned = [];
+    const requireStub = (name) => {
+      if (name === "node:child_process") {
+        return {
+          spawnSync: (command, args) => ({
+            status: command === "which" && args?.[0] === "aplay" ? 0 : 1,
+          }),
+          spawn: (command, args, options) => {
+            spawned.push({ command, args, options });
+            return {
+              on: () => {},
+              unref: () => {},
+              stdin: { end: () => {} },
+            };
+          },
+        };
+      }
+      if (name === "node:fs") return fs;
+      if (name === "node:path") return path;
+      if (name === "node:os") return { homedir: () => root };
+      return require(name);
+    };
+    const result = await new Function(
+      "require",
+      "process",
+      `${patched};return codexLinuxReadAloudHandle({action:"speak",source:"button",text:"hello"});`,
+    )(requireStub, {
+      platform: "linux",
+      env: {
+        HOME: root,
+        CODEX_LINUX_READ_ALOUD_ENABLED: "1",
+        CODEX_LINUX_READ_ALOUD_KOKORO_PYTHON: python,
+        CODEX_LINUX_READ_ALOUD_KOKORO_MODEL: model,
+        CODEX_LINUX_READ_ALOUD_KOKORO_VOICES: voices,
+      },
+      resourcesPath,
+    });
+
+    assert.equal(result.spoken, true);
+    assert.equal(result.engine, "kokoro");
+    assert.equal(spawned[0]?.command, runner);
+    assert.equal(spawned[0]?.options?.env?.CODEX_LINUX_READ_ALOUD_KOKORO_PYTHON, python);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("main handler falls back to native speech without forcing spd-say voice type", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-main-"));
+  try {
+    const source = [
+      "let e=require(`node:child_process`),f=require(`node:fs`),p=require(`node:path`),o=require(`node:os`);",
+      "var h={handlers:{\"set-vs-context\":async()=>{},\"native-desktop-apps\":async()=>({apps:[]})}};",
+    ].join("");
+    const patched = twice(applyMainBundlePatch, source);
+    const spawned = [];
+    const requireStub = (name) => {
+      if (name === "node:child_process") {
+        return {
+          spawnSync: (command, args) => ({
+            status: command === "which" && args?.[0] === "spd-say" ? 0 : 1,
+          }),
+          spawn: (command, args, options) => {
+            spawned.push({ command, args, options });
+            return {
+              on: () => {},
+              unref: () => {},
+            };
+          },
+        };
+      }
+      if (name === "node:fs") return fs;
+      if (name === "node:path") return path;
+      if (name === "node:os") return { homedir: () => root };
+      return require(name);
+    };
+    const result = await new Function(
+      "require",
+      "process",
+      `${patched};return codexLinuxReadAloudHandle({action:"speak",source:"button",text:"hello"});`,
+    )(requireStub, {
+      platform: "linux",
+      env: { HOME: root, CODEX_LINUX_READ_ALOUD_ENABLED: "1" },
+      resourcesPath: path.join(root, "resources"),
+    });
+
+    assert.equal(result.spoken, true);
+    assert.equal(result.engine, "spd-say");
+    const speakCall = spawned.find((entry) => entry.command === "spd-say" && entry.args.includes("--"));
+    assert.ok(speakCall);
+    assert.equal(speakCall.args.includes("-t"), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("main handler exposes Hugging Face Kokoro download defaults", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-main-"));
+  try {
+    const source = [
+      "let e=require(`node:child_process`),f=require(`node:fs`),p=require(`node:path`),o=require(`node:os`);",
+      "var h={handlers:{\"set-vs-context\":async()=>{},\"native-desktop-apps\":async()=>({apps:[]})}};",
+    ].join("");
+    const patched = twice(applyMainBundlePatch, source);
+    const requireStub = (name) => {
+      if (name === "node:child_process") {
+        return { spawnSync: () => ({ status: 1 }) };
+      }
+      if (name === "node:fs") return fs;
+      if (name === "node:path") return path;
+      if (name === "node:os") return { homedir: () => root };
+      return require(name);
+    };
+    const processStub = {
+      platform: "linux",
+      env: { HOME: root },
+      resourcesPath: path.join(root, "resources"),
+    };
+    const result = await new Function(
+      "require",
+      "process",
+      `${patched};return codexLinuxReadAloudHandle({action:"config"});`,
+    )(requireStub, processStub);
+
+    assert.equal(
+      result.kokoro.modelUrl,
+      "https://huggingface.co/zijuncheng/kokoro_model_v1.0/resolve/main/kokoro-v1.0.onnx",
+    );
+    assert.equal(
+      result.kokoro.voicesUrl,
+      "https://huggingface.co/zijuncheng/kokoro_model_v1.0/resolve/main/voices-v1.0.bin",
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("main handler downloads setup files atomically", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-main-"));
+  try {
+    const source = [
+      "let e=require(`node:child_process`),f=require(`node:fs`),p=require(`node:path`),o=require(`node:os`);",
+      "var h={handlers:{\"set-vs-context\":async()=>{},\"native-desktop-apps\":async()=>({apps:[]})}};",
+    ].join("");
+    const patched = twice(applyMainBundlePatch, source);
+    const target = path.join(root, "kokoro", "sample.bin");
+    let observedHeaders = null;
+    const requireStub = (name) => {
+      if (name === "node:child_process") {
+        return { spawnSync: () => ({ status: 1 }) };
+      }
+      if (name === "node:fs") return fs;
+      if (name === "node:path") return path;
+      if (name === "node:os") return { homedir: () => root };
+      if (name === "node:https") {
+        return {
+          get: (_url, options, callback) => {
+            const { EventEmitter } = require("node:events");
+            const { PassThrough } = require("node:stream");
+            const request = new EventEmitter();
+            observedHeaders = options?.headers;
+            process.nextTick(() => {
+              const response = new PassThrough();
+              response.statusCode = 200;
+              response.headers = {};
+              callback(response);
+              response.end(Buffer.from("downloaded voice bytes"));
+            });
+            return request;
+          },
+        };
+      }
+      return require(name);
+    };
+    const processStub = {
+      platform: "linux",
+      env: { HOME: root },
+      resourcesPath: path.join(root, "resources"),
+    };
+    await new Function(
+      "require",
+      "process",
+      `${patched};return codexLinuxReadAloudDownloadFile("https://huggingface.co/test.bin", ${JSON.stringify(target)}, 10);`,
+    )(requireStub, processStub);
+
+    assert.equal(fs.readFileSync(target, "utf8"), "downloaded voice bytes");
+    assert.equal(fs.existsSync(`${target}.part`), false);
+    assert.equal(observedHeaders?.["User-Agent"], "codex-desktop-read-aloud");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("assistant render patch adds an explicit read aloud button under the message", () => {
+  const source = "return (0,$.jsx)(Ov,{item:n,alwaysShowActions:M,assistantCopyText:p,turnId:m,autoReviewStats:y,hookStats:b,completedThreadGoal:x,after:g,conversationId:o,cwd:u,forceCodeBlockWordWrap:V,hasArtifacts:F,onAddSelectedTextToChat:H,onFileLinkOpen:v,onFork:D,renderCodeBlocksAsWritingBlocks:V})";
+  const patched = twice(applyAssistantRenderPatch, source);
+  assert.match(patched, /codex-linux-read-aloud-button/);
+  assert.match(patched, /codex-linux-read-aloud-icon/);
+  assert.match(patched, /viewBox:"0 0 24 24"/);
+  assert.doesNotMatch(patched, /children:"Read aloud"/);
+  assert.match(patched, /globalThis\.codexLinuxReadAloudClick\?\.\(n,p,o,e\.currentTarget\)/);
+  assert.match(patched, /\$\.Fragment/);
+});
+
+test("assistant render patch preserves the current JSX runtime alias", () => {
+  const source = "return (0,Q.jsx)(Ov,{item:n,alwaysShowActions:M,assistantCopyText:p,turnId:m,autoReviewStats:y,hookStats:b,completedThreadGoal:x,after:g,conversationId:o,cwd:u,forceCodeBlockWordWrap:V,hasArtifacts:F,onAddSelectedTextToChat:H,onFileLinkOpen:v,onFork:D,renderCodeBlocksAsWritingBlocks:V})";
+  const patched = twice(applyAssistantRenderPatch, source);
+
+  assert.match(patched, /Q\.Fragment/);
+  assert.match(patched, /\(0,Q\.jsx\)\("button"/);
+  assert.match(patched, /globalThis\.codexLinuxReadAloudClick\?\.\(n,p,o,e\.currentTarget\)/);
+});
+
+test("settings patch does not add the legacy normal settings toggle", () => {
+  const source = 'KEYS={promptWindow:"codex-linux-prompt-window-enabled",systemTray:"codex-linux-system-tray-enabled",warmStart:"codex-linux-warm-start-enabled"};$.jsx(LinuxToggle,{settingKey:KEYS.warmStart,label:"Warm start",description:"Use the running app for launch actions instead of starting a fresh Electron instance."})';
+  const patched = twice(applySettingsPatch, source);
+  assert.equal(patched, source);
+  assert.doesNotMatch(patched, /readAloud:"codex-linux-read-aloud-enabled"/);
+  assert.doesNotMatch(patched, /label:"Read aloud responses"/);
+});
+
+test("settings patch removes an older legacy normal settings toggle", () => {
+  const source = 'KEYS={promptWindow:"codex-linux-prompt-window-enabled",systemTray:"codex-linux-system-tray-enabled",warmStart:"codex-linux-warm-start-enabled",readAloud:"codex-linux-read-aloud-enabled"};$.jsx(LinuxToggle,{settingKey:KEYS.warmStart,label:"Warm start",description:"Use the running app for launch actions instead of starting a fresh Electron instance."}),$.jsx(LinuxToggle,{settingKey:KEYS.readAloud,label:"Read aloud responses",description:"Show a Read aloud button on assistant responses.",defaultValue:!1})';
+  const patched = twice(applySettingsPatch, source);
+  assert.doesNotMatch(patched, /readAloud:"codex-linux-read-aloud-enabled"/);
+  assert.doesNotMatch(patched, /label:"Read aloud responses"/);
+  assert.match(patched, /KEYS=\{promptWindow/);
+  assert.match(patched, /Warm start/);
+});
+
+test("general settings patch exports read aloud page without rendering it in General", () => {
+  const source = "function Gn(){return (0,$.jsxs)(ht,{children:[S,C,w,T,D,O,k,A,j,M,N,P,L]})}";
+  const patched = twice(applyGeneralSettingsPatch, source);
+  assert.match(patched, /function codexLinuxReadAloudSettingsRow/);
+  assert.match(patched, /codex-linux-read-aloud-enabled/);
+  assert.match(patched, /settings\.general\.readAloud\.label/);
+  assert.match(patched, /Read aloud responses/);
+  assert.match(patched, /codex-linux-read-aloud-kokoro-speed/);
+  assert.match(patched, /Choose folder/);
+  assert.match(patched, /Download voice/);
+  assert.match(patched, /settings\.general\.readAloud\.help/);
+  assert.match(patched, /Hugging Face/);
+  assert.match(patched, /children:`\?`/);
+  assert.match(patched, /Speech pace/);
+  assert.match(patched, /function codexLinuxReadAloudSettingsPage/);
+  assert.match(patched, /settings\.readAloud\.title/);
+  assert.match(patched, /Listen to assistant responses with a local Kokoro voice/);
+  assert.match(patched, /type:`range`/);
+  assert.match(patched, /min:\.7/);
+  assert.match(patched, /max:1\.4/);
+  assert.match(patched, /codexLinuxReadAloudSetup/);
+  assert.match(patched, /kokoro-explicit-v5/);
+  assert.match(patched, /globalThis\.codexLinuxReadAloudSetup=setup/);
+  assert.doesNotThrow(() => new Function("$", "w", "C", "N", "L", "F", "P", "J", "q", patched));
+  assert.doesNotMatch(
+    patched,
+    /children:\[S,C,w,T,\(0,\$\.jsx\)\(codexLinuxReadAloudSettingsRow,\{\}\),D,O,k,A,j,M,N,P,L\]/,
+  );
+  assert.match(patched, /children:\[S,C,w,T,D,O,k,A,j,M,N,P,L\]/);
+});
+
+test("general settings patch upgrades and removes an older injected General row", () => {
+  const source = [
+    "function codexLinuxReadAloudSettingsRow(){let e=(0,Q.c)(11),t=w(C),n=N(),{data:r,isLoading:i}=L(\"codex-linux-read-aloud-enabled\"),a=r===!0,o,s;e[0]===Symbol.for(`react.memo_cache_sentinel`)?(o=(0,$.jsx)(F,{id:`settings.general.readAloud.label`,defaultMessage:`Read aloud responses`,description:`Label for Linux read aloud setting`}),s=(0,$.jsx)(F,{id:`settings.general.readAloud.description`,defaultMessage:`Show a read aloud button under assistant responses`,description:`Description for Linux read aloud setting`}),e[0]=o,e[1]=s):(o=e[0],s=e[1]);let c;e[2]===t?c=e[3]:(c=e=>{P(t,\"codex-linux-read-aloud-enabled\",e)},e[2]=t,e[3]=c);let l;e[4]===n?l=e[5]:(l=n.formatMessage({id:`settings.general.readAloud.label`,defaultMessage:`Read aloud responses`,description:`Label for Linux read aloud setting`}),e[4]=n,e[5]=l);let u;return e[6]!==i||e[7]!==a||e[8]!==c||e[9]!==l?(u=(0,$.jsx)(J,{label:o,description:s,control:(0,$.jsx)(q,{checked:a,disabled:i,onChange:c,ariaLabel:l})}),e[6]=i,e[7]=a,e[8]=c,e[9]=l,e[10]=u):u=e[10],u}",
+    "function Gn(){return (0,$.jsxs)(ht,{children:[S,C,w,T,D,O,k,(0,$.jsx)(codexLinuxReadAloudSettingsRow,{}),A,j,M,N,P,L]})}",
+  ].join("");
+  const patched = twice(applyGeneralSettingsPatch, source);
+  assert.match(patched, /codex-linux-read-aloud-kokoro-speed/);
+  assert.match(patched, /Choose folder/);
+  assert.match(patched, /Download voice/);
+  assert.match(patched, /settings\.general\.readAloud\.help/);
+  assert.match(patched, /Speech pace/);
+  assert.match(patched, /function codexLinuxReadAloudSettingsPage/);
+  assert.doesNotMatch(
+    patched,
+    /children:\[S,C,w,T,\(0,\$\.jsx\)\(codexLinuxReadAloudSettingsRow,\{\}\),D,O,k,A,j,M,N,P,L\]/,
+  );
+  assert.doesNotMatch(
+    patched,
+    /children:\[S,C,w,T,D,O,k,\(0,\$\.jsx\)\(codexLinuxReadAloudSettingsRow,\{\}\),A,j,M,N,P,L\]/,
+  );
+  assert.match(patched, /children:\[S,C,w,T,D,O,k,A,j,M,N,P,L\]/);
+  assert.equal((patched.match(/function codexLinuxReadAloudSettingsRow/g) ?? []).length, 1);
+});
+
+test("general settings patch exports a dedicated read aloud settings page", () => {
+  const source = [
+    "function Gn(){return (0,$.jsxs)(pt,{children:[]})}",
+    "export{Yn as i,Jn as n,Gn as r,fr as t};",
+  ].join("");
+  const patched = twice(applyGeneralSettingsPatch, source);
+  assert.match(patched, /function codexLinuxReadAloudSettingsPage/);
+  assert.match(patched, /codexLinuxReadAloudSettingsPage as ReadAloudSettings/);
+  assert.match(patched, /settings\.readAloud\.voice\.title/);
+});
+
+test("general settings wrapper re-exports the read aloud settings page", () => {
+  const source = 'import{r as e}from"./general-settings-Bvwhh0-i.js";export{e as GeneralSettings};';
+  const patched = twice(applyGeneralSettingsWrapperPatch, source);
+  assert.match(patched, /ReadAloudSettings as t/);
+  assert.match(patched, /t as ReadAloudSettings/);
+});
+
+test("settings nav patches add a visible read aloud section after computer use", () => {
+  const sections = "var n=[{slug:`browser-use`},{slug:`computer-use`},{slug:`mcp-settings`}];";
+  const patchedSections = twice(applySettingsSectionsNavPatch, sections);
+  assert.match(patchedSections, /slug:`computer-use`},{slug:`read-aloud-settings`},{slug:`mcp-settings`/);
+
+  const shared = [
+    '"computer-use":{id:`settings.nav.computer-use`,defaultMessage:`Computer use`,description:`Title for computer use settings section`},',
+    "function m(e){switch(e){case`computer-use`:{return null}case`browser-use`:{return null}}}",
+  ].join("");
+  const patchedShared = twice(applySettingsSharedNavPatch, shared);
+  assert.match(patchedShared, /settings\.nav\.read-aloud-settings/);
+  assert.match(patchedShared, /defaultMessage:`Read Aloud`/);
+  assert.match(patchedShared, /case`read-aloud-settings`/);
+
+  const page = [
+    'var Z={},de=null,oe=null,G=null,pe={"browser-use":de,"computer-use":oe,"local-environments":q};',
+    "me=[`browser-use`,`computer-use`,`data-controls`];",
+    "he=[{slugs:[`browser-use`,`computer-use`,`local-environments`]}];",
+    "case`computer-use`:return A;",
+    "case`computer-use`:z=k.isLoading||m.isLoading;break bb0;",
+  ].join("");
+  const patchedPage = twice(applySettingsPageNavPatch, page);
+  assert.match(patchedPage, /codexLinuxReadAloudSettingsIcon=e=>/);
+  assert.match(patchedPage, /"read-aloud-settings":codexLinuxReadAloudSettingsIcon/);
+  assert.match(patchedPage, /`computer-use`,`read-aloud-settings`,`data-controls`/);
+  assert.match(patchedPage, /`computer-use`,`read-aloud-settings`,`local-environments`/);
+  assert.match(patchedPage, /case`read-aloud-settings`:return a;case`computer-use`/);
+  assert.match(patchedPage, /case`read-aloud-settings`:z=!1;break bb0;case`computer-use`/);
+});
+
+test("app route patch wires read aloud settings to the generated page export", () => {
+  const source =
+    'var iD={"general-settings":(0,Q.lazy)(()=>Mr(()=>import(`./general-settings-B89XeV4U.js`).then(e=>({default:e.GeneralSettings})),__vite__mapDeps([1,2]),import.meta.url)),"keyboard-shortcuts":K};';
+  const patched = twice(applyAppMainRoutePatch, source);
+  assert.match(patched, /"read-aloud-settings":\(0,Q\.lazy\)/);
+  assert.match(patched, /default:e\.ReadAloudSettings/);
+  assert.match(patched, /"general-settings":\(0,Q\.lazy\)/);
+});
+
+test("settings asset patch leaves current keybinds settings file alone", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-settings-"));
+  try {
+    const assets = path.join(root, "webview", "assets");
+    fs.mkdirSync(assets, { recursive: true });
+    const asset = path.join(assets, "keybinds-settings-linux.js");
+    fs.writeFileSync(
+      asset,
+      'KEYS={promptWindow:"codex-linux-prompt-window-enabled",systemTray:"codex-linux-system-tray-enabled",warmStart:"codex-linux-warm-start-enabled"};$.jsx(LinuxToggle,{settingKey:KEYS.warmStart,label:"Warm start",description:"Use the running app for launch actions instead of starting a fresh Electron instance."})',
+    );
+    assert.deepEqual(applySettingsAssetPatch(root), { matched: true, changed: 0 });
+    const patched = fs.readFileSync(asset, "utf8");
+    assert.doesNotMatch(patched, /readAloud:"codex-linux-read-aloud-enabled"/);
+    assert.doesNotMatch(patched, /label:"Read aloud responses"/);
+    assert.deepEqual(applySettingsAssetPatch(root), { matched: true, changed: 0 });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("settings asset patch removes an older generated keybinds read aloud toggle", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-settings-"));
+  try {
+    const assets = path.join(root, "webview", "assets");
+    fs.mkdirSync(assets, { recursive: true });
+    const asset = path.join(assets, "keybinds-settings-linux.js");
+    fs.writeFileSync(
+      asset,
+      'KEYS={promptWindow:"codex-linux-prompt-window-enabled",systemTray:"codex-linux-system-tray-enabled",warmStart:"codex-linux-warm-start-enabled",readAloud:"codex-linux-read-aloud-enabled"};$.jsx(LinuxToggle,{settingKey:KEYS.warmStart,label:"Warm start",description:"Use the running app for launch actions instead of starting a fresh Electron instance."}),$.jsx(LinuxToggle,{settingKey:KEYS.readAloud,label:"Read aloud responses",description:"Show a Read aloud button on assistant responses.",defaultValue:!1})',
+    );
+    assert.deepEqual(applySettingsAssetPatch(root), { matched: true, changed: 1 });
+    const patched = fs.readFileSync(asset, "utf8");
+    assert.doesNotMatch(patched, /readAloud:"codex-linux-read-aloud-enabled"/);
+    assert.doesNotMatch(patched, /label:"Read aloud responses"/);
+    assert.match(patched, /Warm start/);
+    assert.deepEqual(applySettingsAssetPatch(root), { matched: true, changed: 0 });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("settings asset patch upgrades older general settings bundle", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-settings-"));
+  try {
+    const assets = path.join(root, "webview", "assets");
+    fs.mkdirSync(assets, { recursive: true });
+    const asset = path.join(assets, "general-settings-current.js");
+    fs.writeFileSync(
+      asset,
+      [
+        "function codexLinuxReadAloudSettingsRow(){let e=(0,Q.c)(11),t=w(C),n=N(),{data:r,isLoading:i}=L(\"codex-linux-read-aloud-enabled\"),a=r===!0;return (0,$.jsx)(J,{control:(0,$.jsx)(q,{checked:a,disabled:i,onChange:e=>P(t,\"codex-linux-read-aloud-enabled\",e),ariaLabel:n.formatMessage({id:`settings.general.readAloud.label`,defaultMessage:`Read aloud responses`})})})}",
+        "function Gn(){return (0,$.jsxs)(ht,{children:[S,C,w,T,D,O,k,(0,$.jsx)(codexLinuxReadAloudSettingsRow,{}),A,j,M,N,P,L]})}",
+      ].join(""),
+    );
+    assert.deepEqual(applySettingsAssetPatch(root), { matched: true, changed: 1 });
+    const patched = fs.readFileSync(asset, "utf8");
+    assert.match(patched, /codex-linux-read-aloud-kokoro-speed/);
+    assert.match(patched, /Choose folder/);
+    assert.match(patched, /kokoro-explicit-v5/);
+    assert.doesNotMatch(
+      patched,
+      /children:\[S,C,w,T,\(0,\$\.jsx\)\(codexLinuxReadAloudSettingsRow,\{\}\),D,O,k,A,j,M,N,P,L\]/,
+    );
+    assert.match(patched, /children:\[S,C,w,T,D,O,k,A,j,M,N,P,L\]/);
+    assert.deepEqual(applySettingsAssetPatch(root), { matched: true, changed: 0 });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("settings asset patch updates current general settings bundle", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-settings-"));
+  try {
+    const assets = path.join(root, "webview", "assets");
+    fs.mkdirSync(assets, { recursive: true });
+    const asset = path.join(assets, "general-settings-current.js");
+    fs.writeFileSync(
+      asset,
+      "function Gn(){return (0,$.jsxs)(ht,{children:[S,C,w,T,D,O,k,A,j,M,N,P,L]})}",
+    );
+    assert.deepEqual(applySettingsAssetPatch(root), { matched: true, changed: 1 });
+    const patched = fs.readFileSync(asset, "utf8");
+    assert.match(patched, /codex-linux-read-aloud-enabled/);
+    assert.match(patched, /codexLinuxReadAloudSettingsRow/);
+    assert.match(patched, /globalThis\.codexLinuxReadAloudSetup=setup/);
+    assert.doesNotMatch(
+      patched,
+      /children:\[S,C,w,T,\(0,\$\.jsx\)\(codexLinuxReadAloudSettingsRow,\{\}\),D,O,k,A,j,M,N,P,L\]/,
+    );
+    assert.deepEqual(applySettingsAssetPatch(root), { matched: true, changed: 0 });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("settings asset patch creates a first-class read aloud settings section", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-settings-"));
+  try {
+    const assets = path.join(root, "webview", "assets");
+    fs.mkdirSync(assets, { recursive: true });
+    fs.writeFileSync(
+      path.join(assets, "keybinds-settings-linux.js"),
+      'KEYS={promptWindow:"codex-linux-prompt-window-enabled",systemTray:"codex-linux-system-tray-enabled",warmStart:"codex-linux-warm-start-enabled"};$.jsx(LinuxToggle,{settingKey:KEYS.warmStart,label:"Warm start",description:"Use the running app for launch actions instead of starting a fresh Electron instance."})',
+    );
+    fs.writeFileSync(
+      path.join(assets, "general-settings-inner.js"),
+      [
+        "function Gn(){return (0,$.jsxs)(ht,{children:[S,C,w,T,D,O,k,A,j,M,N,P,L]})}",
+        "export{Yn as i,Jn as n,Gn as r,fr as t};",
+      ].join(""),
+    );
+    fs.writeFileSync(
+      path.join(assets, "general-settings-wrapper.js"),
+      'import{r as e}from"./general-settings-inner.js";export{e as GeneralSettings};',
+    );
+    fs.writeFileSync(
+      path.join(assets, "settings-sections-current.js"),
+      "var n=[{slug:`browser-use`},{slug:`computer-use`},{slug:`mcp-settings`}];",
+    );
+    fs.writeFileSync(
+      path.join(assets, "settings-shared-current.js"),
+      [
+        '"computer-use":{id:`settings.nav.computer-use`,defaultMessage:`Computer use`,description:`Title for computer use settings section`},',
+        "function m(e){switch(e){case`computer-use`:{return null}case`browser-use`:{return null}}}",
+      ].join(""),
+    );
+    fs.writeFileSync(
+      path.join(assets, "settings-page-current.js"),
+      [
+        'var Z={},de=null,oe=null,G=null,pe={"browser-use":de,"computer-use":oe,"local-environments":q};',
+        "me=[`browser-use`,`computer-use`,`data-controls`];",
+        "he=[{slugs:[`browser-use`,`computer-use`,`local-environments`]}];",
+        "case`computer-use`:return A;",
+        "case`computer-use`:z=k.isLoading||m.isLoading;break bb0;",
+      ].join(""),
+    );
+    fs.writeFileSync(
+      path.join(assets, "app-main-current.js"),
+      'var iD={"general-settings":(0,Q.lazy)(()=>Mr(()=>import(`./general-settings-wrapper.js`).then(e=>({default:e.GeneralSettings})),__vite__mapDeps([1,2]),import.meta.url)),"keyboard-shortcuts":K};',
+    );
+
+    assert.deepEqual(applySettingsAssetPatch(root), { matched: true, changed: 6 });
+    assert.deepEqual(applySettingsAssetPatch(root), { matched: true, changed: 0 });
+    assert.match(
+      fs.readFileSync(path.join(assets, "settings-page-current.js"), "utf8"),
+      /"read-aloud-settings":codexLinuxReadAloudSettingsIcon/,
+    );
+    assert.match(
+      fs.readFileSync(path.join(assets, "app-main-current.js"), "utf8"),
+      /default:e\.ReadAloudSettings/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

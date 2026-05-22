@@ -2,6 +2,7 @@
 
 mod app;
 mod builder;
+mod cache_cleanup;
 mod cli;
 mod codex_cli;
 mod config;

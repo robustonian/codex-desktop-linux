@@ -8,7 +8,6 @@ const path = require("node:path");
 const TRAY_GUARD_LOOKAHEAD = 1200;
 const CLOSE_GATE_PREFIX_LOOKBACK = 8000;
 const HANDLER_PREFIX_LOOKBACK = 12000;
-const DIRECT_HANDLER_PROXIMITY = 1200;
 
 const linuxSettingsKeys = {
   promptWindow: "codex-linux-prompt-window-enabled",
@@ -58,6 +57,11 @@ const COMPUTER_USE_UI_SETTINGS_KEY = "codex-linux-computer-use-ui-enabled";
 // stays unconditional — it is what we have shipped on by default since the
 // project's first release.
 
+function regexpTest(filenamePattern, name) {
+  filenamePattern.lastIndex = 0;
+  return filenamePattern.test(name);
+}
+
 function patchAssetFiles(extractedDir, filenamePattern, patchFn, missingWarnMessage) {
   const webviewAssetsDir = path.join(extractedDir, "webview", "assets");
   if (!fs.existsSync(webviewAssetsDir)) {
@@ -69,7 +73,7 @@ function patchAssetFiles(extractedDir, filenamePattern, patchFn, missingWarnMess
 
   const candidates = fs
     .readdirSync(webviewAssetsDir)
-    .filter((name) => filenamePattern.test(name))
+    .filter((name) => regexpTest(filenamePattern, name))
     .sort();
 
   if (candidates.length === 0) {
@@ -102,7 +106,7 @@ function findRequiredWebviewAsset(webviewAssetsDir, filenamePattern, marker, des
 
   const candidates = fs
     .readdirSync(webviewAssetsDir)
-    .filter((name) => filenamePattern.test(name))
+    .filter((name) => regexpTest(filenamePattern, name))
     .sort();
   const matches = marker == null
     ? candidates
@@ -265,7 +269,6 @@ function findDisposableVar(prefix) {
 
 module.exports = {
   CLOSE_GATE_PREFIX_LOOKBACK,
-  DIRECT_HANDLER_PROXIMITY,
   HANDLER_PREFIX_LOOKBACK,
   TRAY_GUARD_LOOKAHEAD,
   escapeRegExp,

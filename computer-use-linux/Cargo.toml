@@ -1,6 +1,6 @@
 [package]
 name = "codex-computer-use-linux"
-version = "0.1.2-linux-alpha1"
+version = "0.2.3-linux-alpha1"
 edition = "2021"
 
 [[bin]]
@@ -16,7 +16,9 @@ anyhow = "1.0.102"
 atspi = { version = "0.29.0", features = ["tokio"] }
 base64 = "0.22.1"
 cosmic-protocols = { git = "https://github.com/pop-os/cosmic-protocols", rev = "160b086", default-features = false, features = ["client"] }
+evdev = "0.13.2"
 futures-util = "0.3.32"
+image = { version = "0.25", default-features = false, features = ["png"] }
 libc = "0.2"
 rmcp = { version = "1.5.0", features = ["transport-io"] }
 schemars = "1.0"

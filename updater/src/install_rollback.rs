@@ -1,6 +1,6 @@
 //! Explicit rollback package installation helpers.
 
-use crate::install::PackageKind;
+use crate::install::{stable_validated_package, PackageKind};
 use anyhow::{Context, Result};
 use std::{
     path::{Path, PathBuf},
@@ -16,53 +16,56 @@ const ZYPPER_CANDIDATES: &[&str] = &["/usr/bin/zypper", "/bin/zypper"];
 const PACMAN_CANDIDATES: &[&str] = &["/usr/bin/pacman", "/bin/pacman"];
 
 pub fn install_deb(path: &Path) -> Result<()> {
-    anyhow::ensure!(
-        path.exists(),
-        "Debian rollback package not found: {}",
-        path.display()
-    );
+    let stable = stable_validated_package(path).with_context(|| {
+        format!(
+            "Failed to stabilize Debian rollback package {}",
+            path.display()
+        )
+    })?;
 
     if program_exists(APT_CANDIDATES, "apt") {
-        let mut command = apt_command(path)?;
+        let mut command = apt_command(stable.path())?;
         run_install(&mut command).context("apt rollback install failed")?;
         return Ok(());
     }
 
-    let mut command = dpkg_command(path);
+    let mut command = dpkg_command(stable.path());
     run_install(&mut command).context("dpkg rollback install failed")
 }
 
 pub fn install_rpm(path: &Path) -> Result<()> {
-    anyhow::ensure!(
-        path.exists(),
-        "RPM rollback package not found: {}",
-        path.display()
-    );
+    let stable = stable_validated_package(path).with_context(|| {
+        format!(
+            "Failed to stabilize RPM rollback package {}",
+            path.display()
+        )
+    })?;
 
     if program_exists(DNF_CANDIDATES, "dnf") || program_exists(DNF_CANDIDATES, "dnf5") {
-        let mut command = dnf_command(path)?;
+        let mut command = dnf_command(stable.path())?;
         run_install(&mut command).context("dnf rollback install failed")?;
         return Ok(());
     }
 
     if program_exists(ZYPPER_CANDIDATES, "zypper") {
-        let mut command = zypper_command(path)?;
+        let mut command = zypper_command(stable.path())?;
         run_install(&mut command).context("zypper rollback install failed")?;
         return Ok(());
     }
 
-    let mut command = rpm_command(path);
+    let mut command = rpm_command(stable.path());
     run_install(&mut command).context("rpm rollback install failed")
 }
 
 pub fn install_pacman(path: &Path) -> Result<()> {
-    anyhow::ensure!(
-        path.exists(),
-        "Pacman rollback package not found: {}",
-        path.display()
-    );
+    let stable = stable_validated_package(path).with_context(|| {
+        format!(
+            "Failed to stabilize pacman rollback package {}",
+            path.display()
+        )
+    })?;
 
-    let mut command = pacman_command(path);
+    let mut command = pacman_command(stable.path());
     run_install(&mut command).context("pacman rollback install failed")
 }
 
@@ -107,7 +110,7 @@ fn apt_command(path: &Path) -> Result<Command> {
 
 fn dpkg_command(path: &Path) -> Command {
     let mut command = Command::new(program_path(DPKG_CANDIDATES, "dpkg"));
-    command.arg("-i").arg(path.as_os_str());
+    command.arg("-i").arg("--").arg(path.as_os_str());
     command
 }
 
@@ -134,13 +137,17 @@ fn zypper_command(path: &Path) -> Result<Command> {
 
 fn rpm_command(path: &Path) -> Command {
     let mut command = Command::new(program_path(RPM_CANDIDATES, "rpm"));
-    command.args(["-Uvh", "--oldpackage"]).arg(path.as_os_str());
+    command
+        .args(["-Uvh", "--oldpackage", "--"])
+        .arg(path.as_os_str());
     command
 }
 
 fn pacman_command(path: &Path) -> Command {
     let mut command = Command::new(program_path(PACMAN_CANDIDATES, "pacman"));
-    command.args(["-U", "--noconfirm"]).arg(path.as_os_str());
+    command
+        .args(["-U", "--noconfirm", "--"])
+        .arg(path.as_os_str());
     command
 }
 
@@ -258,6 +265,29 @@ mod tests {
             ]
         );
         Ok(())
+    }
+
+    #[test]
+    fn direct_rollback_commands_stop_option_parsing() {
+        assert_eq!(
+            command_args(dpkg_command(Path::new("-evil.deb"))),
+            vec!["-i", "--", "-evil.deb"]
+        );
+        assert_eq!(
+            command_args(rpm_command(Path::new("-evil.rpm"))),
+            vec!["-Uvh", "--oldpackage", "--", "-evil.rpm"]
+        );
+        assert_eq!(
+            command_args(pacman_command(Path::new("-evil.pkg.tar.zst"))),
+            vec!["-U", "--noconfirm", "--", "-evil.pkg.tar.zst"]
+        );
+    }
+
+    fn command_args(command: Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect()
     }
 
     #[test]

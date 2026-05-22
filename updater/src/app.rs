@@ -1,7 +1,7 @@
 //! Application entrypoints and orchestration for the local updater daemon.
 
 use crate::{
-    builder,
+    builder, cache_cleanup,
     cli::{Cli, Commands},
     codex_cli,
     config::{RuntimeConfig, RuntimePaths},
@@ -106,6 +106,35 @@ fn sync_and_persist(
     persist_if_changed(paths, state, &original_state)
 }
 
+fn normalize_workspace_dir_and_persist(
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+) -> Result<()> {
+    let original_state = state.clone();
+    cache_cleanup::normalize_artifact_workspace_dir(&paths.cache_dir, state);
+    persist_if_changed(paths, state, &original_state)
+}
+
+fn maybe_prune_workspace_cache(workspace_root: &Path, state: &PersistedState) {
+    match cache_cleanup::prune_unreferenced_workspaces(workspace_root, state) {
+        Ok(summary) if summary.pruned_workspaces > 0 => {
+            info!(
+                pruned_workspaces = summary.pruned_workspaces,
+                workspace_root = %workspace_root.display(),
+                "pruned unreferenced updater workspaces"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(
+                ?error,
+                workspace_root = %workspace_root.display(),
+                "failed to prune unreferenced updater workspaces"
+            );
+        }
+    }
+}
+
 fn set_status(
     state: &mut PersistedState,
     paths: &RuntimePaths,
@@ -192,6 +221,8 @@ async fn run_daemon(
     sync_and_persist(config, state, paths)?;
     recover_interrupted_install(state, paths)?;
     codex_cli::reconcile_if_present(state, paths)?;
+    normalize_workspace_dir_and_persist(state, paths)?;
+    maybe_prune_workspace_cache(&config.workspace_root, state);
     maybe_notify_cli_missing(state, paths, config.notifications)?;
     maybe_notify_installed(state, paths, config.notifications)?;
     if packaged_runtime_removed(config) {
@@ -250,6 +281,8 @@ async fn run_check_now(
     sync_and_persist(config, state, paths)?;
     recover_interrupted_install(state, paths)?;
     codex_cli::reconcile_if_present(state, paths)?;
+    normalize_workspace_dir_and_persist(state, paths)?;
+    maybe_prune_workspace_cache(&config.workspace_root, state);
     maybe_notify_cli_missing(state, paths, config.notifications)?;
     maybe_notify_installed(state, paths, config.notifications)?;
     if if_stale && upstream_check_is_fresh(config, state) {
@@ -272,6 +305,7 @@ fn upstream_check_is_fresh(config: &RuntimeConfig, state: &PersistedState) -> bo
 fn run_status(state: &mut PersistedState, paths: &RuntimePaths, json: bool) -> Result<()> {
     codex_cli::reconcile_if_present(state, paths)?;
     complete_pending_install_if_already_installed(state, paths)?;
+    normalize_workspace_dir_and_persist(state, paths)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(state)?);
@@ -293,6 +327,7 @@ fn run_status(state: &mut PersistedState, paths: &RuntimePaths, json: bool) -> R
                 .as_deref()
                 .unwrap_or("none")
         );
+        println!("{}", update_error_status_line(state));
         println!("cli_status: {:?}", state.cli_status);
         println!(
             "cli_installed_version: {}",
@@ -309,6 +344,13 @@ fn run_status(state: &mut PersistedState, paths: &RuntimePaths, json: bool) -> R
     }
 
     Ok(())
+}
+
+fn update_error_status_line(state: &PersistedState) -> String {
+    format!(
+        "update_error: {}",
+        state.error_message.as_deref().unwrap_or("none")
+    )
 }
 
 fn run_prompt_install_cli(
@@ -603,6 +645,7 @@ async fn run_check_cycle(
             .clone()
             .expect("candidate version should be set before local build");
         builder::build_update(config, state, paths, &candidate_version, &downloaded.path).await?;
+        maybe_prune_workspace_cache(&config.workspace_root, state);
         maybe_notify_update_ready(state, paths, config.notifications)?;
         Ok(())
     }
@@ -610,6 +653,7 @@ async fn run_check_cycle(
 
     if let Err(error) = result {
         mark_failed_and_persist(state, paths, error.to_string())?;
+        maybe_prune_workspace_cache(&config.workspace_root, state);
         let _ = notify_failure(config, state, paths, &error);
         return Err(error);
     }
@@ -695,7 +739,7 @@ async fn reconcile_pending_install(
                 return Ok(());
             }
 
-            trigger_install(state, paths, &package_path).await?;
+            trigger_install(state, paths, &config.workspace_root, &package_path).await?;
         }
         _ => {}
     }
@@ -784,7 +828,7 @@ async fn run_install_ready(
     }
 
     clear_install_auth_required_event(state, paths)?;
-    trigger_install(state, paths, &package_path).await
+    trigger_install(state, paths, &config.workspace_root, &package_path).await
 }
 
 fn complete_pending_install_if_already_installed(
@@ -814,6 +858,7 @@ fn complete_pending_install_if_already_installed(
     }
     state.error_message = None;
     state.notified_events.clear();
+    cache_cleanup::normalize_artifact_workspace_dir(&paths.cache_dir, state);
     persist_state(paths, state)?;
     info!("recovered pending install state because the candidate version is already installed or superseded");
     Ok(true)
@@ -837,6 +882,7 @@ fn recover_interrupted_install(state: &mut PersistedState, paths: &RuntimePaths)
         }
         state.error_message = None;
         state.notified_events.clear();
+        cache_cleanup::normalize_artifact_workspace_dir(&paths.cache_dir, state);
         persist_state(paths, state)?;
         info!("recovered interrupted install state because the candidate version is already installed");
         return Ok(());
@@ -866,6 +912,7 @@ fn recover_interrupted_install(state: &mut PersistedState, paths: &RuntimePaths)
     state.status = UpdateStatus::ReadyToInstall;
     state.error_message =
         Some("Previous install attempt was interrupted before completion".to_string());
+    cache_cleanup::normalize_artifact_workspace_dir(&paths.cache_dir, state);
     persist_state(paths, state)?;
     info!(package = %package_path.display(), "recovered interrupted install state back to ready_to_install");
     Ok(())
@@ -1048,6 +1095,7 @@ fn maybe_send_notification(enabled: bool, summary: &str, body: &str) {
 async fn trigger_install(
     state: &mut PersistedState,
     paths: &RuntimePaths,
+    workspace_root: &Path,
     package_path: &Path,
 ) -> Result<()> {
     state.status = UpdateStatus::Installing;
@@ -1072,8 +1120,10 @@ async fn trigger_install(
         state.rollback_blocked_candidate_version = None;
         state.error_message = None;
         state.notified_events.clear();
+        cache_cleanup::normalize_artifact_workspace_dir(workspace_root, state);
         persist_state(paths, state)?;
         let _ = maybe_notify_installed(state, paths, true);
+        maybe_prune_workspace_cache(workspace_root, state);
         return Ok(());
     }
 
@@ -1200,6 +1250,21 @@ mod tests {
 
         state.last_successful_check_at = Some(Utc::now() - ChronoDuration::hours(7));
         assert!(!upstream_check_is_fresh(&config, &state));
+    }
+
+    #[test]
+    fn plain_status_reports_update_error() {
+        let mut state = PersistedState::new(true);
+        state.status = UpdateStatus::Failed;
+        state.error_message = Some("install.sh failed during local rebuild".to_string());
+
+        assert_eq!(
+            update_error_status_line(&state),
+            "update_error: install.sh failed during local rebuild"
+        );
+
+        state.error_message = None;
+        assert_eq!(update_error_status_line(&state), "update_error: none");
     }
 
     #[tokio::test]
@@ -1741,6 +1806,10 @@ mod tests {
         let superseded_package_path = temp.path().join("superseded.deb");
         std::fs::write(&superseded_package_path, b"deb")?;
         state.artifact_paths.package_path = Some(superseded_package_path);
+        state.artifact_paths.workspace_dir = Some(
+            temp.path()
+                .join("cache/workspaces/2026.04.28.082247+abcdef12"),
+        );
 
         assert!(complete_pending_install_if_already_installed(
             &mut state, &paths
@@ -1749,6 +1818,7 @@ mod tests {
         assert_eq!(state.status, UpdateStatus::Installed);
         assert_eq!(state.candidate_version, None);
         assert_eq!(state.artifact_paths.package_path, None);
+        assert_eq!(state.artifact_paths.workspace_dir, None);
         assert_eq!(state.error_message, None);
         crate::rollback::record_current_package_as_known_good(&mut state);
         assert_eq!(state.artifact_paths.rollback_package_path, None);
@@ -1776,6 +1846,10 @@ mod tests {
         let superseded_package_path = temp.path().join("superseded-status.deb");
         std::fs::write(&superseded_package_path, b"deb")?;
         state.artifact_paths.package_path = Some(superseded_package_path);
+        state.artifact_paths.workspace_dir = Some(
+            temp.path()
+                .join("cache/workspaces/2026.04.28.082247+abcdef12"),
+        );
 
         let original_home = std::env::var_os("HOME");
         let original_path = std::env::var_os("PATH");
@@ -1822,6 +1896,7 @@ mod tests {
         assert_eq!(state.status, UpdateStatus::Installed);
         assert_eq!(state.candidate_version, None);
         assert_eq!(state.artifact_paths.package_path, None);
+        assert_eq!(state.artifact_paths.workspace_dir, None);
         Ok(())
     }
 
@@ -1957,12 +2032,17 @@ mod tests {
         state.installed_version = "2026.04.01.035152".to_string();
         state.candidate_version = Some("2026.03.27.025604+1086e799".to_string());
         state.artifact_paths.package_path = Some(package_path);
+        state.artifact_paths.workspace_dir = Some(
+            temp.path()
+                .join("cache/workspaces/2026.03.27.025604+1086e799"),
+        );
 
         recover_interrupted_install(&mut state, &paths)?;
 
         assert_eq!(state.status, UpdateStatus::Installed);
         assert_eq!(state.candidate_version, None);
         assert_eq!(state.artifact_paths.package_path, None);
+        assert_eq!(state.artifact_paths.workspace_dir, None);
         assert_eq!(state.error_message, None);
         Ok(())
     }

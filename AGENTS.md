@@ -227,7 +227,7 @@ This path is for users who do not want a system-wide native package; the daily-d
 - Desktop icon association:
   The launcher runs Electron with `--class=codex-desktop`, and the desktop file sets `StartupWMClass=codex-desktop` so the taskbar/dock can associate the correct icon.
 - Webview server:
-  The launcher starts a local `python3 -m http.server` on port `5175` (default identity) or `5176` (alternate identity) from `content/webview/`, waits for the port to become reachable, verifies that `http://127.0.0.1:<port>/index.html` serves the expected Codex startup markers, and only then launches Electron because the extracted app expects local webview assets there.
+  The launcher starts a local `python3 -m http.server` on port `5175` (default identity) or `5176` (alternate identity) from `content/webview/`, waits for the port to become reachable, verifies that `http://127.0.0.1:<port>/index.html` serves the expected Codex startup markers, and only then launches Electron because the extracted app expects local webview assets there. Opt-in multi-instance launches (`--new-instance` / `CODEX_MULTI_LAUNCH=1`) allocate the first free port from `CODEX_MULTI_LAUNCH_PORT_RANGE` and isolate pid files, launch sockets, logs, and Electron user-data dirs under the selected `port-<n>` instance id.
 - Wayland/GPU compatibility:
   The generated launcher enables `--ozone-platform-hint=auto`, `--disable-gpu-sandbox`, and `--enable-features=WaylandWindowDecorations` by default. Keep these in mind when debugging Pop!_OS, Wayland, or Nvidia-specific rendering issues.
 - Webview server roadmap:
@@ -250,7 +250,7 @@ This path is for users who do not want a system-wide native package; the daily-d
 ## Crate Versioning
 
 - Current updater crate version: `0.7.1` (`updater/Cargo.toml`).
-- Current `codex-computer-use-linux` crate version: `0.1.2-linux-alpha1` (`computer-use-linux/Cargo.toml`).
+- Current `codex-computer-use-linux` crate version: `0.2.3-linux-alpha1` (`computer-use-linux/Cargo.toml`). The enumeration tracks the standalone `agent-sh/computer-use-linux` crate (currently `0.2.3`); a mismatch means a sync between the two is pending.
 - Bump `patch` for fixes, docs, and maintenance-only updates.
 - Bump `minor` for compatible feature additions.
 - Bump `major` for incompatible CLI, persisted-state, or install-flow changes.

@@ -12,7 +12,6 @@ const {
   linuxTargetSummary,
 } = require("../lib/linux-target-context.js");
 const {
-  loadLinuxFeatureMainBundlePatches,
   loadLinuxFeaturePatchDescriptors,
 } = require("../lib/linux-features.js");
 const {
@@ -54,19 +53,7 @@ function legacyCorePatchDescriptors(options = {}) {
 }
 
 function featurePatchDescriptors() {
-  return normalizePatchDescriptors(
-    [
-      ...loadLinuxFeatureMainBundlePatches().map((patch, index) => ({
-        ...patch,
-        id: patch.id ?? patch.name,
-        name: patch.name ?? patch.id,
-        phase: "main-bundle",
-        order: 20_000 + index * 10,
-        ciPolicy: patch.ciPolicy ?? OPTIONAL,
-      })),
-      ...loadLinuxFeaturePatchDescriptors(),
-    ],
-  );
+  return normalizePatchDescriptors(loadLinuxFeaturePatchDescriptors());
 }
 
 function createMainBundleContext(iconAsset, options = {}) {
