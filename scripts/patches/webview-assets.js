@@ -14,11 +14,19 @@ function applyLinuxOpaqueWindowsDefaultPatch(currentSource) {
   const mergeNeedle = "opaqueWindows:e?.opaqueWindows??n.opaqueWindows,semanticColors:";
   const mergePatch =
     `opaqueWindows:e?.opaqueWindows??(${linuxPlatformCheck}?!0:n.opaqueWindows),semanticColors:`;
+  const mergeRegex =
+    /(opaqueWindows:)([A-Za-z_$][\w$]*)\?\.opaqueWindows\?\?([A-Za-z_$][\w$]*)\.opaqueWindows(,semanticColors:)/u;
 
   if (patchedSource.includes("opaqueWindows:e?.opaqueWindows??((typeof navigator<`u`&&")) {
     // Already patched.
   } else if (patchedSource.includes(mergeNeedle)) {
     patchedSource = patchedSource.replace(mergeNeedle, mergePatch);
+  } else if (mergeRegex.test(patchedSource)) {
+    patchedSource = patchedSource.replace(
+      mergeRegex,
+      (_match, prefix, themePatchVar, defaultThemeVar, suffix) =>
+        `${prefix}${themePatchVar}?.opaqueWindows??(${linuxPlatformCheck}?!0:${defaultThemeVar}.opaqueWindows)${suffix}`,
+    );
   } else if (patchedSource.includes("opaqueWindows") && patchedSource.includes("semanticColors")) {
     console.warn(
       "WARN: Could not find Linux opaque window default insertion point — skipping settings default patch",

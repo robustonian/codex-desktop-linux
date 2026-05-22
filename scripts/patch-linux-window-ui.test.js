@@ -32,6 +32,7 @@ const {
   applyLinuxLaunchActionArgsPatch,
   applyLinuxMenuPatch,
   applyLinuxAppSunsetPatch,
+  applyLinuxOpaqueWindowsDefaultPatch,
   applyLinuxOpaqueBackgroundPatch,
   applyLinuxRemoteControlConfigGatePatch,
   applyLinuxRemoteControlConfigPreservationPatch,
@@ -259,6 +260,7 @@ test("default core patch descriptors are grouped and unique", () => {
     "linux-remote-control-config-preservation",
     "linux-git-origins-source-fallback",
     "linux-app-sunset-gate",
+    "opaque-window-default-chrome-theme",
     "opaque-window-default-general-settings",
     "opaque-window-default-webview-index",
     "opaque-window-default-webview-app-main",
@@ -1035,6 +1037,18 @@ test("warns when the app sunset key is present but the gate shape drifts", () =>
   assert.deepEqual(warnings, [
     "WARN: Could not find app sunset gate needle — skipping Linux app sunset patch",
   ]);
+});
+
+test("defaults chrome theme opaque windows on Linux after minified alias drift", () => {
+  const source =
+    "function u(t,n){let r=e[n];return{accent:x(t?.accent)??r.accent,contrast:d(t?.contrast,r.contrast),fonts:h(t?.fonts),ink:x(t?.ink)??r.ink,opaqueWindows:t?.opaqueWindows??r.opaqueWindows,semanticColors:g(t?.semanticColors,r.semanticColors),surface:x(t?.surface)??r.surface}}";
+
+  const patched = applyPatchTwice(applyLinuxOpaqueWindowsDefaultPatch, source);
+
+  assert.match(
+    patched,
+    /opaqueWindows:t\?\.opaqueWindows\?\?\(\(typeof navigator<`u`&&\(\(navigator\.userAgentData\?\.platform\?\?navigator\.platform\?\?navigator\.userAgent\)\.toLowerCase\(\)\.includes\(`linux`\)\)\)\?!0:r\.opaqueWindows\),semanticColors:/,
+  );
 });
 
 test("allows remote control visibility to follow config on Linux", () => {
@@ -1876,6 +1890,7 @@ test("missing icon asset skips only icon patches", () => {
       ].join(""),
     );
     for (const name of [
+      "chrome-theme-test.js",
       "code-theme-test.js",
       "general-settings-test.js",
       "index-test.js",
