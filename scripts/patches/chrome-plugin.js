@@ -28,14 +28,15 @@ function applyLinuxChromePluginAutoInstallPatch(currentSource) {
   const chromeNameVar = currentSource.match(/([A-Za-z_$][\w$]*)=(?:`chrome`|"chrome"|'chrome')/)?.[1] ?? null;
   const nameExpressionPattern = String.raw`(?:[A-Za-z_$][\w$]*|` +
     String.raw`\`chrome\`|"chrome"|'chrome')`;
+  const extraPropertyPattern = String.raw`(?:[A-Za-z_$][\w$]*:[^,{}]+,)*`;
   const gateRegex =
-    new RegExp(String.raw`\{([^{}]*?)(installWhenMissing:!0,)?name:(${nameExpressionPattern}),(isEnabled|isAvailable):\(\{([^}]*)\}\)=>([^{}]*?externalBrowserUseAllowed[^{}]*?)(,migrate:[A-Za-z_$][\w$]*)?\}`, "g");
+    new RegExp(String.raw`\{([^{}]*?)(installWhenMissing:!0,)?name:(${nameExpressionPattern}),(${extraPropertyPattern})(isEnabled|isAvailable):\(\{([^}]*)\}\)=>([^{}]*?externalBrowserUseAllowed[^{}]*?)(,migrate:[A-Za-z_$][\w$]*)?\}`, "g");
 
   let sawChromeGate = false;
   let sawAlreadyInstalledGate = false;
   const patched = currentSource.replace(
     gateRegex,
-    (gateSource, prefix, installWhenMissing, nameExpr, availabilityProp, paramsText, expression, migrateSuffix = "") => {
+    (gateSource, prefix, installWhenMissing, nameExpr, extraProperties, availabilityProp, paramsText, expression, migrateSuffix = "") => {
       if (!isChromeNameExpr(nameExpr, chromeNameVar)) {
         return gateSource;
       }
@@ -46,7 +47,7 @@ function applyLinuxChromePluginAutoInstallPatch(currentSource) {
         return gateSource;
       }
 
-      return `{${prefix}installWhenMissing:!0,name:${nameExpr},${availabilityProp}:({${paramsText}})=>${expression}${migrateSuffix}}`;
+      return `{${prefix}installWhenMissing:!0,name:${nameExpr},${extraProperties}${availabilityProp}:({${paramsText}})=>${expression}${migrateSuffix}}`;
     },
   );
 

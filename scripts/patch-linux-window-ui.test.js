@@ -1440,6 +1440,18 @@ test("handles literal Chrome plugin gate names", () => {
   assert.doesNotMatch(patched, /installWhenMissing:!0,name:'chrome-internal'/);
 });
 
+test("handles Chrome plugin gates with sync-install metadata", () => {
+  const source =
+    "var ke=`chrome`,Ae=`chrome-dev`;var Kr=[{forceReload:!0,name:Ae,syncInstallStateWithChromeExtension:!0,isAvailable:({buildFlavor:e,env:t,features:n})=>or(e,t)&&n.externalBrowserUseAllowed},{forceReload:!0,name:e.Un,syncInstallStateWithChromeExtension:!0,isAvailable:({buildFlavor:e,env:t,features:n})=>jr(e,t)&&n.externalBrowserUseAllowed},{forceReload:!0,name:ke,syncInstallStateWithChromeExtension:!0,isAvailable:({buildFlavor:e,features:t})=>t.externalBrowserUseAllowed&&sr(e)}];";
+
+  const patched = applyPatchTwice(applyLinuxChromePluginAutoInstallPatch, source);
+
+  assert.match(patched, /installWhenMissing:!0,name:ke,syncInstallStateWithChromeExtension:!0/);
+  assert.doesNotMatch(patched, /installWhenMissing:!0,name:Ae/);
+  assert.doesNotMatch(patched, /installWhenMissing:!0,name:e\.Un/);
+  assert.equal((patched.match(/installWhenMissing:!0,name:ke/g) || []).length, 1);
+});
+
 test("reports missing required Chrome plugin auto-install gate as upstream validation failure", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-patch-report-missing-chrome-"));
   try {
