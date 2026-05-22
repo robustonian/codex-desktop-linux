@@ -24,6 +24,60 @@ better_sqlite3_build_version() {
     echo "$detected_version"
 }
 
+patch_better_sqlite3_for_electron_42() {
+    local module_dir="$1"
+
+    case "$ELECTRON_VERSION" in
+        42.*) ;;
+        *) return 0 ;;
+    esac
+
+    local main_file="$module_dir/src/better_sqlite3.cpp"
+    local macros_file="$module_dir/src/util/macros.cpp"
+    local helpers_file="$module_dir/src/util/helpers.cpp"
+
+    [ -f "$main_file" ] || error "Could not find better-sqlite3 source: $main_file"
+    [ -f "$macros_file" ] || error "Could not find better-sqlite3 source: $macros_file"
+    [ -f "$helpers_file" ] || error "Could not find better-sqlite3 source: $helpers_file"
+
+    info "Patching better-sqlite3 for Electron v$ELECTRON_VERSION V8 external pointer API"
+    node - "$main_file" "$macros_file" "$helpers_file" <<'NODE'
+const fs = require("fs");
+
+const [mainFile, macrosFile, helpersFile] = process.argv.slice(2);
+
+function patchFile(path, replacements) {
+  let source = fs.readFileSync(path, "utf8");
+  let patched = source;
+  for (const [needle, replacement] of replacements) {
+    patched = patched.replace(needle, replacement);
+  }
+  if (patched !== source) {
+    fs.writeFileSync(path, patched);
+  }
+}
+
+patchFile(mainFile, [
+  [
+    /v8::External::New\(isolate, addon\)/g,
+    "v8::External::New(isolate, addon, v8::kExternalPointerTypeTagDefault)",
+  ],
+]);
+patchFile(macrosFile, [
+  [
+    /As<v8::External>\(\)->Value\(\)/g,
+    "As<v8::External>()->Value(v8::kExternalPointerTypeTagDefault)",
+  ],
+]);
+patchFile(helpersFile, [
+  [
+    /(recv->InstanceTemplate\(\)->SetNativeDataProperty\(\s*InternalizedFromLatin1\(isolate, name\),\s*func,\s*)0(,\s*data\s*\);)/s,
+    "$1nullptr$2",
+  ],
+]);
+NODE
+}
+
 prune_native_module_build_artifacts() {
     local module_dir="$1"
     local build_dir="$module_dir/build"
@@ -64,6 +118,7 @@ build_native_modules() {
     info "Installing fresh sources from npm..."
     npm install "electron@$ELECTRON_VERSION" --save-dev --ignore-scripts 2>&1 >&2
     npm install "better-sqlite3@$bs3_build_ver" "node-pty@$npty_ver" --ignore-scripts 2>&1 >&2
+    patch_better_sqlite3_for_electron_42 "$build_dir/node_modules/better-sqlite3"
 
     info "Compiling for Electron v$ELECTRON_VERSION (this takes ~1 min)..."
     info "Using Electron headers: $ELECTRON_HEADERS_URL"
