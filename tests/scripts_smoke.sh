@@ -1600,9 +1600,9 @@ REBUILD
 esac
 
 case "$args" in
-    *" better-sqlite3@12.9.0 "*)
+    *" better-sqlite3@12.10.0 "*)
         mkdir -p node_modules/better-sqlite3/src/util
-        printf '%s\n' '{"version":"12.9.0"}' > node_modules/better-sqlite3/package.json
+        printf '%s\n' '{"version":"12.10.0"}' > node_modules/better-sqlite3/package.json
         cat > node_modules/better-sqlite3/src/better_sqlite3.cpp <<'CPP'
 void init(v8::Isolate* isolate, Addon* addon) {
 	v8::Local<v8::External> data = v8::External::New(isolate, addon);
@@ -1651,6 +1651,7 @@ SCRIPT
         WORK_DIR="$workspace/work"
         ELECTRON_VERSION="42.0.1"
         ELECTRON_HEADERS_URL="https://example.invalid/electron"
+        MIN_BETTER_SQLITE3_VERSION_FOR_ELECTRON_42="12.10.0"
         mkdir -p "$WORK_DIR"
         info() { echo "[INFO] $*" >&2; }
         warn() { echo "[WARN] $*" >&2; }
@@ -1684,7 +1685,7 @@ test_native_module_rebuild_accepts_prebuilt_source() {
     printf '%s\n' '{"version":"1.1.0"}' > "$app_dir/node_modules/node-pty/package.json"
     printf '%s\n' stale > "$app_dir/node_modules/better-sqlite3/old.txt"
 
-    printf '%s\n' '{"version":"12.9.0"}' > "$source_dir/better-sqlite3/package.json"
+    printf '%s\n' '{"version":"12.10.0"}' > "$source_dir/better-sqlite3/package.json"
     printf '%s\n' '{"version":"1.1.0"}' > "$source_dir/node-pty/package.json"
     : > "$source_dir/better-sqlite3/build/Release/better_sqlite3.node"
     : > "$source_dir/better-sqlite3/build/Release/junk.o"
@@ -1694,6 +1695,7 @@ test_native_module_rebuild_accepts_prebuilt_source() {
     (
         WORK_DIR="$workspace/work"
         ELECTRON_VERSION="42.0.1"
+        MIN_BETTER_SQLITE3_VERSION_FOR_ELECTRON_42="12.10.0"
         CODEX_NATIVE_MODULES_SOURCE="$source_dir"
         mkdir -p "$WORK_DIR"
         info() { echo "[INFO] $*" >&2; }
@@ -1756,6 +1758,7 @@ test_launcher_template_sanity() {
     assert_contains "$REPO_DIR/scripts/lib/asar-patch.sh" "CODEX_PATCH_REPORT_JSON"
     assert_contains "$REPO_DIR/scripts/lib/rebuild-report.sh" "write_rebuild_report_json"
     assert_contains "$REPO_DIR/install.sh" "MIN_BETTER_SQLITE3_VERSION_FOR_ELECTRON_41=\"12.9.0\""
+    assert_contains "$REPO_DIR/install.sh" "MIN_BETTER_SQLITE3_VERSION_FOR_ELECTRON_42=\"12.10.0\""
     assert_contains "$REPO_DIR/scripts/lib/native-modules.sh" "better_sqlite3_build_version"
     assert_contains "$REPO_DIR/scripts/lib/native-modules.sh" "patch_better_sqlite3_for_v8_external_pointer_api"
     assert_contains "$REPO_DIR/scripts/lib/native-modules.sh" "@electron/rebuild@4.0.4"

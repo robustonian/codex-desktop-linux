@@ -22,6 +22,12 @@ better_sqlite3_build_version() {
                 return
             fi
             ;;
+        42.*)
+            if version_lt "$detected_version" "$MIN_BETTER_SQLITE3_VERSION_FOR_ELECTRON_42"; then
+                echo "$MIN_BETTER_SQLITE3_VERSION_FOR_ELECTRON_42"
+                return
+            fi
+            ;;
     esac
 
     echo "$detected_version"
