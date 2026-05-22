@@ -6,6 +6,7 @@ use crate::{
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::{Duration, Utc};
+use semver::Version;
 use std::{
     ffi::OsString,
     fs,
@@ -94,7 +95,7 @@ pub fn preflight(
     };
 
     state.cli_latest_version = Some(latest_version.clone());
-    if installed_version == latest_version {
+    if installed_cli_version_satisfies_latest(&installed_version, &latest_version) {
         state.cli_status = CliStatus::UpToDate;
         state.cli_error_message = None;
         persist_state(paths, state)?;
@@ -117,10 +118,17 @@ pub fn preflight(
     persist_state(paths, state)?;
     install_latest_cli(&latest_version)?;
 
-    let refreshed_path = resolve_cli_path(requested_path)
-        .or_else(|| resolve_cli_path(None))
-        .ok_or_else(|| anyhow!("Codex CLI disappeared after the automatic upgrade attempt"))?;
-    let refreshed_version = read_installed_version(&refreshed_path)?;
+    let (refreshed_path, refreshed_version) = if let Some(updated_cli) =
+        resolve_cli_path_with_version(requested_path, &latest_version)
+    {
+        updated_cli
+    } else {
+        let fallback_path = resolve_cli_path(requested_path)
+            .or_else(|| resolve_cli_path(None))
+            .ok_or_else(|| anyhow!("Codex CLI disappeared after the automatic upgrade attempt"))?;
+        let fallback_version = read_installed_version(&fallback_path)?;
+        (fallback_path, fallback_version)
+    };
     state.cli_path = Some(refreshed_path.clone());
     state.cli_installed_version = Some(refreshed_version.clone());
 
@@ -276,17 +284,45 @@ fn persist_if_changed(
 }
 
 pub(crate) fn resolve_cli_path(explicit_path: Option<&Path>) -> Option<PathBuf> {
+    cli_path_candidates(explicit_path)
+        .into_iter()
+        .find(|path| is_executable(path))
+}
+
+fn resolve_cli_path_with_version(
+    explicit_path: Option<&Path>,
+    expected_version: &str,
+) -> Option<(PathBuf, String)> {
+    post_install_cli_path_candidates(explicit_path)
+        .into_iter()
+        .filter(|path| is_executable(path))
+        .find_map(|path| match read_installed_version(&path) {
+            Ok(version) if installed_cli_version_satisfies_latest(&version, expected_version) => {
+                Some((path, version))
+            }
+            _ => None,
+        })
+}
+
+fn cli_path_candidates(explicit_path: Option<&Path>) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
     if let Some(path) = explicit_path {
-        if is_executable(path) {
-            return Some(path.to_path_buf());
-        }
+        candidates.push(path.to_path_buf());
     }
 
-    find_in_path("codex", &command_path_env()).or_else(|| {
-        known_cli_locations()
-            .into_iter()
-            .find(|path| is_executable(path))
-    })
+    candidates.extend(find_all_in_path("codex", &command_path_env()));
+    candidates.extend(known_cli_locations());
+    dedupe_paths(candidates)
+}
+
+fn post_install_cli_path_candidates(explicit_path: Option<&Path>) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    candidates.extend(find_all_in_path("codex", &command_path_env()));
+    candidates.extend(known_cli_locations());
+    if let Some(path) = explicit_path {
+        candidates.push(path.to_path_buf());
+    }
+    dedupe_paths(candidates)
 }
 
 fn known_cli_locations() -> Vec<PathBuf> {
@@ -302,6 +338,7 @@ fn known_cli_locations() -> Vec<PathBuf> {
             versioned_paths.reverse();
             candidates.extend(versioned_paths);
         }
+        candidates.push(home.join(".npm-global/bin/codex"));
         candidates.push(home.join(".local/share/pnpm/codex"));
         candidates.push(home.join(".local/bin/codex"));
     }
@@ -385,10 +422,28 @@ fn cached_latest_version_matches_install(
 
 fn refresh_cli_status_from_latest(state: &mut PersistedState, installed_version: &str) {
     state.cli_status = match state.cli_latest_version.as_deref() {
-        Some(latest_version) if latest_version == installed_version => CliStatus::UpToDate,
+        Some(latest_version)
+            if installed_cli_version_satisfies_latest(installed_version, latest_version) =>
+        {
+            CliStatus::UpToDate
+        }
         Some(_) => CliStatus::UpdateRequired,
         None => CliStatus::Unknown,
     };
+}
+
+fn installed_cli_version_satisfies_latest(installed_version: &str, latest_version: &str) -> bool {
+    if installed_version == latest_version {
+        return true;
+    }
+
+    match (
+        Version::parse(installed_version),
+        Version::parse(latest_version),
+    ) {
+        (Ok(installed), Ok(latest)) => installed >= latest,
+        _ => false,
+    }
 }
 
 fn read_installed_version(cli_path: &Path) -> Result<String> {
@@ -615,14 +670,24 @@ fn format_command_output(output: &Output) -> String {
 }
 
 fn find_in_path(name: &str, path_env: &OsString) -> Option<PathBuf> {
-    std::env::split_paths(path_env).find_map(|entry| {
-        let candidate = entry.join(name);
-        if is_executable(&candidate) {
-            Some(candidate)
-        } else {
-            None
+    find_all_in_path(name, path_env).into_iter().next()
+}
+
+fn find_all_in_path(name: &str, path_env: &OsString) -> Vec<PathBuf> {
+    std::env::split_paths(path_env)
+        .map(|entry| entry.join(name))
+        .filter(|candidate| is_executable(candidate))
+        .collect()
+}
+
+fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut deduped = Vec::new();
+    for path in paths {
+        if !deduped.iter().any(|existing| existing == &path) {
+            deduped.push(path);
         }
-    })
+    }
+    deduped
 }
 
 fn command_path_env() -> OsString {
@@ -683,7 +748,7 @@ mod tests {
         test_util::env_lock,
     };
     use chrono::Utc;
-    use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+    use std::{ffi::OsString, fs, os::unix::fs::PermissionsExt, path::Path};
     use tempfile::tempdir;
 
     fn write_executable_script(path: &Path, contents: &str) -> Result<()> {
@@ -705,6 +770,33 @@ mod tests {
         }
     }
 
+    struct EnvRestoreGuard {
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvRestoreGuard {
+        fn capture(keys: &[&'static str]) -> Self {
+            Self {
+                saved: keys
+                    .iter()
+                    .map(|key| (*key, std::env::var_os(key)))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvRestoreGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                if let Some(value) = value {
+                    std::env::set_var(key, value);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+    }
+
     #[test]
     fn extracts_plain_semver() {
         assert_eq!(extract_version("0.34.1"), Some("0.34.1".to_string()));
@@ -721,6 +813,17 @@ mod tests {
     #[test]
     fn ignores_non_version_text() {
         assert_eq!(extract_version("Codex CLI"), None);
+    }
+
+    #[test]
+    fn installed_cli_version_satisfies_equal_or_newer_semver() {
+        assert!(installed_cli_version_satisfies_latest("0.42.1", "0.42.1"));
+        assert!(installed_cli_version_satisfies_latest("0.43.0", "0.42.1"));
+        assert!(!installed_cli_version_satisfies_latest("0.42.0", "0.42.1"));
+        assert!(!installed_cli_version_satisfies_latest(
+            "custom-build",
+            "0.42.1"
+        ));
     }
 
     #[test]
@@ -1045,6 +1148,117 @@ mod tests {
         assert_eq!(state.cli_latest_version.as_deref(), Some("0.42.1"));
         assert_eq!(state.cli_status, CliStatus::UpToDate);
         assert_eq!(read_installed_version(&codex_path)?, "0.42.1");
+        Ok(())
+    }
+
+    #[test]
+    fn preflight_accepts_user_prefix_cli_after_system_cli_upgrade() -> Result<()> {
+        let _env_guard = env_lock();
+        let temp = tempdir()?;
+        let paths = test_runtime_paths(temp.path());
+        paths.ensure_dirs()?;
+
+        let home = temp.path().join("home");
+        let npm_bin = temp.path().join("npm-bin");
+        let system_bin = temp.path().join("system-bin");
+        fs::create_dir_all(&home)?;
+        fs::create_dir_all(&npm_bin)?;
+        fs::create_dir_all(&system_bin)?;
+
+        let system_codex = system_bin.join("codex");
+        write_executable_script(
+            &system_codex,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ] || [ \"$1\" = \"version\" ]; then\n  echo 'codex-cli v0.42.0'\n  exit 0\nfi\nexit 1\n",
+        )?;
+        let user_codex = home.join(".npm-global/bin/codex");
+        fs::create_dir_all(user_codex.parent().expect("user codex should have parent"))?;
+        write_executable_script(
+            &user_codex,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ] || [ \"$1\" = \"version\" ]; then\n  echo 'codex-cli v0.42.1'\n  exit 0\nfi\nexit 1\n",
+        )?;
+
+        let npm_path = npm_bin.join("npm");
+        write_executable_script(
+            &npm_path,
+            r#"#!/bin/sh
+if [ "$1" = "view" ] && [ "$2" = "@openai/codex" ] && [ "$3" = "version" ]; then
+  echo '0.42.1'
+  exit 0
+fi
+if [ "$1" = "install" ] && [ "$2" = "-g" ]; then
+  exit 0
+fi
+exit 1
+"#,
+        )?;
+
+        let _restore_env = EnvRestoreGuard::capture(&["HOME", "PATH", "NVM_DIR", "CODEX_CLI_PATH"]);
+        std::env::set_var("HOME", &home);
+        std::env::set_var("PATH", std::env::join_paths([npm_bin, system_bin])?);
+        std::env::remove_var("NVM_DIR");
+        std::env::remove_var("CODEX_CLI_PATH");
+
+        let mut state = PersistedState::new(true);
+        state.cli_path = Some(system_codex.clone());
+
+        assert_eq!(
+            resolve_cli_path_with_version(Some(&system_codex), "0.42.1"),
+            Some((user_codex.clone(), "0.42.1".to_string()))
+        );
+
+        let outcome = preflight(&mut state, &paths, Some(system_codex.clone()), false)?;
+
+        assert!(outcome.updated);
+        assert_eq!(outcome.cli_path, user_codex);
+        assert_eq!(outcome.installed_version, "0.42.1");
+        assert_eq!(state.cli_path.as_deref(), Some(user_codex.as_path()));
+        assert_eq!(state.cli_installed_version.as_deref(), Some("0.42.1"));
+        assert_eq!(state.cli_latest_version.as_deref(), Some("0.42.1"));
+        assert_eq!(state.cli_status, CliStatus::UpToDate);
+        assert_eq!(read_installed_version(&system_codex)?, "0.42.0");
+        Ok(())
+    }
+
+    #[test]
+    fn reconcile_if_present_does_not_downgrade_newer_cli() -> Result<()> {
+        let _env_guard = env_lock();
+        let temp = tempdir()?;
+        let paths = test_runtime_paths(temp.path());
+        paths.ensure_dirs()?;
+
+        let bin_dir = temp.path().join("bin");
+        fs::create_dir_all(&bin_dir)?;
+
+        let codex_path = bin_dir.join("codex");
+        write_executable_script(
+            &codex_path,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ] || [ \"$1\" = \"version\" ]; then\n  echo 'codex-cli v0.43.0'\n  exit 0\nfi\nexit 1\n",
+        )?;
+
+        let npm_path = bin_dir.join("npm");
+        write_executable_script(
+            &npm_path,
+            "#!/bin/sh\nif [ \"$1\" = \"view\" ] && [ \"$2\" = \"@openai/codex\" ] && [ \"$3\" = \"version\" ]; then\n  echo '0.42.1'\n  exit 0\nfi\necho 'npm install should not run for newer installed Codex CLI' >&2\nexit 42\n",
+        )?;
+
+        let _restore_env = EnvRestoreGuard::capture(&["HOME", "PATH", "NVM_DIR"]);
+        std::env::set_var("HOME", temp.path());
+        std::env::set_var("PATH", std::env::join_paths([bin_dir.clone()])?);
+        std::env::remove_var("NVM_DIR");
+
+        assert_eq!(npm_program(), npm_path);
+
+        let mut state = PersistedState::new(true);
+        state.cli_path = Some(codex_path.clone());
+
+        let updated = reconcile_if_present(&mut state, &paths)?;
+
+        assert!(!updated);
+        assert_eq!(state.cli_path.as_deref(), Some(codex_path.as_path()));
+        assert_eq!(state.cli_installed_version.as_deref(), Some("0.43.0"));
+        assert_eq!(state.cli_latest_version.as_deref(), Some("0.42.1"));
+        assert_eq!(state.cli_status, CliStatus::UpToDate);
+        assert_eq!(read_installed_version(&codex_path)?, "0.43.0");
         Ok(())
     }
 }

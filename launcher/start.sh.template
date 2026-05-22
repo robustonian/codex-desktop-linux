@@ -20,29 +20,170 @@ LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/$CODEX_LINUX_APP_ID"
 LOG_FILE="$LOG_DIR/launcher.log"
 APP_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/$CODEX_LINUX_APP_ID"
 APP_SETTINGS_FILE="$APP_CONFIG_DIR/settings.json"
+CODEX_LINUX_SETTINGS_FILE="$APP_SETTINGS_FILE"
+export CODEX_LINUX_APP_ID CODEX_LINUX_APP_DISPLAY_NAME CODEX_LINUX_WEBVIEW_PORT CODEX_LINUX_SETTINGS_FILE
 APP_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/$CODEX_LINUX_APP_ID"
 APP_PID_FILE="$APP_STATE_DIR/app.pid"
 WEBVIEW_PID_FILE="$APP_STATE_DIR/webview.pid"
 LAUNCH_ACTION_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$APP_STATE_DIR}/$CODEX_LINUX_APP_ID"
 LAUNCH_ACTION_SOCKET="$LAUNCH_ACTION_RUNTIME_DIR/launch-action.sock"
 PACKAGED_RUNTIME_HELPER="$SCRIPT_DIR/.codex-linux/codex-packaged-runtime.sh"
+COLD_START_HOOK_DIR="$SCRIPT_DIR/.codex-linux/cold-start.d"
 MANAGED_NODE_BIN_DIR="$SCRIPT_DIR/resources/node-runtime/bin"
 APP_NOTIFICATION_ICON_NAME="$CODEX_LINUX_APP_ID"
 APP_NOTIFICATION_ICON_BUNDLE="$SCRIPT_DIR/.codex-linux/$APP_NOTIFICATION_ICON_NAME.png"
 APP_NOTIFICATION_ICON_SYSTEM="/usr/share/icons/hicolor/256x256/apps/$APP_NOTIFICATION_ICON_NAME.png"
 APP_NOTIFICATION_ICON_REPO="$SCRIPT_DIR/../assets/codex.png"
+MULTI_LAUNCH_REQUESTED=0
+MULTI_LAUNCH_ACTIVE=0
+CODEX_LINUX_INSTANCE_ID=""
+LAUNCHER_ARGS=()
 
-case "$CODEX_LINUX_WEBVIEW_PORT" in
-    ""|*[!0-9]*)
-        echo "CODEX_WEBVIEW_PORT must be a TCP port number" >&2
-        exit 1
-        ;;
-esac
-if [ "$CODEX_LINUX_WEBVIEW_PORT" -lt 1 ] || [ "$CODEX_LINUX_WEBVIEW_PORT" -gt 65535 ]; then
-    echo "CODEX_WEBVIEW_PORT must be between 1 and 65535" >&2
+# Internal marker consumed by patched Electron bundles; never trust inheritance.
+unset CODEX_LINUX_MULTI_LAUNCH
+
+early_truthy_env_value() {
+    case "${1:-}" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+normalize_tcp_port() {
+    local name="$1"
+    local port="$2"
+    local value
+
+    case "$port" in
+        ""|*[!0-9]*)
+            echo "$name must be a TCP port number" >&2
+            return 1
+            ;;
+    esac
+    value="$port"
+    while [ "${value#0}" != "$value" ]; do
+        value="${value#0}"
+    done
+    [ -n "$value" ] || value=0
+
+    if [ "${#value}" -gt 5 ] || [ "$value" -lt 1 ] || [ "$value" -gt 65535 ]; then
+        echo "$name must be between 1 and 65535" >&2
+        return 1
+    fi
+
+    printf '%s\n' "$value"
+}
+
+validate_tcp_port() {
+    normalize_tcp_port "$1" "$2" >/dev/null
+}
+
+if ! CODEX_LINUX_WEBVIEW_PORT="$(normalize_tcp_port "CODEX_WEBVIEW_PORT" "$CODEX_LINUX_WEBVIEW_PORT")"; then
     exit 1
 fi
 
+launcher_port_is_open() {
+    local port="$1"
+    ( exec 3<>/dev/tcp/127.0.0.1/"$port" ) 2>/dev/null
+}
+
+choose_multi_launch_port() {
+    local range="${CODEX_MULTI_LAUNCH_PORT_RANGE:-$CODEX_LINUX_WEBVIEW_PORT-$((CODEX_LINUX_WEBVIEW_PORT + 4))}"
+    local start end port
+
+    case "$range" in
+        *-*)
+            start="${range%-*}"
+            end="${range#*-}"
+            ;;
+        *)
+            start="$range"
+            end="$range"
+            ;;
+    esac
+
+    start="$(normalize_tcp_port "CODEX_MULTI_LAUNCH_PORT_RANGE start" "$start")" || return 1
+    end="$(normalize_tcp_port "CODEX_MULTI_LAUNCH_PORT_RANGE end" "$end")" || return 1
+    if [ "$start" -gt "$end" ]; then
+        echo "CODEX_MULTI_LAUNCH_PORT_RANGE start must be <= end" >&2
+        return 1
+    fi
+
+    for port in $(seq "$start" "$end"); do
+        if ! launcher_port_is_open "$port"; then
+            echo "$port"
+            return 0
+        fi
+    done
+
+    echo "No free Codex Desktop webview port found in CODEX_MULTI_LAUNCH_PORT_RANGE=$range" >&2
+    return 1
+}
+
+parse_launcher_args() {
+    local passthrough=0
+
+    LAUNCHER_ARGS=()
+    if early_truthy_env_value "${CODEX_MULTI_LAUNCH:-}"; then
+        MULTI_LAUNCH_REQUESTED=1
+    fi
+
+    while [ "$#" -gt 0 ]; do
+        if [ "$passthrough" -eq 1 ]; then
+            LAUNCHER_ARGS+=("$1")
+            shift
+            continue
+        fi
+
+        case "$1" in
+            --)
+                passthrough=1
+                LAUNCHER_ARGS+=("$1")
+                ;;
+            --new-instance|--multi-instance|--multi-launch)
+                MULTI_LAUNCH_REQUESTED=1
+                ;;
+            *)
+                LAUNCHER_ARGS+=("$1")
+                ;;
+        esac
+        shift
+    done
+}
+
+configure_multi_launch_instance() {
+    parse_launcher_args "$@"
+    [ "$MULTI_LAUNCH_REQUESTED" -eq 1 ] || return 0
+
+    local base_state_dir="$APP_STATE_DIR"
+    local selected_port
+
+    selected_port="$(choose_multi_launch_port)" || exit 1
+    CODEX_LINUX_WEBVIEW_PORT="$selected_port"
+    CODEX_LINUX_INSTANCE_ID="port-$CODEX_LINUX_WEBVIEW_PORT"
+    MULTI_LAUNCH_ACTIVE=1
+    CODEX_LINUX_MULTI_LAUNCH=1
+
+    APP_STATE_DIR="$base_state_dir/instances/$CODEX_LINUX_INSTANCE_ID"
+    APP_PID_FILE="$APP_STATE_DIR/app.pid"
+    WEBVIEW_PID_FILE="$APP_STATE_DIR/webview.pid"
+    if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+        LAUNCH_ACTION_RUNTIME_DIR="$XDG_RUNTIME_DIR/$CODEX_LINUX_APP_ID/instances/$CODEX_LINUX_INSTANCE_ID"
+    else
+        LAUNCH_ACTION_RUNTIME_DIR="$APP_STATE_DIR"
+    fi
+    LAUNCH_ACTION_SOCKET="$LAUNCH_ACTION_RUNTIME_DIR/launch-action.sock"
+    LOG_FILE="$LOG_DIR/launcher-$CODEX_LINUX_INSTANCE_ID.log"
+
+    if [ -n "${CODEX_ELECTRON_USER_DATA_DIR:-}" ]; then
+        CODEX_ELECTRON_USER_DATA_DIR="$CODEX_ELECTRON_USER_DATA_DIR/instances/$CODEX_LINUX_INSTANCE_ID"
+    else
+        CODEX_ELECTRON_USER_DATA_DIR="$APP_STATE_DIR/electron-user-data"
+    fi
+    export CODEX_ELECTRON_USER_DATA_DIR CODEX_LINUX_INSTANCE_ID CODEX_LINUX_MULTI_LAUNCH CODEX_LINUX_WEBVIEW_PORT
+}
+
+configure_multi_launch_instance "$@"
 WEBVIEW_ORIGIN="http://127.0.0.1:$CODEX_LINUX_WEBVIEW_PORT"
 
 mkdir -p "$LOG_DIR" "$APP_CONFIG_DIR" "$APP_STATE_DIR" "$LAUNCH_ACTION_RUNTIME_DIR"
@@ -54,7 +195,7 @@ ELECTRON_PID=""
 RUNNING_APP_PID=""
 WARM_START=0
 
-if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+if [[ "${LAUNCHER_ARGS[0]:-}" == "--help" || "${LAUNCHER_ARGS[0]:-}" == "-h" ]]; then
     cat <<HELP
 Usage: ./start.sh [OPTIONS] [-- ELECTRON_FLAGS...]
 
@@ -62,6 +203,7 @@ Launches the $CODEX_LINUX_APP_DISPLAY_NAME app.
 
 Options:
   -h, --help                  Show this help message and exit
+  --new-instance              Start a separate app instance on the first free port in the multi-launch range
   --new-chat                  Open the main window on a new chat
   --quick-chat                Open a projectless quick chat
   --prompt-chat               Show the compact prompt for a new chat
@@ -79,11 +221,14 @@ Environment:
   CODEX_LINUX_RENDERING_MODE=auto|default|wslg
                               Auto-detect WSLg, keep generic Linux defaults, or force the WSLg profile
   CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=0|1
-                              Override the launcher's default --disable-gpu-compositing decision
+                              Set to 1 to add --disable-gpu-compositing for flicker workarounds
   CODEX_FORCE_RENDERER_ACCESSIBILITY=auto|0|1
                               Override --force-renderer-accessibility; auto skips it under WSLg
+  CODEX_MULTI_LAUNCH=1        Treat normal launches like --new-instance
+  CODEX_MULTI_LAUNCH_PORT_RANGE=START-END
+                              Port allocation range for --new-instance (default: CODEX_WEBVIEW_PORT through +4)
 
-Logs: ${XDG_CACHE_HOME:-$HOME/.cache}/$CODEX_LINUX_APP_ID/launcher.log
+Logs: $LOG_FILE
 HELP
     exit 0
 fi
@@ -91,6 +236,9 @@ fi
 exec >>"$LOG_FILE" 2>&1
 
 echo "[$(date -Is)] Starting $CODEX_LINUX_APP_DISPLAY_NAME launcher"
+if [ "$MULTI_LAUNCH_ACTIVE" -eq 1 ]; then
+    echo "Multi-launch instance: id=$CODEX_LINUX_INSTANCE_ID webview_port=$CODEX_LINUX_WEBVIEW_PORT state_dir=$APP_STATE_DIR user_data_dir=$CODEX_ELECTRON_USER_DATA_DIR"
+fi
 
 now_ms() {
     local value seconds nanos
@@ -173,7 +321,7 @@ import_graphical_env_entry() {
     # systemd --user manager environment (and not in the spawned process's
     # initial env).
     case "$name" in
-        DISPLAY|WAYLAND_DISPLAY|XDG_SESSION_TYPE|XDG_CURRENT_DESKTOP|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|DESKTOP_SESSION|XAUTHORITY|SOMMELIER_VERSION|SOMMELIER_VM_IDENTIFIER)
+        DISPLAY|WAYLAND_DISPLAY|XDG_SESSION_TYPE|XDG_CURRENT_DESKTOP|XDG_SESSION_DESKTOP|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|DESKTOP_SESSION|XAUTHORITY|HYPRLAND_INSTANCE_SIGNATURE|YDOTOOL_SOCKET|SOMMELIER_VERSION|SOMMELIER_VM_IDENTIFIER)
             if [ -z "${!name:-}" ]; then
                 export "$entry"
             fi
@@ -365,12 +513,34 @@ print(version.strip())
 PY
 }
 
+bundled_plugin_name() {
+    local plugin_json="$1"
+
+    python3 - "$plugin_json" <<'PY'
+import json
+import re
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        name = json.load(handle).get("name")
+except (OSError, json.JSONDecodeError):
+    name = None
+
+if not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9._-]+", name.strip()) is None:
+    raise SystemExit(1)
+print(name.strip())
+PY
+}
+
 sync_browser_use_bundled_plugin_cache() {
-    local source_plugin="$SCRIPT_DIR/resources/plugins/openai-bundled/plugins/browser-use"
+    local source_plugin="$SCRIPT_DIR/resources/plugins/openai-bundled/plugins/browser"
     local source_marketplace="$SCRIPT_DIR/resources/plugins/openai-bundled/.agents/plugins/marketplace.json"
-    local plugin_json="$source_plugin/.codex-plugin/plugin.json"
-    local source_client="$source_plugin/scripts/browser-client.mjs"
+    local plugin_json=""
+    local source_client=""
     local codex_home="${CODEX_HOME:-$HOME/.codex}"
+    local plugin_name
+    local plugin_dir_name
     local version
     local cache_root
     local cache_plugin
@@ -379,14 +549,25 @@ sync_browser_use_bundled_plugin_cache() {
     local tmp_plugin
     local marketplace_root
     local marketplace_plugins_dir
+    local marketplace_plugin_link
+    local needs_copy=1
+
+    plugin_json="$source_plugin/.codex-plugin/plugin.json"
+    source_client="$source_plugin/scripts/browser-client.mjs"
 
     [ -f "$plugin_json" ] || return 0
     [ -f "$source_client" ] || return 0
 
+    plugin_name="$(bundled_plugin_name "$plugin_json" 2>/dev/null || basename "$source_plugin")"
+    plugin_dir_name="$(basename "$source_plugin")"
+    [ -n "$plugin_name" ] || return 0
+    [ -n "$plugin_dir_name" ] || return 0
+
     marketplace_root="$codex_home/.tmp/bundled-marketplaces/openai-bundled"
     marketplace_plugins_dir="$marketplace_root/.agents/plugins"
+    marketplace_plugin_link="$marketplace_root/plugins/$plugin_dir_name"
     if [ -f "$source_marketplace" ]; then
-        mkdir -p "$marketplace_plugins_dir"
+        mkdir -p "$marketplace_plugins_dir" "$marketplace_root/plugins"
         rm -f "$marketplace_plugins_dir/marketplace.json"
         cp "$source_marketplace" "$marketplace_plugins_dir/marketplace.json" && \
             chmod u+w "$marketplace_plugins_dir/marketplace.json" || \
@@ -396,29 +577,43 @@ sync_browser_use_bundled_plugin_cache() {
     version="$(bundled_plugin_version "$plugin_json" 2>/dev/null || true)"
     [ -n "$version" ] || return 0
 
-    cache_root="$codex_home/plugins/cache/openai-bundled/browser-use"
+    cache_root="$codex_home/plugins/cache/openai-bundled/$plugin_name"
     cache_plugin="$cache_root/$version"
     cache_client="$cache_plugin/scripts/browser-client.mjs"
 
     if [ -f "$cache_client" ] && cmp -s "$source_client" "$cache_client"; then
-        return 0
+        needs_copy=0
     fi
 
-    cache_parent="$(dirname "$cache_plugin")"
-    tmp_plugin="$cache_parent/.browser-use-$version.tmp.$$"
-    remove_tree_if_exists "$tmp_plugin"
-    mkdir -p "$cache_parent"
-
-    if cp -R "$source_plugin" "$tmp_plugin"; then
-        make_tree_owner_writable "$tmp_plugin"
-        find "$tmp_plugin" -type f -name '*:com.apple.*' -delete
-        remove_tree_if_exists "$cache_plugin"
-        mv "$tmp_plugin" "$cache_plugin"
-        echo "Browser Use plugin cache synced from bundled resources: $cache_plugin"
-    else
+    if [ "$needs_copy" -eq 1 ]; then
+        cache_parent="$(dirname "$cache_plugin")"
+        tmp_plugin="$cache_parent/.browser-$version.tmp.$$"
         remove_tree_if_exists "$tmp_plugin"
-        echo "Browser Use plugin cache sync failed; continuing with existing cache."
+        mkdir -p "$cache_parent"
+
+        if cp -R "$source_plugin" "$tmp_plugin"; then
+            make_tree_owner_writable "$tmp_plugin"
+            find "$tmp_plugin" -type f -name '*:com.apple.*' -delete
+            remove_tree_if_exists "$cache_plugin"
+            mv "$tmp_plugin" "$cache_plugin"
+            echo "Browser Use plugin cache synced from bundled resources: $cache_plugin"
+        else
+            remove_tree_if_exists "$tmp_plugin"
+            echo "Browser Use plugin cache sync failed; continuing with existing cache."
+            return 0
+        fi
     fi
+
+    if [ -e "$cache_root/latest" ] && [ ! -L "$cache_root/latest" ]; then
+        remove_tree_if_exists "$cache_root/latest"
+    fi
+    ln -sfn "$version" "$cache_root/latest"
+
+    mkdir -p "$marketplace_root/plugins"
+    if [ -e "$marketplace_plugin_link" ] && [ ! -L "$marketplace_plugin_link" ]; then
+        remove_tree_if_exists "$marketplace_plugin_link"
+    fi
+    ln -sfn "$cache_root/latest" "$marketplace_plugin_link"
 }
 
 chrome_extension_host_arch() {
@@ -631,6 +826,8 @@ sync_computer_use_bundled_plugin_cache() {
     local tmp_plugin
     local marketplace_root
     local marketplace_plugins_dir
+    local marketplace_plugin_link
+    local needs_copy=1
 
     [ -f "$plugin_json" ] || return 0
     [ -f "$source_backend" ] || return 0
@@ -638,8 +835,9 @@ sync_computer_use_bundled_plugin_cache() {
 
     marketplace_root="$codex_home/.tmp/bundled-marketplaces/openai-bundled"
     marketplace_plugins_dir="$marketplace_root/.agents/plugins"
+    marketplace_plugin_link="$marketplace_root/plugins/computer-use"
     if [ -f "$source_marketplace" ]; then
-        mkdir -p "$marketplace_plugins_dir"
+        mkdir -p "$marketplace_plugins_dir" "$marketplace_root/plugins"
         rm -f "$marketplace_plugins_dir/marketplace.json"
         cp "$source_marketplace" "$marketplace_plugins_dir/marketplace.json" && \
             chmod u+w "$marketplace_plugins_dir/marketplace.json" || \
@@ -657,24 +855,122 @@ sync_computer_use_bundled_plugin_cache() {
     if [ -f "$cache_backend" ] && [ -f "$cache_cosmic_helper" ] && \
         cmp -s "$source_backend" "$cache_backend" && \
         cmp -s "$source_cosmic_helper" "$cache_cosmic_helper"; then
-        return 0
+        needs_copy=0
     fi
 
-    cache_parent="$(dirname "$cache_plugin")"
-    tmp_plugin="$cache_parent/.computer-use-$version.tmp.$$"
-    remove_tree_if_exists "$tmp_plugin"
-    mkdir -p "$cache_parent"
-
-    if cp -R "$source_plugin" "$tmp_plugin"; then
-        make_tree_owner_writable "$tmp_plugin"
-        find "$tmp_plugin" -type f -name '*:com.apple.*' -delete
-        remove_tree_if_exists "$cache_plugin"
-        mv "$tmp_plugin" "$cache_plugin"
-        echo "Computer Use plugin cache synced from bundled resources: $cache_plugin"
-    else
+    if [ "$needs_copy" -eq 1 ]; then
+        cache_parent="$(dirname "$cache_plugin")"
+        tmp_plugin="$cache_parent/.computer-use-$version.tmp.$$"
         remove_tree_if_exists "$tmp_plugin"
-        echo "Computer Use plugin cache sync failed; continuing with existing cache."
+        mkdir -p "$cache_parent"
+
+        if cp -R "$source_plugin" "$tmp_plugin"; then
+            make_tree_owner_writable "$tmp_plugin"
+            find "$tmp_plugin" -type f -name '*:com.apple.*' -delete
+            remove_tree_if_exists "$cache_plugin"
+            mv "$tmp_plugin" "$cache_plugin"
+            echo "Computer Use plugin cache synced from bundled resources: $cache_plugin"
+        else
+            remove_tree_if_exists "$tmp_plugin"
+            echo "Computer Use plugin cache sync failed; continuing with existing cache."
+            return 0
+        fi
     fi
+
+    if [ -e "$cache_root/latest" ] && [ ! -L "$cache_root/latest" ]; then
+        remove_tree_if_exists "$cache_root/latest"
+    fi
+    ln -sfn "$version" "$cache_root/latest"
+
+    mkdir -p "$marketplace_root/plugins"
+    if [ -e "$marketplace_plugin_link" ] && [ ! -L "$marketplace_plugin_link" ]; then
+        remove_tree_if_exists "$marketplace_plugin_link"
+    fi
+    ln -sfn "$cache_root/latest" "$marketplace_plugin_link"
+}
+
+sync_read_aloud_bundled_plugin_cache() {
+    local source_plugin="$SCRIPT_DIR/resources/plugins/openai-bundled/plugins/read-aloud"
+    local source_marketplace="$SCRIPT_DIR/resources/plugins/openai-bundled/.agents/plugins/marketplace.json"
+    local plugin_json="$source_plugin/.codex-plugin/plugin.json"
+    local source_backend="$source_plugin/bin/codex-read-aloud-linux"
+    local source_runner="$source_plugin/bin/kokoro-stdin"
+    local source_python_runner="$source_plugin/bin/kokoro_stdin.py"
+    local codex_home="${CODEX_HOME:-$HOME/.codex}"
+    local version
+    local cache_root
+    local cache_plugin
+    local cache_backend
+    local cache_runner
+    local cache_python_runner
+    local cache_parent
+    local tmp_plugin
+    local marketplace_root
+    local marketplace_plugins_dir
+    local marketplace_plugin_link
+    local needs_copy=1
+
+    [ -f "$plugin_json" ] || return 0
+    [ -x "$source_backend" ] || return 0
+    [ -x "$source_runner" ] || return 0
+    [ -f "$source_python_runner" ] || return 0
+
+    marketplace_root="$codex_home/.tmp/bundled-marketplaces/openai-bundled"
+    marketplace_plugins_dir="$marketplace_root/.agents/plugins"
+    marketplace_plugin_link="$marketplace_root/plugins/read-aloud"
+    if [ -f "$source_marketplace" ]; then
+        mkdir -p "$marketplace_plugins_dir" "$marketplace_root/plugins"
+        rm -f "$marketplace_plugins_dir/marketplace.json"
+        cp "$source_marketplace" "$marketplace_plugins_dir/marketplace.json" && \
+            chmod u+w "$marketplace_plugins_dir/marketplace.json" || \
+            echo "Read Aloud bundled marketplace sync failed; continuing with existing marketplace cache."
+    fi
+
+    version="$(bundled_plugin_version "$plugin_json" 2>/dev/null || true)"
+    [ -n "$version" ] || return 0
+
+    cache_root="$codex_home/plugins/cache/openai-bundled/read-aloud"
+    cache_plugin="$cache_root/$version"
+    cache_backend="$cache_plugin/bin/codex-read-aloud-linux"
+    cache_runner="$cache_plugin/bin/kokoro-stdin"
+    cache_python_runner="$cache_plugin/bin/kokoro_stdin.py"
+
+    if [ -f "$cache_backend" ] && [ -f "$cache_runner" ] && [ -f "$cache_python_runner" ] && \
+        cmp -s "$source_backend" "$cache_backend" && \
+        cmp -s "$source_runner" "$cache_runner" && \
+        cmp -s "$source_python_runner" "$cache_python_runner"; then
+        needs_copy=0
+    fi
+
+    if [ "$needs_copy" -eq 1 ]; then
+        cache_parent="$(dirname "$cache_plugin")"
+        tmp_plugin="$cache_parent/.read-aloud-$version.tmp.$$"
+        remove_tree_if_exists "$tmp_plugin"
+        mkdir -p "$cache_parent"
+
+        if cp -R "$source_plugin" "$tmp_plugin"; then
+            make_tree_owner_writable "$tmp_plugin"
+            find "$tmp_plugin" -type f -name '*:com.apple.*' -delete
+            remove_tree_if_exists "$cache_plugin"
+            mv "$tmp_plugin" "$cache_plugin"
+            echo "Read Aloud plugin cache synced from bundled resources: $cache_plugin"
+        else
+            remove_tree_if_exists "$tmp_plugin"
+            echo "Read Aloud plugin cache sync failed; continuing with existing cache."
+            return 0
+        fi
+    fi
+
+    if [ -e "$cache_root/latest" ] && [ ! -L "$cache_root/latest" ]; then
+        remove_tree_if_exists "$cache_root/latest"
+    fi
+    ln -sfn "$version" "$cache_root/latest"
+
+    mkdir -p "$marketplace_root/plugins"
+    if [ -e "$marketplace_plugin_link" ] && [ ! -L "$marketplace_plugin_link" ]; then
+        remove_tree_if_exists "$marketplace_plugin_link"
+    fi
+    ln -sfn "$cache_root/latest" "$marketplace_plugin_link"
 }
 
 resolve_browser_use_runtime_env() {
@@ -712,6 +1008,22 @@ resolve_browser_use_runtime_env() {
     if [ -z "${CODEX_NODE_REPL_PATH:-}" ]; then
         echo "Browser Use node_repl runtime not found; in-app browser automation may be unavailable."
     fi
+}
+
+run_cold_start_hooks() {
+    [ -d "$COLD_START_HOOK_DIR" ] || return 0
+    local hook
+    for hook in "$COLD_START_HOOK_DIR"/*; do
+        [ -f "$hook" ] || continue
+        [ -x "$hook" ] || continue
+        echo "Starting cold-start hook: $hook"
+        (
+            CODEX_LINUX_APP_DIR="$SCRIPT_DIR" \
+            CODEX_LINUX_APP_STATE_DIR="$APP_STATE_DIR" \
+            CODEX_LINUX_LAUNCHER_LOG="$LOG_FILE" \
+            "$hook" "$SCRIPT_DIR" "$APP_STATE_DIR" "$LOG_DIR"
+        ) >>"$LOG_FILE" 2>&1 &
+    done
 }
 
 run_cli_preflight() {
@@ -851,6 +1163,7 @@ find_codex_cli() {
     local candidate
     for candidate in \
         "$HOME/.bun/bin/codex" \
+        "$HOME/.npm-global/bin/codex" \
         "$HOME/.nvm/versions/node/current/bin/codex" \
         "$HOME/.nvm/versions/node"/*/bin/codex \
         "$HOME/.local/share/pnpm/codex" \
@@ -1042,39 +1355,52 @@ webview_origin_is_reachable() {
 }
 
 webview_port_is_open() {
-    python3 - "$CODEX_LINUX_WEBVIEW_PORT" <<'PY' 2>/dev/null
-import socket
-import sys
-
-port = int(sys.argv[1])
-s = socket.socket()
-s.settimeout(0.2)
-try:
-    s.connect(("127.0.0.1", port))
-finally:
-    s.close()
-PY
+    # bash /dev/tcp connect, capped at 0.2 s by a watchdog kill.
+    # Replaces python3 socket.connect heredoc (~3 ms vs 13–60 ms here).
+    # /usr/bin/timeout is intentionally not used: on uutils-coreutils
+    # distros (Ubuntu 26+) its cold start is ~105 ms, which would dominate
+    # the 200 ms cap it would enforce.
+    local probe_pid kill_pid rc=1 self_pid=$$
+    ( trap - EXIT
+      exec 3<>/dev/tcp/127.0.0.1/"$CODEX_LINUX_WEBVIEW_PORT" ) 2>/dev/null &
+    probe_pid=$!
+    # Watchdog: before SIGKILL, verify /proc/<probe>/stat still reports us as
+    # the parent. Guards against PID reuse: if the probe has already exited
+    # and the kernel has recycled that PID to an unrelated process between
+    # the wait below and the watchdog firing, its ppid will not match
+    # $self_pid and the SIGKILL is suppressed.
+    ( trap - EXIT
+      sleep 0.2
+      [ -r "/proc/$probe_pid/stat" ] || exit 0
+      # /proc/<pid>/stat: "<pid> (comm) <state> <ppid> ..." — comm can contain
+      # spaces/parens, so strip up to the last ") " before splitting fields.
+      local stat_line rest
+      stat_line=$(< "/proc/$probe_pid/stat") || exit 0
+      rest=${stat_line##*) }
+      set -- $rest
+      # $1 = state, $2 = ppid
+      [ "${2:-}" = "$self_pid" ] && kill -9 "$probe_pid" 2>/dev/null
+    ) 2>/dev/null &
+    kill_pid=$!
+    if wait "$probe_pid" 2>/dev/null; then rc=0; fi
+    kill "$kill_pid" 2>/dev/null
+    wait "$kill_pid" 2>/dev/null
+    return $rc
 }
 
 wait_for_webview_server() {
     echo "Waiting for webview server on :$CODEX_LINUX_WEBVIEW_PORT"
 
+    # 250 × 20 ms = same 5 s overall budget as 50 × 100 ms, but with 5× tighter
+    # polling cadence so the typical case detects readiness within one cycle
+    # of the server actually binding instead of within the next 100 ms tick.
     local attempt
-    for attempt in $(seq 1 50); do
-        if python3 - "$CODEX_LINUX_WEBVIEW_PORT" <<'PY' 2>/dev/null; then
-import socket
-import sys
-
-port = int(sys.argv[1])
-s = socket.socket()
-s.settimeout(0.5)
-s.connect(("127.0.0.1", port))
-s.close()
-PY
+    for attempt in $(seq 1 250); do
+        if webview_port_is_open; then
             echo "Webview server is ready"
             return 0
         fi
-        sleep 0.1
+        sleep 0.02
     done
 
     return 1
@@ -1083,22 +1409,33 @@ PY
 verify_webview_origin() {
     local url="$1"
 
-    python3 - "$url" <<'PY'
-import sys
-import urllib.request
+    # curl with built-in --max-time replaces python3 urllib (~7 ms vs ~38 ms).
+    # --fail rejects non-2xx; --max-time 2 mirrors urllib.urlopen(timeout=2).
+    # --show-error + 2>$err captures curl's actual diagnostic so failures
+    # surface the underlying cause (HTTP status, connect refused, timeout,
+    # SSL error, etc.) instead of a generic "HTTP fetch failed", matching
+    # what the original python3 urllib version exposed via its raised
+    # exception text.
+    # --noproxy keeps loopback validation pointed at the embedded webview
+    # server even when the user's shell exports http_proxy/ALL_PROXY without a
+    # localhost NO_PROXY exemption.
+    local body err detail
+    err=$(mktemp 2>/dev/null) || err="${TMPDIR:-/tmp}/codex-curl-err.$$"
+    if ! body="$(curl --disable --noproxy 127.0.0.1,localhost --silent --show-error --fail --max-time 2 "$url" 2>"$err")"; then
+        detail=$(< "$err" 2>/dev/null)
+        rm -f "$err"
+        echo "Webview origin validation failed for $url; ${detail:-curl exited non-zero with no diagnostic}" >&2
+        return 1
+    fi
+    rm -f "$err"
 
-url = sys.argv[1]
-required_markers = ("<title>Codex</title>", "startup-loader")
-
-with urllib.request.urlopen(url, timeout=2) as response:
-    body = response.read(8192).decode("utf-8", "ignore")
-
-missing = [marker for marker in required_markers if marker not in body]
-if missing:
-    raise SystemExit(
-        f"Webview origin validation failed for {url}; missing markers: {', '.join(missing)}"
-    )
-PY
+    local missing=()
+    [[ "$body" == *"<title>Codex</title>"* ]] || missing+=("<title>Codex</title>")
+    [[ "$body" == *"startup-loader"* ]]       || missing+=("startup-loader")
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo "Webview origin validation failed for $url; missing markers: ${missing[*]}" >&2
+        return 1
+    fi
 }
 
 pid_has_webview_server_cmdline() {
@@ -1124,12 +1461,18 @@ pid_is_webview_server() {
 pid_is_stale_webview_server() {
     local pid="$1"
     local cwd
+    local current_webview_dir
     local deleted_webview_dir
 
     pid_has_webview_server_cmdline "$pid" || return 1
     cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
-    deleted_webview_dir="$(canonical_path "$WEBVIEW_DIR") (deleted)"
-    [ "$cwd" = "$deleted_webview_dir" ]
+    [ -n "$cwd" ] || return 1
+
+    current_webview_dir="$(canonical_path "$WEBVIEW_DIR")"
+    deleted_webview_dir="$current_webview_dir (deleted)"
+    [ "$cwd" = "$deleted_webview_dir" ] && return 0
+
+    [ "$cwd" != "$current_webview_dir" ]
 }
 
 stop_owned_webview_server() {
@@ -1274,6 +1617,10 @@ ensure_webview_server() {
             notify_error "Codex Desktop webview server is already running for pid $RUNNING_APP_PID, but origin validation failed. Keeping the live app untouched."
             exit 1
         fi
+    fi
+
+    if webview_port_is_open; then
+        stop_stale_webview_server
     fi
 
     if webview_port_is_open && webview_origin_is_reachable; then
@@ -1481,7 +1828,7 @@ should_disable_gpu_compositing() {
         echo "Invalid CODEX_ELECTRON_DISABLE_GPU_COMPOSITING='${CODEX_ELECTRON_DISABLE_GPU_COMPOSITING:-}'; using rendering profile default" >&2
     fi
 
-    [ "$ELECTRON_RENDERING_MODE" != "wslg" ]
+    return 1
 }
 
 should_force_renderer_accessibility() {
@@ -1674,11 +2021,13 @@ launch_electron() {
 
     if [ "$WARM_START" -eq 1 ]; then
         echo "Electron warm-start handoff: pid=$RUNNING_APP_PID rendering_mode=$ELECTRON_RENDERING_MODE wslg_detected=$ELECTRON_WSLG_DETECTED ozone_platform=${ELECTRON_OZONE_PLATFORM:-default} ozone_hint=${ELECTRON_OZONE_HINT:-none} gpu_enabled=$ELECTRON_GPU_ENABLED gpu_disable_arg=$ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS gpu_compositing_disabled=$ELECTRON_GPU_COMPOSITING_DISABLED gl_switch_added=$ELECTRON_GL_SWITCH_ADDED renderer_accessibility_forced=$ELECTRON_RENDERER_ACCESSIBILITY_FORCED"
+        unset ELECTRON_RUN_AS_NODE
         "$SCRIPT_DIR/electron" "${ELECTRON_LAUNCH_ARGS[@]}" "${ELECTRON_ARGS[@]}"
         return $?
     fi
 
     echo "Electron launch mode: rendering_mode=$ELECTRON_RENDERING_MODE wslg_detected=$ELECTRON_WSLG_DETECTED ozone_platform=${ELECTRON_OZONE_PLATFORM:-default} ozone_hint=${ELECTRON_OZONE_HINT:-none} gpu_enabled=$ELECTRON_GPU_ENABLED gpu_disable_arg=$ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS gpu_compositing_disabled=$ELECTRON_GPU_COMPOSITING_DISABLED gl_switch_added=$ELECTRON_GL_SWITCH_ADDED renderer_accessibility_forced=$ELECTRON_RENDERER_ACCESSIBILITY_FORCED"
+    unset ELECTRON_RUN_AS_NODE
     "$SCRIPT_DIR/electron" "${ELECTRON_LAUNCH_ARGS[@]}" "${ELECTRON_ARGS[@]}" &
     ELECTRON_PID=$!
     if [ -n "${RUNNING_APP_PID:-}" ] && pid_matches_executable "$RUNNING_APP_PID" "$SCRIPT_DIR/electron"; then
@@ -1704,7 +2053,7 @@ reconcile_runtime_state
 detect_warm_start
 trap cleanup_launcher EXIT
 
-if send_warm_start_launch_action "$@"; then
+if send_warm_start_launch_action "${LAUNCHER_ARGS[@]}"; then
     echo "Sent launch args over warm-start IPC"
     log_phase "warm_start_ipc_sent"
     exit 0
@@ -1770,10 +2119,12 @@ if needs_cold_start; then
     sync_browser_use_bundled_plugin_cache
     sync_chrome_bundled_plugin_cache
     sync_computer_use_bundled_plugin_cache
+    sync_read_aloud_bundled_plugin_cache
+    run_cold_start_hooks
 fi
 resolve_browser_use_runtime_env
 
 echo "Using CODEX_CLI_PATH=${CODEX_CLI_PATH:-warm-start-skip}"
 echo "Using managed Node.js runtime=${CODEX_MANAGED_NODE_RUNTIME_DIR:-$SCRIPT_DIR/resources/node-runtime}"
 
-launch_electron "$@"
+launch_electron "${LAUNCHER_ARGS[@]}"

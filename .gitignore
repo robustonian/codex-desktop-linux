@@ -1,5 +1,7 @@
 *.dmg
 node_modules/
+__pycache__/
+*.py[cod]
 codex-app/
 codex-app.backup-*/
 codex-*-app/

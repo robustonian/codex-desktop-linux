@@ -1,0 +1,17 @@
+[package]
+name = "codex-read-aloud-linux"
+version = "0.1.0-linux-alpha1"
+edition = "2021"
+
+[[bin]]
+name = "codex-read-aloud-linux"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.102"
+libc = "0.2"
+rmcp = { version = "1.5.0", features = ["transport-io"] }
+schemars = "1.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokio = { version = "1.51.1", features = ["macros", "rt"] }

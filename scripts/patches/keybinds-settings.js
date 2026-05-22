@@ -342,13 +342,14 @@ function applyKeybindsSettingsIndexPatch(currentSource) {
   let patchedSource = currentSource;
 
   if (!patchedSource.includes(`${keybindsSettingsAsset}`)) {
-    const routePattern = /var ([A-Za-z_$][\w$]*)=\{"general-settings":(?=\(0,[A-Za-z_$][\w$]*\.lazy\))/;
+    const routePattern = /var ([A-Za-z_$][\w$]*)=\{"general-settings":(?=\(0,([A-Za-z_$][\w$]*)\.lazy\)\(\(\)=>([A-Za-z_$][\w$]*)\()/;
     if (!routePattern.test(patchedSource)) {
       throw new Error("Required Keybinds settings patch failed: could not add keybinds route");
     }
     patchedSource = patchedSource.replace(
       routePattern,
-      `var $1={keybinds:(0,Z.lazy)(()=>s(()=>import(\`./${keybindsSettingsAsset}\`),[],import.meta.url)),"general-settings":`,
+      (_match, routeMap, lazyAlias, preloadAlias) =>
+        `var ${routeMap}={keybinds:(0,${lazyAlias}.lazy)(()=>${preloadAlias}(()=>import(\`./${keybindsSettingsAsset}\`),[],import.meta.url)),"general-settings":`,
     );
   }
 

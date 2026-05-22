@@ -51,6 +51,11 @@ cp -a "__RPM_STAGING_DIR__/." "%{buildroot}/"
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
 fi
+DESKTOP_ENTRY_DOCTOR=/opt/__PACKAGE_NAME__/.codex-linux/codex-desktop-entry-doctor.sh
+if [ -f "$DESKTOP_ENTRY_DOCTOR" ]; then
+    . "$DESKTOP_ENTRY_DOCTOR"
+    codex_desktop_repair_system_package_shadow_entries __PACKAGE_NAME__ || true
+fi
 
 %if __PACKAGE_WITH_UPDATER__
 SERVICE_HELPER=/opt/__PACKAGE_NAME__/update-builder/packaging/linux/codex-update-manager-user-service.sh

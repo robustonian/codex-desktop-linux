@@ -1,0 +1,10 @@
+{
+  "id": "read-aloud-mcp",
+  "title": "Read Aloud MCP",
+  "description": "Disabled-by-default MCP plugin that lets the agent read text aloud through the Linux Read Aloud voice backend.",
+  "defaultEnabled": false,
+  "entrypoints": {
+    "patchDescriptors": "./patches.js",
+    "stageHook": "./stage.sh"
+  }
+}

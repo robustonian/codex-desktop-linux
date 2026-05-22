@@ -2,7 +2,6 @@
 
 const {
   applyBrowserUseNodeReplApprovalPatch,
-  applyLinuxBrowserUseIabVisibleOnCreatePatch,
   applyLinuxChromeExtensionStatusPatch,
 } = require("../../../../main-process.js");
 const { applyLinuxChromePluginAutoInstallPatch } = require("../../../../chrome-plugin.js");
@@ -21,13 +20,6 @@ module.exports = [
     order: 160,
     ciPolicy: "optional",
     apply: applyBrowserUseNodeReplApprovalPatch,
-  },
-  {
-    id: "linux-browser-use-iab-visible-on-create",
-    phase: "main-bundle",
-    order: 170,
-    ciPolicy: "optional",
-    apply: applyLinuxBrowserUseIabVisibleOnCreatePatch,
   },
   {
     id: "linux-chrome-extension-status",

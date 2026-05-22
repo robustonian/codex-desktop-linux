@@ -23,6 +23,10 @@ const {
   patchLinuxAppUpdaterBridge,
 } = require("./lib/linux-update-bridge-patch.js");
 const {
+  applyLinuxMultiInstanceBootstrapPatch,
+  patchLinuxMultiInstanceBootstrap,
+} = require("./patches/bootstrap.js");
+const {
   applyLinuxChromePluginAutoInstallPatch,
 } = require("./patches/chrome-plugin.js");
 const {
@@ -50,7 +54,6 @@ const {
 } = require("./patches/launch-actions.js");
 const {
   applyBrowserUseNodeReplApprovalPatch,
-  applyLinuxBrowserUseIabVisibleOnCreatePatch,
   applyLinuxChromeExtensionStatusPatch,
   applyLinuxExplicitIpcQuitPatch,
   applyLinuxExplicitQuitPromptBypassPatch,
@@ -60,6 +63,7 @@ const {
   applyLinuxMenuPatch,
   applyLinuxOpaqueBackgroundPatch,
   applyLinuxQuitGuardPatch,
+  applyLinuxReadyToShowWindowStatePatch,
   applyLinuxRemoteControlConfigPreservationPatch,
   applyLinuxSetIconPatch,
   applyLinuxSingleInstancePatch,
@@ -89,7 +93,7 @@ const {
   applyBrowserAnnotationScreenshotPatch,
   applyLinuxAppSunsetPatch,
   applyLinuxOpaqueWindowsDefaultPatch,
-  applyLinuxRemoteControlConfigGatePatch,
+  applySubagentNicknameMetadataPatch,
   patchCommentPreloadBundle,
 } = require("./patches/webview-assets.js");
 
@@ -131,6 +135,11 @@ if (require.main === module) {
   main();
 }
 
+function applyLinuxBrowserUseIabVisibleOnCreatePatch(currentSource) {
+  // Compatibility shim for old callers after the runtime patch was removed.
+  return currentSource;
+}
+
 module.exports = {
   COMPUTER_USE_UI_ENV_VAR,
   COMPUTER_USE_UI_SETTINGS_KEY,
@@ -159,11 +168,12 @@ module.exports = {
   applyLinuxKeybindOverridesRuntimePatch,
   applyLinuxLaunchActionArgsPatch,
   applyLinuxMenuPatch,
+  applyLinuxMultiInstanceBootstrapPatch,
   applyLinuxOpaqueBackgroundPatch,
   applyLinuxOpaqueWindowsDefaultPatch,
-  applyLinuxRemoteControlConfigGatePatch,
-  applyLinuxRemoteControlConfigPreservationPatch,
   applyLinuxQuitGuardPatch,
+  applyLinuxReadyToShowWindowStatePatch,
+  applyLinuxRemoteControlConfigPreservationPatch,
   applyLinuxSetIconPatch,
   applyLinuxSettingsPersistencePatch,
   applyLinuxSingleInstancePatch,
@@ -171,6 +181,7 @@ module.exports = {
   applyLinuxTrayPatch,
   applyLinuxWillQuitDrainTimeoutPatch,
   applyLinuxWindowOptionsPatch,
+  applySubagentNicknameMetadataPatch,
   createPatchReport,
   corePatchDescriptors,
   createMainBundleContext,
@@ -189,6 +200,7 @@ module.exports = {
   patchCommentPreloadBundle,
   patchExtractedApp,
   patchKeybindsSettingsAssets,
+  patchLinuxMultiInstanceBootstrap,
   patchLinuxAppUpdaterBridge,
   patchMainBundleSource,
   patchPackageJson,

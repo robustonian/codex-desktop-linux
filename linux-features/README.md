@@ -19,6 +19,35 @@ building packages, then list the feature ids you want:
 `features.json` is ignored by git so local choices do not leak into commits.
 Feature choices are read during the install/build pipeline; if you change this
 file after an app has already been generated, rerun the install/build step.
+Native packages preserve the enabled feature id list in the packaged
+update-builder bundle, so `codex-update-manager` rebuilds keep the same opt-in
+features across auto-updates.
+
+You can also let the guided native setup helper discover feature manifests and
+write `features.json`:
+
+```bash
+make setup-native
+
+# non-interactive feature edits:
+CODEX_BOOTSTRAP_NONINTERACTIVE=1 \
+CODEX_LINUX_FEATURES=remote-mobile-control,read-aloud \
+CODEX_LINUX_DISABLE_FEATURES=conversation-mode \
+make setup-native
+```
+
+Disabling a feature in `features.json` only affects the next rebuild. The helper
+does not delete local device keys, Read Aloud model files, plugin caches, Python
+runtimes, or ydotool services. Feature-owned cleanup is a separate interactive
+action:
+
+```bash
+CODEX_BOOTSTRAP_CLEANUP_FEATURES=remote-mobile-control,read-aloud make setup-native
+```
+
+The helper lists exact paths and deletes only paths confirmed with
+`DELETE <exact path>`. Add `CODEX_BOOTSTRAP_DRY_RUN=1` to preview cleanup
+targets without deleting them.
 
 Each feature directory should include:
 

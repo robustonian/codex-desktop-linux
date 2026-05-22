@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "read-aloud": {
+      "command": "./bin/codex-read-aloud-linux",
+      "args": ["mcp"],
+      "cwd": "."
+    }
+  }
+}

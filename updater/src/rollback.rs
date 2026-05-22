@@ -1,6 +1,7 @@
 //! Manual rollback support for the local update manager.
 
 use crate::{
+    cache_cleanup,
     config::{RuntimeConfig, RuntimePaths},
     install, install_rollback, liveness, notify,
     state::{PersistedState, UpdateStatus},
@@ -57,10 +58,11 @@ pub async fn run(
         return Ok(());
     }
 
-    trigger_rollback(state, paths, &package_path).await
+    trigger_rollback(config, state, paths, &package_path).await
 }
 
 async fn trigger_rollback(
+    config: &RuntimeConfig,
     state: &mut PersistedState,
     paths: &RuntimePaths,
     package_path: &Path,
@@ -94,6 +96,7 @@ async fn trigger_rollback(
             blocked_candidate,
         );
         state.save(&paths.state_file)?;
+        let _ = cache_cleanup::prune_unreferenced_workspaces(&config.workspace_root, state);
         println!("Rolled back Codex Desktop to {}.", state.installed_version);
         return Ok(());
     }
@@ -146,6 +149,7 @@ fn apply_successful_rollback_state(
     state.rollback_blocked_candidate_version = blocked_candidate;
     state.error_message = None;
     state.notified_events.clear();
+    cache_cleanup::normalize_artifact_workspace_dir(Path::new(""), state);
 }
 
 #[cfg(test)]
@@ -226,7 +230,7 @@ mod tests {
         state.status = UpdateStatus::Installing;
         state.artifact_paths = ArtifactPaths {
             dmg_path: None,
-            workspace_dir: None,
+            workspace_dir: Some(temp.path().join("workspaces/2026.05.04.131500+badcafe0")),
             package_path: Some(update_path),
             rollback_package_path: Some(rollback_path.clone()),
         };
@@ -248,6 +252,7 @@ mod tests {
             state.artifact_paths.rollback_package_path.as_deref(),
             Some(rollback_path.as_path())
         );
+        assert_eq!(state.artifact_paths.workspace_dir, None);
         assert_eq!(
             state.last_known_good_version.as_deref(),
             Some("2026.05.02.120000")

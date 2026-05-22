@@ -1,3 +1,4 @@
+mod abs_pointer;
 mod atspi_tree;
 mod cosmic_helper;
 mod diagnostics;
@@ -54,6 +55,28 @@ async fn main() -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&nodes)
                     .context("failed to serialize accessibility tree")?
+            );
+            Ok(())
+        }
+        // Hidden dev command: empirically test the absolute pointer.
+        // `abs-test X Y` moves to logical (X,Y) and left-clicks, sizing the
+        // device to the live screenshot dimensions.
+        Some("abs-test") => {
+            let x: i32 = std::env::args()
+                .nth(2)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let y: i32 = std::env::args()
+                .nth(3)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let cap = screenshot::capture_screenshot().await?;
+            eprintln!("desktop logical size: {}x{}", cap.width, cap.height);
+            let mut p = abs_pointer::AbsPointer::create(cap.width as i32, cap.height as i32)?;
+            p.click(x, y, abs_pointer::PointerButton::Left, 1)?;
+            println!(
+                "{}",
+                serde_json::json!({"ok": true, "x": x, "y": y, "w": cap.width, "h": cap.height})
             );
             Ok(())
         }
