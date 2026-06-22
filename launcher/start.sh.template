@@ -1335,7 +1335,7 @@ codex_args_allow_profile() {
         debug)
             codex_debug_prompt_input_allows_profile "$@"
             ;;
-        login|logout|plugin|mcp-server|app-server|remote-control|completion|update|doctor|apply|a|cloud|exec-server|features|help|version)
+        login|logout|plugin|mcp-server|remote-control|completion|update|doctor|apply|a|cloud|exec-server|features|help|version)
             return 1
             ;;
         *)

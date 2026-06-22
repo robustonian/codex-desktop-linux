@@ -3104,7 +3104,7 @@ if 'configure_codex_profile_cli_path\nexport_packaged_runtime_env' not in runtim
 profile_wrapper_body = source.split("configure_codex_profile_cli_path() {", 1)[1].split("is_interactive_terminal() {", 1)[0]
 if 'if codex_args_allow_profile "$@"; then' not in profile_wrapper_body:
     raise SystemExit("profile wrapper must filter CLI commands before injecting --profile")
-if 'login|logout|plugin|mcp-server|app-server|remote-control|completion|update|doctor|apply|a|cloud|exec-server|features|help|version)' not in profile_wrapper_body:
+if 'login|logout|plugin|mcp-server|remote-control|completion|update|doctor|apply|a|cloud|exec-server|features|help|version)' not in profile_wrapper_body:
     raise SystemExit("profile wrapper must leave Codex management commands unprofiled")
 if 'exec "$CODEX_LINUX_PROFILED_CLI_PATH" --profile "$CODEX_LINUX_CODEX_PROFILE" "$@"' not in profile_wrapper_body:
     raise SystemExit("profile wrapper must still invoke runtime CLI commands with --profile")
@@ -3610,9 +3610,9 @@ SCRIPT
     output="$(run_profile_wrapper_case plugin list)"
     [ "$output" = "<plugin> <list>" ] || fail "plugin should not receive profile: $output"
     output="$(run_profile_wrapper_case app-server daemon version)"
-    [ "$output" = "<app-server> <daemon> <version>" ] || fail "app-server should not receive profile: $output"
+    [ "$output" = "<--profile> <desktop_fugu> <app-server> <daemon> <version>" ] || fail "app-server should receive profile: $output"
     output="$(run_profile_wrapper_case -c model=\"gpt-5\" app-server daemon version)"
-    [ "$output" = "<-c> <model=\"gpt-5\"> <app-server> <daemon> <version>" ] || fail "management command after top-level config should not receive profile: $output"
+    [ "$output" = "<--profile> <desktop_fugu> <-c> <model=\"gpt-5\"> <app-server> <daemon> <version>" ] || fail "app-server after top-level config should receive profile: $output"
     output="$(run_profile_wrapper_case debug app-server)"
     [ "$output" = "<debug> <app-server>" ] || fail "debug commands other than prompt-input should not receive profile: $output"
     output="$(run_profile_wrapper_case --version)"

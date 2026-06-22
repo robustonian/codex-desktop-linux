@@ -188,10 +188,10 @@ Start Codex Desktop through a named Codex CLI profile:
 
 Profile launches use a separate app instance and apply the named profile to
 runtime CLI calls such as new or resumed sessions, so CLI profile overlays such
-as `~/.codex/desktop_fugu.config.toml` apply to that desktop session. Startup
-and management calls such as CLI status checks, plugin discovery, and
-`app-server` tooling are left unprofiled because current Codex CLI releases
-reject `--profile` for those commands.
+as `~/.codex/desktop_fugu.config.toml` apply to that desktop session, including
+the local `app-server` used by the Desktop UI. Startup and management calls such
+as CLI status checks and plugin discovery are left unprofiled when Codex CLI
+does not accept `--profile` for those commands.
 
 Use a local DMG:
 
