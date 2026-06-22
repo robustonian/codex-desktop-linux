@@ -2986,8 +2986,12 @@ if '--profile|-p)' not in parse_body or '--profile=*)' not in parse_body:
     raise SystemExit("launcher must parse --profile, --profile=NAME, and -p before Electron args")
 if 'CODEX_LINUX_CODEX_PROFILE="$1"' not in parse_body or 'CODEX_LINUX_CODEX_PROFILE="$profile"' not in parse_body:
     raise SystemExit("launcher must capture the requested Codex profile")
-if parse_body.count('MULTI_LAUNCH_REQUESTED=1') < 3:
-    raise SystemExit("profile launches must request a separate app instance")
+if parse_body.count('MULTI_LAUNCH_REQUESTED=1') != 2:
+    raise SystemExit("only explicit multi-launch controls should request a separate app instance")
+for profile_case in ('--profile|-p)', '--profile=*)'):
+    case_tail = parse_body.split(profile_case, 1)[1].split(';;', 1)[0]
+    if 'MULTI_LAUNCH_REQUESTED=1' in case_tail:
+        raise SystemExit("profile launches must not request a separate app instance")
 if 'validate_codex_profile_name "$1"' not in parse_body or 'validate_codex_profile_name "$profile"' not in parse_body:
     raise SystemExit("launcher must validate profile names before using them in the CLI wrapper")
 if '$((CODEX_LINUX_WEBVIEW_PORT + 4))' not in source:

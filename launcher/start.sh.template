@@ -178,7 +178,6 @@ parse_launcher_args() {
                 fi
                 validate_codex_profile_name "$1" || exit 1
                 CODEX_LINUX_CODEX_PROFILE="$1"
-                MULTI_LAUNCH_REQUESTED=1
                 ;;
             --profile=*)
                 profile="${1#--profile=}"
@@ -188,7 +187,6 @@ parse_launcher_args() {
                 fi
                 validate_codex_profile_name "$profile" || exit 1
                 CODEX_LINUX_CODEX_PROFILE="$profile"
-                MULTI_LAUNCH_REQUESTED=1
                 ;;
             *)
                 LAUNCHER_ARGS+=("$1")
@@ -253,7 +251,7 @@ Launches the $CODEX_LINUX_APP_DISPLAY_NAME app.
 Options:
   -h, --help                  Show this help message and exit
   --new-instance              Start a separate app instance on the first free port in the multi-launch range
-  -p, --profile NAME          Start a separate app instance using the named Codex profile
+  -p, --profile NAME          Start using the named Codex profile
   --new-chat                  Open the main window on a new chat
   --quick-chat                Open a projectless quick chat
   --prompt-chat               Show the compact prompt for a new chat

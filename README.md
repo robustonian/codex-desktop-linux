@@ -186,14 +186,20 @@ Start Codex Desktop through a named Codex CLI profile:
 ./codex-app/start.sh --profile desktop_fugu
 ```
 
-Profile launches use a separate app instance and apply the named profile to
-runtime CLI calls such as new or resumed sessions. Profile overlays such as
-`~/.codex/desktop_fugu.config.toml` also apply to the local `app-server` used by
-the Desktop UI by translating the profile TOML into `-c key=value` config
-overrides, because Codex CLI does not accept `--profile` directly for
-`app-server`. Startup and management calls such as CLI status checks and plugin
-discovery are left unprofiled when Codex CLI does not accept `--profile` for
-those commands.
+Profile launches use the normal app instance so existing Desktop state, Mobile
+connections, and remote-control setup remain available. Use
+`--new-instance --profile desktop_fugu` when you explicitly want a side-by-side
+profiled app instance.
+
+The named profile applies to runtime CLI calls such as new or resumed sessions.
+Profile overlays such as `~/.codex/desktop_fugu.config.toml` also apply to the
+local `app-server` used by the Desktop UI by translating the profile TOML into
+`-c key=value` config overrides, because Codex CLI does not accept `--profile`
+directly for `app-server`. Startup and management calls such as CLI status
+checks and plugin discovery are left unprofiled when Codex CLI does not accept
+`--profile` for those commands. If Codex Desktop is already running, quit it
+before restarting with a different profile so the app-server uses the new
+profile config from startup.
 
 Use a local DMG:
 
