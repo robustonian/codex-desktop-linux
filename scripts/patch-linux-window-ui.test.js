@@ -1900,6 +1900,22 @@ test("patches the current isAvailable Computer Use gate shape", () => {
   assert.equal((patched.match(/installWhenMissing:!0,name:ft/g) || []).length, 2);
 });
 
+test("patches Computer Use gates with opt-out and opt-in metadata", () => {
+  const source = [
+    "var Lt=`chrome`,Rt=`chrome-dev`,Oo=`computer-use`;",
+    "var Ua=[{autoInstallOptOutKey:t.No(t.jo),installWhenMissing:!0,name:t.jo,isAvailable:({features:e})=>e.sites},{autoInstallOptOutKey:t.No(t.Oo),installWhenMissing:!0,installWhenMissingRequiresOptIn:!0,name:t.Oo,isAvailable:({features:e,platform:t})=>t===`darwin`&&e.computerUse,migrate:ha},{autoInstallOptOutKey:t.No(t.Oo),installWhenMissing:!0,installWhenMissingRequiresOptIn:!0,name:t.Oo,isAvailable:({features:e,platform:t})=>t===`win32`&&e.computerUse},{name:t.Ao,isAvailable:({features:e,platform:t})=>t===`darwin`&&e.recordAndReplay}];",
+  ].join("");
+
+  const patched = applyPatchTwice(applyLinuxComputerUsePluginGatePatch, source);
+
+  assert.match(
+    patched,
+    /autoInstallOptOutKey:t\.No\(t\.Oo\),installWhenMissing:!0,installWhenMissingRequiresOptIn:!0,name:t\.Oo,isAvailable:\(\{features:e,platform:t\}\)=>\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse,migrate:ha/,
+  );
+  assert.match(patched, /installWhenMissingRequiresOptIn:!0,name:t\.Oo,isAvailable:\(\{features:e,platform:t\}\)=>t===`win32`&&e\.computerUse/);
+  assert.match(patched, /name:t\.Ao,isAvailable:\(\{features:e,platform:t\}\)=>t===`darwin`&&e\.recordAndReplay/);
+});
+
 test("auto-installs the current Chrome plugin gate shape", () => {
   const patched = applyPatchTwice(
     applyLinuxChromePluginAutoInstallPatch,

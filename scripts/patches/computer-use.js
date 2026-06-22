@@ -87,6 +87,55 @@ function buildComputerUseGate({ nameExpr, availabilityProp, featuresVar, platfor
   return `{installWhenMissing:!0,name:${nameExpr},${availabilityProp}:({features:${featuresVar},platform:${platformVar}})=>(${platformVar}===\`darwin\`||${platformVar}===\`linux\`)&&${featuresVar}.computerUse,migrate:${migrateVar}}`;
 }
 
+function patchFlexibleComputerUseGate(currentSource, computerUseNameVar, nameExpressionPattern) {
+  const descriptorRegex = new RegExp(
+    String.raw`\{([^{}]*?name:(${nameExpressionPattern})[^{}]*?)(isEnabled|isAvailable):\(\{([^}]*)\}\)=>([^{}]*?\.computerUse)([^{}]*?)\}`,
+    "g",
+  );
+  let sawEnabledGate = false;
+  let sawUnpatchableGate = false;
+  let patchedGateCount = 0;
+  const patchedSource = currentSource.replace(
+    descriptorRegex,
+    (gateSource, prefix, nameExpr, availabilityProp, paramsText, expression, suffix) => {
+      if (!isComputerUseNameExpr(nameExpr, computerUseNameVar)) {
+        return gateSource;
+      }
+
+      const aliases = parseDestructuredParamAliases(paramsText);
+      const featuresVar = aliases.features;
+      const platformVar = aliases.platform;
+      if (featuresVar == null || platformVar == null) {
+        sawUnpatchableGate = true;
+        return gateSource;
+      }
+
+      const darwinOnlyExpression = `${platformVar}===\`darwin\`&&${featuresVar}.computerUse`;
+      const linuxExpression = `(${platformVar}===\`darwin\`||${platformVar}===\`linux\`)&&${featuresVar}.computerUse`;
+      const hasInstallWhenMissing = prefix.includes("installWhenMissing:!0");
+      if (expression === linuxExpression && hasInstallWhenMissing) {
+        sawEnabledGate = true;
+        return gateSource;
+      }
+      if (expression === darwinOnlyExpression || expression === linuxExpression) {
+        patchedGateCount += 1;
+        const patchedPrefix = hasInstallWhenMissing
+          ? prefix
+          : prefix.replace("name:", "installWhenMissing:!0,name:");
+        return `{${patchedPrefix}${availabilityProp}:({features:${featuresVar},platform:${platformVar}})=>${linuxExpression}${suffix}}`;
+      }
+      if (expression.includes(`${platformVar}===\`win32\``)) {
+        return gateSource;
+      }
+
+      sawUnpatchableGate = true;
+      return gateSource;
+    },
+  );
+
+  return { patchedSource, patchedGateCount, sawEnabledGate, sawUnpatchableGate };
+}
+
 function hasComputerUseLiteral(source) {
   return /(?:`computer-use`|"computer-use"|'computer-use')/.test(source);
 }
@@ -148,6 +197,18 @@ function applyLinuxComputerUsePluginGatePatch(currentSource) {
   }
 
   if (sawEnabledGate && !sawUnpatchableGate) {
+    return currentSource;
+  }
+
+  const flexibleGateResult = patchFlexibleComputerUseGate(
+    currentSource,
+    computerUseNameVar,
+    nameExpressionPattern,
+  );
+  if (flexibleGateResult.patchedGateCount > 0) {
+    return flexibleGateResult.patchedSource;
+  }
+  if (flexibleGateResult.sawEnabledGate && !flexibleGateResult.sawUnpatchableGate) {
     return currentSource;
   }
 
