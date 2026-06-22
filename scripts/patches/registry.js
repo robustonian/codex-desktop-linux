@@ -13,6 +13,7 @@ const {
 } = require("../lib/linux-target-context.js");
 const {
   loadLinuxFeaturePatchDescriptors,
+  enabledLinuxFeatureIds,
 } = require("../lib/linux-features.js");
 const {
   findIconAsset,
@@ -39,6 +40,14 @@ const CUSTOM_PATCH_POLICIES = [
   { name: "main-process-ui", ciPolicy: REQUIRED_UPSTREAM, phase: "main-bundle" },
 ];
 
+function recordMainProcessUiPatch(report, status, reason = null) {
+  recordPatch(report, "main-process-ui", status, reason, {
+    phase: "main-bundle",
+    ciPolicy: REQUIRED_UPSTREAM,
+    sourceKind: "core",
+  });
+}
+
 function normalizeDiscoveredCorePatchDescriptors(options = {}) {
   const root = options.corePatchRoot ?? CORE_PATCH_ROOT;
   return normalizePatchDescriptors(discoverCorePatchDescriptors({ root }));
@@ -52,8 +61,15 @@ function legacyCorePatchDescriptors(options = {}) {
   return corePatchDescriptors(options);
 }
 
-function featurePatchDescriptors() {
-  return normalizePatchDescriptors(loadLinuxFeaturePatchDescriptors());
+function featurePatchDescriptors(options = {}) {
+  return normalizePatchDescriptors(loadLinuxFeaturePatchDescriptors(options));
+}
+
+function featurePatchOptions(options = {}) {
+  return {
+    ...(options.featuresRoot != null ? { featuresRoot: options.featuresRoot } : {}),
+    ...(options.featuresConfigPath != null ? { featuresConfigPath: options.featuresConfigPath } : {}),
+  };
 }
 
 function createMainBundleContext(iconAsset, options = {}) {
@@ -66,6 +82,7 @@ function createMainBundleContext(iconAsset, options = {}) {
     linux,
     linuxTarget: linux,
     corePatchRoot: options.corePatchRoot,
+    featurePatchOptions: featurePatchOptions(options),
   };
 }
 
@@ -91,7 +108,7 @@ function mainBundlePatchDescriptors(context) {
   return normalizePatchDescriptors([
     ...corePatchDescriptors({ corePatchRoot: context.corePatchRoot })
       .filter((patch) => patch.phase === "main-bundle"),
-    ...featurePatchDescriptors().filter((patch) => patch.phase === "main-bundle"),
+    ...featurePatchDescriptors(context.featurePatchOptions).filter((patch) => patch.phase === "main-bundle"),
   ]);
 }
 
@@ -106,12 +123,16 @@ function patchMainBundleSource(source, iconAsset, options = {}) {
 function patchExtractedApp(extractedDir, options = {}) {
   const report = options.report ?? null;
   const baseContext = createMainBundleContext(null, options);
+  const featuresOptions = featurePatchOptions(options);
   const patchDescriptors = normalizePatchDescriptors([
     ...corePatchDescriptors({ corePatchRoot: options.corePatchRoot }),
-    ...featurePatchDescriptors(),
+    ...featurePatchDescriptors(featuresOptions),
   ]);
 
   setReportLinuxTarget(report, baseContext.linux);
+  if (report != null) {
+    report.enabledFeatures = enabledLinuxFeatureIds(featuresOptions);
+  }
 
   const main = findMainBundle(extractedDir);
   if (report != null) {
@@ -121,7 +142,7 @@ function patchExtractedApp(extractedDir, options = {}) {
   if (main == null) {
     const reason = `Could not find main bundle in ${path.join(extractedDir, ".vite", "build")}`;
     console.warn(`WARN: ${reason} — skipping main-process UI patches`);
-    recordPatch(report, "main-process-ui", "failed-required", reason);
+    recordMainProcessUiPatch(report, "failed-required", reason);
   }
 
   const iconAsset = findIconAsset(extractedDir);
@@ -143,15 +164,21 @@ function patchExtractedApp(extractedDir, options = {}) {
   if (main != null) {
     const target = path.join(main.buildDir, main.mainBundle);
     const source = fs.readFileSync(target, "utf8");
-    const { patchedSource, warnings } = applyMainBundlePatches(source, assetContext, report);
+    const { patchedSource, requiredCoreWarnings } = applyMainBundlePatches(source, assetContext, report);
     if (patchedSource !== source) {
       fs.writeFileSync(target, patchedSource, "utf8");
     }
     recordPatch(
       report,
       "main-process-ui",
-      patchStatusFromChange(patchedSource !== source, warnings),
-      warnings[0] ?? null,
+      patchStatusFromChange(patchedSource !== source, requiredCoreWarnings, REQUIRED_UPSTREAM),
+      requiredCoreWarnings[0] ?? null,
+      {
+        phase: "main-bundle",
+        ciPolicy: REQUIRED_UPSTREAM,
+        sourceKind: "core",
+        ...(requiredCoreWarnings.length > 0 ? { warnings: [...requiredCoreWarnings] } : {}),
+      },
     );
   }
 
@@ -193,7 +220,7 @@ function allPatchPolicies(options = {}) {
       phase,
       appliesTo,
     })),
-    ...featurePatchDescriptors().map(({ id, name, ciPolicy, phase, appliesTo }) => ({
+    ...featurePatchDescriptors(featurePatchOptions(options)).map(({ id, name, ciPolicy, phase, appliesTo }) => ({
       name: name ?? id,
       ciPolicy,
       phase,

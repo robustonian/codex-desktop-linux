@@ -335,7 +335,7 @@ install_dnf5() {
     info "Detected RPM-based distro (dnf5)"
     # dnf5: 7zip provides /usr/bin/7z; @development-tools is the group syntax
     sudo dnf install -y \
-        python3 7zip curl unzip \
+        python3 7zip curl unzip rpm-build \
         @development-tools
 }
 
@@ -344,14 +344,21 @@ install_dnf() {
     # Older dnf: 7z comes from p7zip + p7zip-plugins
     sudo dnf install -y \
         nodejs npm python3 \
-        p7zip p7zip-plugins curl unzip
+        p7zip p7zip-plugins curl unzip rpm-build
     sudo dnf groupinstall -y 'Development Tools'
 }
 
 install_pacman() {
     info "Detected Arch Linux (pacman)"
+    local node_packages=(nodejs npm)
+
+    if has_compatible_nodejs; then
+        info "Compatible Node.js toolchain already available; skipping pacman nodejs/npm packages"
+        node_packages=()
+    fi
+
     sudo pacman -S --needed --noconfirm \
-        nodejs npm python \
+        "${node_packages[@]}" python \
         p7zip curl unzip zstd \
         base-devel
 }
@@ -520,8 +527,8 @@ case "$DISTRO" in
         error "Unsupported package manager. Install manually:
   # Debian/Ubuntu: install Node.js 20+ with npm/npx from NodeSource, nvm, or another compatible source, then:
   sudo apt install python3 p7zip-full curl unzip build-essential                   # Debian/Ubuntu
-  sudo dnf install python3 7zip curl unzip @development-tools                       # Fedora 41+ (dnf5)
-  sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip                # Fedora <41 (dnf)
+  sudo dnf install python3 7zip curl unzip rpm-build @development-tools             # Fedora 41+ (dnf5)
+  sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip rpm-build      # Fedora <41 (dnf)
     && sudo dnf groupinstall 'Development Tools'
   sudo pacman -S nodejs npm python p7zip curl unzip zstd base-devel                 # Arch
   sudo zypper install nodejs-default npm-default python3 p7zip-full curl unzip      # openSUSE

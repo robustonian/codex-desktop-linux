@@ -6,16 +6,23 @@ License:        Proprietary
 ExclusiveArch:  __ARCH__
 %global __requires_exclude_from ^/opt/__PACKAGE_NAME__/.*$
 %global __provides_exclude_from ^/opt/__PACKAGE_NAME__/.*$
+%global codex_elf_suffix %{nil}
+%ifarch x86_64 aarch64 ppc64le s390x riscv64
+%global codex_elf_suffix ()(64bit)
+%endif
 
 %if __PACKAGE_WITH_UPDATER__
 Requires:       python3, /usr/bin/7z, polkit, curl, unzip, gcc-c++, make
 %else
 Requires:       python3, /usr/bin/7z, curl, unzip, gcc-c++, make
 %endif
-Requires:       alsa-lib, at-spi2-atk, atk, glib2, gtk3, libdrm
-Requires:       nspr, nss, pango, libstdc++, libX11, libxcb
-Requires:       libXcomposite, libXdamage, libXext, libXfixes, libxkbcommon, libXrandr
-Requires:       mesa-libgbm
+Requires:       libasound.so.2%{codex_elf_suffix}, libatk-bridge-2.0.so.0%{codex_elf_suffix}
+Requires:       libatk-1.0.so.0%{codex_elf_suffix}, libglib-2.0.so.0%{codex_elf_suffix}, libgtk-3.so.0%{codex_elf_suffix}
+Requires:       libdrm.so.2%{codex_elf_suffix}, libnspr4.so%{codex_elf_suffix}, libnss3.so%{codex_elf_suffix}
+Requires:       libpango-1.0.so.0%{codex_elf_suffix}, libstdc++.so.6%{codex_elf_suffix}, libX11.so.6%{codex_elf_suffix}
+Requires:       libxcb.so.1%{codex_elf_suffix}, libXcomposite.so.1%{codex_elf_suffix}, libXdamage.so.1%{codex_elf_suffix}
+Requires:       libXext.so.6%{codex_elf_suffix}, libXfixes.so.3%{codex_elf_suffix}, libxkbcommon.so.0%{codex_elf_suffix}
+Requires:       libXrandr.so.2%{codex_elf_suffix}, libgbm.so.1%{codex_elf_suffix}
 Recommends:     zenity, kdialog
 
 %description

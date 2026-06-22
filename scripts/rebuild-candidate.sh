@@ -9,7 +9,7 @@ usage() {
 Usage: scripts/rebuild-candidate.sh [--install] [path/to/Codex.dmg]
 
 Runs the safe rebuild flow:
-  1. Find Codex.dmg in this repository, unless a DMG path is given.
+  1. Use the installer-managed Codex.dmg cache, unless a DMG path is given.
   2. Inspect the DMG and write reports.
   3. Build a side-by-side candidate in codex-app-next/.
   4. With --install, move the candidate into codex-app/ and keep a backup.
@@ -65,29 +65,11 @@ REBUILD_REPORT="$REPORT_DIR/rebuild-report.json"
 
 resolve_dmg_path() {
     local explicit_path="$1"
-    local -a candidates=()
 
     if [ -n "$explicit_path" ]; then
         [ -f "$explicit_path" ] || error "DMG not found: $explicit_path"
         realpath "$explicit_path"
         return 0
-    fi
-
-    if [ -f "$REPO_DIR/Codex.dmg" ]; then
-        realpath "$REPO_DIR/Codex.dmg"
-        return 0
-    fi
-
-    mapfile -d '' candidates < <(find "$REPO_DIR" -maxdepth 1 -type f -name '*.dmg' -print0 | sort -z)
-    if [ "${#candidates[@]}" -eq 1 ]; then
-        realpath "${candidates[0]}"
-        return 0
-    fi
-
-    if [ "${#candidates[@]}" -gt 1 ]; then
-        printf '[rebuild][ERROR] Multiple DMG files found. Pass one explicitly:\n' >&2
-        printf '  %s\n' "${candidates[@]}" >&2
-        exit 1
     fi
 
     echo ""
@@ -164,11 +146,18 @@ if [ -n "$DMG_PATH" ]; then
     dmg_args=("$DMG_PATH")
     info "Using DMG: $DMG_PATH"
 else
-    info "No local DMG found; installer will reuse or download Codex.dmg"
+    info "No explicit DMG given; installer will validate, reuse, or download Codex.dmg"
 fi
 
 info "1/2 Inspecting upstream DMG"
 "$REPO_DIR/install.sh" --inspect --report-dir "$REPORT_DIR" "${dmg_args[@]}"
+
+if [ -z "$DMG_PATH" ]; then
+    DMG_PATH="$REPO_DIR/Codex.dmg"
+    [ -f "$DMG_PATH" ] || error "Installer did not produce cached DMG: $DMG_PATH"
+    dmg_args=("$DMG_PATH")
+    info "Using validated DMG for build: $DMG_PATH"
+fi
 
 info "2/2 Building side-by-side candidate"
 CODEX_INSTALL_DIR="$NEXT_APP_DIR" \

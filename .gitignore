@@ -1,4 +1,5 @@
 *.dmg
+*.dmg.metadata
 node_modules/
 __pycache__/
 *.py[cod]
@@ -11,5 +12,11 @@ target/
 dist/
 dist-next/
 linux-features/features.json
+linux-features/local/
 .idea/
 .claude/
+.codex/
+
+# graphify
+graphify-out/
+.graphify_*

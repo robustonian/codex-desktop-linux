@@ -1,12 +1,17 @@
 "use strict";
 
 const {
+  applyLinuxAboutDialogPatch,
   applyLinuxWindowOptionsPatch,
+  applyLinuxNativeTitlebarPatch,
   applyLinuxMenuPatch,
   applyLinuxSetIconPatch,
   applyLinuxReadyToShowWindowStatePatch,
+  applyLinuxResizeRepaintPatch,
   applyLinuxOpaqueBackgroundPatch,
   applyLinuxFileManagerPatch,
+  patchLinuxWorkerFileManagerTarget,
+  applyLinuxBuildInfoTrayPatch,
   applyLinuxTrayPatch,
   applyLinuxSingleInstancePatch,
   applyLinuxGitOriginsSourceFallbackPatch,
@@ -15,10 +20,17 @@ const { applyLinuxAvatarOverlayMousePassthroughPatch } = require("../../../../av
 
 module.exports = [
   {
+    id: "linux-about-dialog",
+    phase: "main-bundle",
+    order: 55,
+    ciPolicy: "optional",
+    apply: (source, context) => applyLinuxAboutDialogPatch(source, context.iconPathExpression),
+  },
+  {
     id: "linux-window-options",
     phase: "main-bundle",
     order: 50,
-    ciPolicy: "optional",
+    ciPolicy: "required-upstream",
     apply: (source, context) => applyLinuxWindowOptionsPatch(source, context.iconAsset),
   },
   {
@@ -27,6 +39,13 @@ module.exports = [
     order: 60,
     ciPolicy: "optional",
     apply: applyLinuxMenuPatch,
+  },
+  {
+    id: "linux-native-titlebar",
+    phase: "main-bundle",
+    order: 85,
+    ciPolicy: "required-upstream",
+    apply: applyLinuxNativeTitlebarPatch,
   },
   {
     id: "linux-set-icon",
@@ -43,32 +62,62 @@ module.exports = [
     apply: applyLinuxReadyToShowWindowStatePatch,
   },
   {
+    id: "linux-resize-repaint",
+    phase: "main-bundle",
+    order: 78,
+    ciPolicy: "optional",
+    apply: applyLinuxResizeRepaintPatch,
+  },
+  {
     id: "linux-opaque-background",
     phase: "main-bundle",
     order: 80,
-    ciPolicy: "optional",
+    ciPolicy: "required-upstream",
     apply: applyLinuxOpaqueBackgroundPatch,
   },
   {
     id: "linux-avatar-overlay-mouse-passthrough",
     phase: "main-bundle",
     order: 90,
-    ciPolicy: "optional",
+    ciPolicy: "required-upstream",
     apply: applyLinuxAvatarOverlayMousePassthroughPatch,
   },
   {
     id: "linux-file-manager",
     phase: "main-bundle",
     order: 100,
-    ciPolicy: "required-upstream",
+    ciPolicy: "optional",
     apply: applyLinuxFileManagerPatch,
+  },
+  {
+    id: "linux-worker-file-manager",
+    phase: "extracted-app",
+    order: 101,
+    ciPolicy: "optional",
+    apply: patchLinuxWorkerFileManagerTarget,
+    status: (result, warnings) => {
+      if (result?.changed) {
+        return warnings.length > 0 ? "applied-with-warnings" : "applied";
+      }
+      if (warnings.length > 0 || result?.matched === 0 || result?.reason != null) {
+        return { status: "skipped-optional", reason: result?.reason ?? warnings[0] };
+      }
+      return "already-applied";
+    },
   },
   {
     id: "linux-tray",
     phase: "main-bundle",
     order: 110,
-    ciPolicy: "optional",
+    ciPolicy: "required-upstream",
     apply: (source, context) => applyLinuxTrayPatch(source, context.iconPathExpression),
+  },
+  {
+    id: "linux-build-info-tray",
+    phase: "main-bundle",
+    order: 115,
+    ciPolicy: "optional",
+    apply: applyLinuxBuildInfoTrayPatch,
   },
   {
     id: "linux-single-instance",

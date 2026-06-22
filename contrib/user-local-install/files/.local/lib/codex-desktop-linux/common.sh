@@ -3,7 +3,6 @@ set -euo pipefail
 
 OPT_ROOT="${HOME}/.local/opt/codex-desktop-linux"
 APP_DIR="${OPT_ROOT}/codex-app"
-DMG_FILE="${OPT_ROOT}/Codex.dmg"
 DMG_URL="https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
 
 XDG_DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
@@ -58,6 +57,12 @@ effective_repo_dir() {
         return 0
     fi
     printf '%s\n' "$SOURCE_REPO_DIR"
+}
+
+# install.sh caches the upstream DMG next to itself in the build repo
+# checkout, never under $OPT_ROOT.
+cached_dmg_file() {
+    printf '%s/Codex.dmg\n' "$(effective_repo_dir)"
 }
 
 current_repo_head() {
@@ -373,6 +378,57 @@ apply_source_overlay() {
     done < <(source_repo_overlay_remove_paths "$base_ref")
 }
 
+copy_enabled_local_features() {
+    local config_path source_local_root target_local_root feature_id source_dir target_dir
+
+    config_path="${CODEX_LINUX_FEATURES_CONFIG:-}"
+    if [ -z "$config_path" ] && [ -f "$SOURCE_REPO_DIR/linux-features/features.json" ]; then
+        config_path="$SOURCE_REPO_DIR/linux-features/features.json"
+    fi
+
+    [ -f "$config_path" ] || return 0
+    source_local_root="$SOURCE_REPO_DIR/linux-features/local"
+    [ -d "$source_local_root" ] || return 0
+
+    target_local_root="$MANAGED_REPO_DIR/linux-features/local"
+    while IFS= read -r feature_id; do
+        [ -n "$feature_id" ] || continue
+        source_dir="$source_local_root/$feature_id"
+        [ -f "$source_dir/feature.json" ] || continue
+
+        # If the fetched wrapper gained a real top-level feature with this id,
+        # prefer the upstream feature and do not create a duplicate local id.
+        [ ! -f "$MANAGED_REPO_DIR/linux-features/$feature_id/feature.json" ] || continue
+
+        target_dir="$target_local_root/$feature_id"
+        mkdir -p "$(dirname "$target_dir")"
+        rm -rf "$target_dir"
+        cp -a "$source_dir" "$target_dir"
+    done < <(python3 - "$config_path" <<'PY'
+import json
+import re
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        config = json.load(handle)
+except Exception:
+    raise SystemExit(0)
+
+seen = set()
+for item in config.get("enabled", []):
+    if not isinstance(item, str):
+        continue
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", item):
+        continue
+    if item in seen:
+        continue
+    seen.add(item)
+    print(item)
+PY
+)
+}
+
 prepare_build_repo() {
     local branch managed_ref
 
@@ -397,6 +453,7 @@ prepare_build_repo() {
     git -C "$MANAGED_REPO_DIR" reset --hard "$managed_ref" >/dev/null
     git -C "$MANAGED_REPO_DIR" clean -fdx >/dev/null
     apply_source_overlay
+    copy_enabled_local_features
     BUILD_REPO_DIR="$MANAGED_REPO_DIR"
 }
 
@@ -412,11 +469,18 @@ header_value() {
 
 extract_icon() {
     ensure_layout
-    local tmp_dir
+    local dmg_file source_icon tmp_dir
+    source_icon="${SOURCE_REPO_DIR:-$REPO_DIR_DEFAULT}/assets/codex.png"
+    if [ -f "$source_icon" ]; then
+        cp "$source_icon" "$ICON_PATH"
+        return 0
+    fi
+
+    dmg_file="$(cached_dmg_file)"
     tmp_dir="$(mktemp -d)"
     trap 'rm -rf "$tmp_dir"' RETURN
 
-    7z e -y "$DMG_FILE" "Codex Installer/Codex.app/Contents/Resources/electron.icns" "-o${tmp_dir}" >/dev/null
+    7z e -y "$dmg_file" "Codex Installer/Codex.app/Contents/Resources/electron.icns" "-o${tmp_dir}" >/dev/null
     python3 - "$tmp_dir/electron.icns" "$ICON_PATH" <<'PY'
 from PIL import Image
 import sys
@@ -433,7 +497,7 @@ record_metadata() {
     ensure_layout
     load_install_config
 
-    local build_repo_dir repo_head source_repo_head_value source_overlay_sha dmg_sha256 dmg_size electron_version dmg_headers dmg_etag dmg_last_modified dmg_content_length build_time repo_origin
+    local build_repo_dir repo_head source_repo_head_value source_overlay_sha dmg_file dmg_sha256 dmg_size electron_version dmg_headers dmg_etag dmg_last_modified dmg_content_length build_time repo_origin
     build_repo_dir="$(effective_repo_dir)"
 
     if [ -d "$build_repo_dir/.git" ]; then
@@ -443,8 +507,14 @@ record_metadata() {
         repo_head="unavailable"
         repo_origin="unavailable"
     fi
-    dmg_sha256="$(sha256sum "$DMG_FILE" | awk '{ print $1 }')"
-    dmg_size="$(stat -c '%s' "$DMG_FILE")"
+    dmg_file="$(cached_dmg_file)"
+    if [ "${CODEX_USER_LOCAL_RECORD_DMG_FINGERPRINT:-0}" = "1" ] && [ -f "$dmg_file" ]; then
+        dmg_sha256="$(sha256sum "$dmg_file" | awk '{ print $1 }')"
+        dmg_size="$(stat -c '%s' "$dmg_file")"
+    else
+        dmg_sha256="unavailable"
+        dmg_size="unavailable"
+    fi
     electron_version="$(cat "$APP_DIR/version")"
     build_time="$(date -Iseconds)"
     source_repo_head_value="$(source_repo_head 2>/dev/null || true)"

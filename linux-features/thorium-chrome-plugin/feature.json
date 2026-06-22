@@ -1,0 +1,10 @@
+{
+  "id": "thorium-chrome-plugin",
+  "title": "Thorium Chrome Plugin Support",
+  "description": "Adds disabled-by-default Thorium support to the bundled Chrome plugin on Linux.",
+  "defaultEnabled": false,
+  "entrypoints": {
+    "patches": "./patch.js",
+    "stageHook": "./stage.sh"
+  }
+}

@@ -37,6 +37,10 @@ function readComputerUseUiSettingsFlag(env) {
 }
 
 function computerUseUiSettingsPath(env) {
+  const override = env.CODEX_LINUX_SETTINGS_FILE;
+  if (typeof override === "string" && override.length > 0) {
+    return override;
+  }
   const xdgConfig = env.XDG_CONFIG_HOME;
   const home = env.HOME;
   const configHome = (xdgConfig && xdgConfig.length > 0)
@@ -52,7 +56,7 @@ function computerUseUiSettingsPath(env) {
 }
 
 function computerUseUiSettingsAppId(env) {
-  const appId = env.CODEX_APP_ID || env.CODEX_LINUX_APP_ID || "codex-desktop";
+  const appId = env.CODEX_LINUX_APP_ID || env.CODEX_APP_ID || "codex-desktop";
   return /^[A-Za-z0-9._-]+$/.test(appId) ? appId : "codex-desktop";
 }
 
@@ -87,53 +91,21 @@ function buildComputerUseGate({ nameExpr, availabilityProp, featuresVar, platfor
   return `{installWhenMissing:!0,name:${nameExpr},${availabilityProp}:({features:${featuresVar},platform:${platformVar}})=>(${platformVar}===\`darwin\`||${platformVar}===\`linux\`)&&${featuresVar}.computerUse,migrate:${migrateVar}}`;
 }
 
-function patchFlexibleComputerUseGate(currentSource, computerUseNameVar, nameExpressionPattern) {
-  const descriptorRegex = new RegExp(
-    String.raw`\{([^{}]*?name:(${nameExpressionPattern})[^{}]*?)(isEnabled|isAvailable):\(\{([^}]*)\}\)=>([^{}]*?\.computerUse)([^{}]*?)\}`,
-    "g",
-  );
-  let sawEnabledGate = false;
-  let sawUnpatchableGate = false;
-  let patchedGateCount = 0;
-  const patchedSource = currentSource.replace(
-    descriptorRegex,
-    (gateSource, prefix, nameExpr, availabilityProp, paramsText, expression, suffix) => {
-      if (!isComputerUseNameExpr(nameExpr, computerUseNameVar)) {
-        return gateSource;
-      }
-
-      const aliases = parseDestructuredParamAliases(paramsText);
-      const featuresVar = aliases.features;
-      const platformVar = aliases.platform;
-      if (featuresVar == null || platformVar == null) {
-        sawUnpatchableGate = true;
-        return gateSource;
-      }
-
-      const darwinOnlyExpression = `${platformVar}===\`darwin\`&&${featuresVar}.computerUse`;
-      const linuxExpression = `(${platformVar}===\`darwin\`||${platformVar}===\`linux\`)&&${featuresVar}.computerUse`;
-      const hasInstallWhenMissing = prefix.includes("installWhenMissing:!0");
-      if (expression === linuxExpression && hasInstallWhenMissing) {
-        sawEnabledGate = true;
-        return gateSource;
-      }
-      if (expression === darwinOnlyExpression || expression === linuxExpression) {
-        patchedGateCount += 1;
-        const patchedPrefix = hasInstallWhenMissing
-          ? prefix
-          : prefix.replace("name:", "installWhenMissing:!0,name:");
-        return `{${patchedPrefix}${availabilityProp}:({features:${featuresVar},platform:${platformVar}})=>${linuxExpression}${suffix}}`;
-      }
-      if (expression.includes(`${platformVar}===\`win32\``)) {
-        return gateSource;
-      }
-
-      sawUnpatchableGate = true;
-      return gateSource;
-    },
-  );
-
-  return { patchedSource, patchedGateCount, sawEnabledGate, sawUnpatchableGate };
+function buildFlexibleComputerUseGate({
+  availabilityProp,
+  expressionSuffix,
+  featuresVar,
+  middleFields,
+  nameExpr,
+  platformVar,
+  prefix,
+}) {
+  const installField = prefix.includes("installWhenMissing:!0,") ||
+      middleFields.includes("installWhenMissing:!0,") ||
+      expressionSuffix.includes("installWhenMissing:!0,")
+    ? ""
+    : "installWhenMissing:!0,";
+  return `{${prefix}${installField}name:${nameExpr},${middleFields}${availabilityProp}:({features:${featuresVar},platform:${platformVar}})=>(${platformVar}===\`darwin\`||${platformVar}===\`linux\`)&&${featuresVar}.computerUse${expressionSuffix}}`;
 }
 
 function hasComputerUseLiteral(source) {
@@ -196,19 +168,55 @@ function applyLinuxComputerUsePluginGatePatch(currentSource) {
     return patchedSource;
   }
 
-  if (sawEnabledGate && !sawUnpatchableGate) {
-    return currentSource;
+  const flexibleGateRegex =
+    new RegExp(String.raw`\{([^{}]*?)name:(${nameExpressionPattern}),([^{}]*?)(isEnabled|isAvailable):\(\{([^}]*)\}\)=>([^{}]*?\.computerUse)([^{}]*?)\}`, "g");
+  let flexiblePatchedCount = 0;
+  const flexiblyPatchedSource = currentSource.replace(
+    flexibleGateRegex,
+    (gateSource, prefix, nameExpr, middleFields, availabilityProp, paramsText, expression, expressionSuffix) => {
+      if (!isComputerUseNameExpr(nameExpr, computerUseNameVar)) {
+        return gateSource;
+      }
+
+      const aliases = parseDestructuredParamAliases(paramsText);
+      const featuresVar = aliases.features;
+      const platformVar = aliases.platform;
+      if (featuresVar == null || platformVar == null) {
+        sawUnpatchableGate = true;
+        return gateSource;
+      }
+
+      const darwinOnlyExpression = `${platformVar}===\`darwin\`&&${featuresVar}.computerUse`;
+      const linuxExpression = `(${platformVar}===\`darwin\`||${platformVar}===\`linux\`)&&${featuresVar}.computerUse`;
+      if (prefix.includes("installWhenMissing:!0,") && expression === linuxExpression) {
+        sawEnabledGate = true;
+        return gateSource;
+      }
+      if (expression.includes("win32") || expression.includes("isInternal")) {
+        return gateSource;
+      }
+      if (expression === darwinOnlyExpression || expression === linuxExpression) {
+        flexiblePatchedCount += 1;
+        return buildFlexibleComputerUseGate({
+          availabilityProp,
+          expressionSuffix,
+          featuresVar,
+          middleFields,
+          nameExpr,
+          platformVar,
+          prefix,
+        });
+      }
+      sawUnpatchableGate = true;
+      return gateSource;
+    },
+  );
+
+  if (flexiblePatchedCount > 0) {
+    return flexiblyPatchedSource;
   }
 
-  const flexibleGateResult = patchFlexibleComputerUseGate(
-    currentSource,
-    computerUseNameVar,
-    nameExpressionPattern,
-  );
-  if (flexibleGateResult.patchedGateCount > 0) {
-    return flexibleGateResult.patchedSource;
-  }
-  if (flexibleGateResult.sawEnabledGate && !flexibleGateResult.sawUnpatchableGate) {
+  if (sawEnabledGate && !sawUnpatchableGate) {
     return currentSource;
   }
 
@@ -224,10 +232,14 @@ function applyLinuxComputerUseFeaturePatch(currentSource) {
     /function [A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*,\{env:[A-Za-z_$][\w$]*=process\.env,platform:[A-Za-z_$][\w$]*=process\.platform\}=\{\}\)\{return [A-Za-z_$][\w$]*===`linux`\?\{\.\.\.[A-Za-z_$][\w$]*,computerUse:!0,computerUseNodeRepl:!0\}:/;
   const currentPatchedFeaturePattern =
     /let [A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*===`linux`\?\{\.\.\.[A-Za-z_$][\w$]*,computerUse:!0,computerUseNodeRepl:!0\}:[A-Za-z_$][\w$]*===`win32`&&[A-Za-z_$][\w$]*\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===`1`\?\{\.\.\.[A-Za-z_$][\w$]*,computerUse:!0,computerUseNodeRepl:!0\}:[A-Za-z_$][\w$]*,/;
+  const currentChainedPatchedFeaturePattern =
+    /,[A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*===`linux`\?\{\.\.\.[A-Za-z_$][\w$]*,computerUse:!0,computerUseNodeRepl:!0\}:[A-Za-z_$][\w$]*===`win32`&&[A-Za-z_$][\w$]*\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===`1`\?\{\.\.\.[A-Za-z_$][\w$]*,computerUse:!0,computerUseNodeRepl:!0\}:[A-Za-z_$][\w$]*,/;
   const windowsOnlyFeaturePattern =
     /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\{env:([A-Za-z_$][\w$]*)=process\.env,platform:([A-Za-z_$][\w$]*)=process\.platform\}=\{\}\)\{return \4!==`win32`\|\|\3\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE!==`1`\?\2:\{\.\.\.\2,computerUse:!0,computerUseNodeRepl:!0\}\}/g;
   const currentWindowsOnlyFeaturePattern =
     /let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)===`win32`&&([A-Za-z_$][\w$]*)\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===`1`\?\{\.\.\.([A-Za-z_$][\w$]*),computerUse:!0,computerUseNodeRepl:!0\}:\4,/g;
+  const chainedWindowsOnlyFeaturePattern =
+    /,([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)===`win32`&&([A-Za-z_$][\w$]*)\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===`1`\?\{\.\.\.([A-Za-z_$][\w$]*),computerUse:!0,computerUseNodeRepl:!0\}:\4,/g;
 
   let changed = false;
   let patchedSource = currentSource.replace(
@@ -244,12 +256,23 @@ function applyLinuxComputerUseFeaturePatch(currentSource) {
       return `let ${gateVar}=${platformVar}===\`linux\`?{...${featuresVar},computerUse:!0,computerUseNodeRepl:!0}:${platformVar}===\`win32\`&&${envVar}.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===\`1\`?{...${featuresVar},computerUse:!0,computerUseNodeRepl:!0}:${featuresVar},`;
     },
   );
+  patchedSource = patchedSource.replace(
+    chainedWindowsOnlyFeaturePattern,
+    (_, gateVar, platformVar, envVar, featuresVar) => {
+      changed = true;
+      return `,${gateVar}=${platformVar}===\`linux\`?{...${featuresVar},computerUse:!0,computerUseNodeRepl:!0}:${platformVar}===\`win32\`&&${envVar}.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===\`1\`?{...${featuresVar},computerUse:!0,computerUseNodeRepl:!0}:${featuresVar},`;
+    },
+  );
 
   if (changed) {
     return patchedSource;
   }
 
-  if (patchedFeaturePattern.test(currentSource) || currentPatchedFeaturePattern.test(currentSource)) {
+  if (
+    patchedFeaturePattern.test(currentSource) ||
+    currentPatchedFeaturePattern.test(currentSource) ||
+    currentChainedPatchedFeaturePattern.test(currentSource)
+  ) {
     return currentSource;
   }
 
@@ -274,6 +297,8 @@ function applyLinuxComputerUseRendererAvailabilityPatch(currentSource) {
     (currentSource.includes("isComputerUseAvailable") || currentSource.includes("1506311413"));
   const availabilityAlreadyPatched = () =>
     /featureName:`computer_use`[\s\S]{0,1200}?let ([A-Za-z_$][\w$]*)=[A-Za-z_$][\w$]*&&[A-Za-z_$][\w$]*&&\([A-Za-z_$][\w$]*===`linux`\|\|[A-Za-z_$][\w$]*&&\([A-Za-z_$][\w$]*\|\|[A-Za-z_$][\w$]*\)\),[A-Za-z_$][\w$]*=\1&&![A-Za-z_$][\w$]*&&\([A-Za-z_$][\w$]*===`linux`\|\|[A-Za-z_$][\w$]*\.enabled\)&&![A-Za-z_$][\w$]*\.isLoading/.test(patchedSource) ||
+    /featureName:`computer_use`[\s\S]{0,1800}?isComputerUseFeatureEnabled:([A-Za-z_$][\w$]*)===`linux`\|\|[A-Za-z_$][\w$]*\.enabled,isComputerUseFeatureLoading:\1!==`linux`&&[A-Za-z_$][\w$]*\.isLoading,isComputerUseGateEnabled:\1===`linux`\|\|[A-Za-z_$][\w$]*,isHostCompatiblePlatform:\1===`linux`\|\|[A-Za-z_$][\w$]*\(\1\)(?:,isHostLocal:[A-Za-z_$][\w$]*)?,isPlatformLoading:/.test(patchedSource) ||
+    /featureName:`computer_use`[\s\S]{0,2200}?areRequiredFeaturesEnabled:([A-Za-z_$][\w$]*)===`linux`\|\|[A-Za-z_$][\w$]*,enabled:[A-Za-z_$][\w$]*,isAnyFeatureLoading:\1===`linux`\?!1:[A-Za-z_$][\w$]*,isComputerUseGateEnabled:\1===`linux`\|\|[A-Za-z_$][\w$]*,isHostCompatiblePlatform:\1===`linux`\|\|[A-Za-z_$][\w$]*\(\1\),isPlatformLoading:/.test(patchedSource) ||
     patchedSource.includes(availabilityPatch) ||
     patchedSource.includes(currentAvailabilityPatch);
 
@@ -354,6 +379,63 @@ function applyLinuxComputerUseRendererAvailabilityPatch(currentSource) {
       }
       availabilityChanged = true;
       return `let ${availabilityVar}=${enabledVar}&&${isHostLocalVar}&&(${platformVar}===\`linux\`||${rolloutVar}&&(${platformLoadingVar}||${supportedPlatformVar})),${availableVar}=${availabilityVar}&&!${platformLoadingVar}&&(${platformVar}===\`linux\`||${featureQueryVar}.enabled)&&!${featureQueryVar}.isLoading,${fetchingVar}=${availabilityVar}&&${platformVar}!==\`linux\`&&${featureQueryVar}.isLoading,${loadingVar}=${availabilityVar}&&(${platformLoadingVar}||${platformVar}!==\`linux\`&&${featureQueryVar}.isLoading),${resultVar};`;
+    },
+  );
+
+  const currentObjectAvailabilityPattern =
+    /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\{enabled:([A-Za-z_$][\w$]*),isComputerUseFeatureEnabled:([A-Za-z_$][\w$]*)\.enabled,isComputerUseFeatureLoading:\4\.isLoading,isComputerUseGateEnabled:([A-Za-z_$][\w$]*),isHostCompatiblePlatform:([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)(?:,isHostLocal:([A-Za-z_$][\w$]*))?,isPlatformLoading:([A-Za-z_$][\w$]*),windowType:`electron`\}\)/g;
+  patchedSource = patchedSource.replace(
+    currentObjectAvailabilityPattern,
+    (
+      match,
+      resultVar,
+      helperVar,
+      enabledVar,
+      featureQueryVar,
+      rolloutVar,
+      platformPredicateVar,
+      platformVar,
+      isHostLocalVar,
+      platformLoadingVar,
+      offset,
+    ) => {
+      const contextStart = Math.max(0, offset - 900);
+      const context = patchedSource.slice(contextStart, offset + match.length);
+      if (!context.includes(computerUseFeatureNeedle)) {
+        return match;
+      }
+      availabilityGateFound = true;
+      availabilityChanged = true;
+      const hostLocalSegment = isHostLocalVar == null ? "" : `,isHostLocal:${isHostLocalVar}`;
+      return `${resultVar}=${helperVar}({enabled:${enabledVar},isComputerUseFeatureEnabled:${platformVar}===\`linux\`||${featureQueryVar}.enabled,isComputerUseFeatureLoading:${platformVar}!==\`linux\`&&${featureQueryVar}.isLoading,isComputerUseGateEnabled:${platformVar}===\`linux\`||${rolloutVar},isHostCompatiblePlatform:${platformVar}===\`linux\`||${platformPredicateVar}(${platformVar})${hostLocalSegment},isPlatformLoading:${platformLoadingVar},windowType:\`electron\`})`;
+    },
+  );
+
+  const currentRequiredFeaturesObjectPattern =
+    /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\{areRequiredFeaturesEnabled:([A-Za-z_$][\w$]*),enabled:([A-Za-z_$][\w$]*),isAnyFeatureLoading:([A-Za-z_$][\w$]*),isComputerUseGateEnabled:([A-Za-z_$][\w$]*),isHostCompatiblePlatform:([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\),isPlatformLoading:([A-Za-z_$][\w$]*),windowType:`electron`\}\)/g;
+  patchedSource = patchedSource.replace(
+    currentRequiredFeaturesObjectPattern,
+    (
+      match,
+      resultVar,
+      helperVar,
+      requiredFeaturesVar,
+      enabledVar,
+      featureLoadingVar,
+      rolloutVar,
+      platformPredicateVar,
+      platformVar,
+      platformLoadingVar,
+      offset,
+    ) => {
+      const contextStart = Math.max(0, offset - 1200);
+      const context = patchedSource.slice(contextStart, offset + match.length);
+      if (!context.includes(computerUseFeatureNeedle) || !context.includes("featureName:`windows_computer_use`")) {
+        return match;
+      }
+      availabilityGateFound = true;
+      availabilityChanged = true;
+      return `${resultVar}=${helperVar}({areRequiredFeaturesEnabled:${platformVar}===\`linux\`||${requiredFeaturesVar},enabled:${enabledVar},isAnyFeatureLoading:${platformVar}===\`linux\`?!1:${featureLoadingVar},isComputerUseGateEnabled:${platformVar}===\`linux\`||${rolloutVar},isHostCompatiblePlatform:${platformVar}===\`linux\`||${platformPredicateVar}(${platformVar}),isPlatformLoading:${platformLoadingVar},windowType:\`electron\`})`;
     },
   );
 

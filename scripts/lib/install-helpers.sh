@@ -20,8 +20,8 @@ Run the helper to install them automatically:
 
 Or install manually:
   sudo apt install python3 p7zip-full curl unzip build-essential                   # Debian/Ubuntu
-  sudo dnf install python3 7zip curl unzip @development-tools                       # Fedora 41+ (dnf5)
-  sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip                # Fedora <41 (dnf)
+  sudo dnf install python3 7zip curl unzip rpm-build @development-tools             # Fedora 41+ (dnf5)
+  sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip rpm-build      # Fedora <41 (dnf)
     && sudo dnf groupinstall 'Development Tools'
   sudo pacman -S python p7zip curl unzip zstd base-devel                            # Arch
   sudo zypper install python3 p7zip-full curl unzip                                 # openSUSE
@@ -36,6 +36,7 @@ trap cleanup EXIT
 trap 'error "Failed at line $LINENO (exit code $?)"' ERR
 
 CACHED_DMG_PATH="$SCRIPT_DIR/Codex.dmg"
+CACHED_DMG_METADATA_PATH="$CACHED_DMG_PATH.metadata"
 FRESH_INSTALL=0
 REUSE_CACHED_DMG=1
 PROVIDED_DMG_PATH=""
@@ -51,7 +52,7 @@ Converts the official macOS Codex Desktop app to run on Linux.
 Options:
   -h, --help     Show this help message and exit
   --fresh        Remove existing install directory and cached DMG before building
-  --reuse-dmg    Reuse cached Codex.dmg if present (default)
+  --reuse-dmg    Reuse cached Codex.dmg when upstream metadata still matches (default)
   --inspect      Inspect the DMG and write patch/rebuild reports without installing
   --report-dir DIR
                  Directory for --inspect reports (default: ./dist-next/rebuild)
@@ -146,9 +147,11 @@ prepare_install() {
         rm -rf "$INSTALL_DIR"
     fi
 
-    if [ "$FRESH_INSTALL" -eq 1 ] && [ "$REUSE_CACHED_DMG" -ne 1 ] && [ -f "$CACHED_DMG_PATH" ]; then
-        info "Removing cached DMG: $CACHED_DMG_PATH"
+    if [ "$FRESH_INSTALL" -eq 1 ] && [ "$REUSE_CACHED_DMG" -ne 1 ] \
+            && { [ -e "$CACHED_DMG_PATH" ] || [ -e "$CACHED_DMG_METADATA_PATH" ]; }; then
+        info "Removing cached DMG and metadata: $CACHED_DMG_PATH"
         rm -f "$CACHED_DMG_PATH"
+        rm -f "$CACHED_DMG_METADATA_PATH"
     fi
 }
 

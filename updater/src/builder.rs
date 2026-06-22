@@ -42,7 +42,12 @@ const REQUIRED_BUNDLE_FILES: [(&str, &str); 17] = [
     ("assets/codex.png", "assets/codex.png"),
     ("linux-features", "linux-features"),
 ];
-const OPTIONAL_BUNDLE_FILES: [(&str, &str); 3] = [
+const OPTIONAL_BUNDLE_FILES: [(&str, &str); 5] = [
+    ("CHANGELOG.md", "CHANGELOG.md"),
+    (
+        ".codex-linux/source-info.json",
+        ".codex-linux/source-info.json",
+    ),
     ("scripts/build-rpm.sh", "scripts/build-rpm.sh"),
     ("scripts/build-pacman.sh", "scripts/build-pacman.sh"),
     (
@@ -75,39 +80,67 @@ pub async fn build_update(
     candidate_version: &str,
     dmg_path: &Path,
 ) -> Result<BuildArtifacts> {
+    build_update_from(
+        &config.builder_bundle_root,
+        config,
+        state,
+        paths,
+        candidate_version,
+        dmg_path,
+    )
+    .await
+}
+
+/// Rebuilds a Linux package using an explicit wrapper/builder source tree.
+pub async fn build_update_from(
+    bundle_source: &Path,
+    config: &RuntimeConfig,
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+    candidate_version: &str,
+    dmg_path: &Path,
+) -> Result<BuildArtifacts> {
     let workspace = BuilderWorkspace::prepare(&config.workspace_root, candidate_version)?;
     let build_path = build_command_path(&config.builder_bundle_root);
+    let managed_node_source = if config.builder_bundle_root.join("node-runtime").exists() {
+        config.builder_bundle_root.join("node-runtime")
+    } else {
+        bundle_source.join("node-runtime")
+    };
 
     state.status = UpdateStatus::PreparingWorkspace;
     state.artifact_paths.workspace_dir = Some(workspace.workspace_dir.clone());
     state.save(&paths.state_file)?;
 
-    copy_builder_bundle(&config.builder_bundle_root, &workspace.bundle_dir)?;
+    copy_builder_bundle(bundle_source, &workspace.bundle_dir)?;
 
     state.status = UpdateStatus::PatchingApp;
     state.save(&paths.state_file)?;
-    run_and_log(
-        Command::new(workspace.bundle_dir.join("install.sh"))
-            .arg(dmg_path)
-            .env("CODEX_INSTALL_DIR", &workspace.app_dir)
-            .env(
-                "CODEX_PATCH_REPORT_JSON",
-                workspace.reports_dir.join("patch-report.json"),
-            )
-            .env(
-                "CODEX_REBUILD_REPORT_JSON",
-                workspace.reports_dir.join("rebuild-report.json"),
-            )
-            .env(
-                "CODEX_MANAGED_NODE_SOURCE",
-                config.builder_bundle_root.join("node-runtime"),
-            )
-            .env("PATH", &build_path)
-            .current_dir(&workspace.bundle_dir),
-        &workspace.install_log,
-    )
-    .await
-    .context("install.sh failed during local rebuild")?;
+    let mut install = Command::new(workspace.bundle_dir.join("install.sh"));
+    install
+        .arg(dmg_path)
+        .env("CODEX_INSTALL_DIR", &workspace.app_dir)
+        .env(
+            "CODEX_PATCH_REPORT_JSON",
+            workspace.reports_dir.join("patch-report.json"),
+        )
+        .env(
+            "CODEX_REBUILD_REPORT_JSON",
+            workspace.reports_dir.join("rebuild-report.json"),
+        )
+        .env("CODEX_MANAGED_NODE_SOURCE", managed_node_source)
+        .env("PATH", &build_path)
+        .current_dir(&workspace.bundle_dir);
+    // Honor the user's saved feature selection (the in-app Update feature picker
+    // writes it to a stable per-user path) so the rebuild stages exactly those
+    // features. Only set it when the file actually exists; an absent path would
+    // make linux-features.js see an empty enabled set and stage nothing.
+    if let Some(feature_config) = crate::config::effective_feature_config_path(config) {
+        install.env("CODEX_LINUX_FEATURES_CONFIG", &feature_config);
+    }
+    run_and_log(&mut install, &workspace.install_log)
+        .await
+        .context("install.sh failed during local rebuild")?;
 
     state.status = UpdateStatus::BuildingPackage;
     state.save(&paths.state_file)?;
@@ -550,8 +583,14 @@ touch "${DIST_DIR_OVERRIDE}/codex-desktop-${VER}-1-x86_64.pkg.tar.zst"
         fs::create_dir_all(bundle_root.join("launcher"))?;
         fs::create_dir_all(bundle_root.join("packaging/linux"))?;
         fs::create_dir_all(bundle_root.join("assets"))?;
+        fs::create_dir_all(bundle_root.join(".codex-linux"))?;
         write_fake_computer_use_bundle(&bundle_root)?;
         write_fake_linux_features_bundle(&bundle_root)?;
+        fs::write(bundle_root.join("CHANGELOG.md"), b"# Changelog\n")?;
+        fs::write(
+            bundle_root.join(".codex-linux/source-info.json"),
+            b"{\"commit\":\"0123456789012345678901234567890123456789\",\"version\":\"0.8.1\"}\n",
+        )?;
         fs::write(
             bundle_root.join("launcher/start.sh.template"),
             b"# fake launcher template\n",
@@ -683,6 +722,9 @@ fi
             workspace_root: cache_root,
             builder_bundle_root: bundle_root,
             app_executable_path: PathBuf::from("/opt/codex-desktop/electron"),
+            enable_wrapper_updates: false,
+            wrapper_remote: String::new(),
+            wrapper_branch: "main".to_string(),
         };
         let dmg_path = temp.path().join("Codex.dmg");
         fs::write(&dmg_path, b"dmg")?;
@@ -702,6 +744,14 @@ fi
         assert!(artifacts
             .workspace_dir
             .join("builder/scripts/rebuild-candidate.sh")
+            .exists());
+        assert!(artifacts
+            .workspace_dir
+            .join("builder/CHANGELOG.md")
+            .exists());
+        assert!(artifacts
+            .workspace_dir
+            .join("builder/.codex-linux/source-info.json")
             .exists());
         assert!(artifacts
             .workspace_dir

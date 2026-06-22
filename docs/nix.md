@@ -1,0 +1,238 @@
+# Nix
+
+Run Codex Desktop for Linux directly with:
+
+```bash
+nix run github:ilysenko/codex-desktop-linux
+```
+
+The flake handles dependencies and patches Electron for NixOS. A GitHub Actions
+bot refreshes the upstream `Codex.dmg` hash and verifies the Nix package outputs
+in `main`. If you hit a hash mismatch right after an upstream release, wait for
+the next bot run and retry.
+
+## Codex CLI Requirement
+
+Codex Desktop still needs the Codex CLI at runtime. The Nix package in this
+repository does not install or maintain the CLI for you; it only needs a
+working `codex` binary. Put `codex` on your user `PATH`, or set
+`CODEX_CLI_PATH` to the exact binary that Codex Desktop should launch.
+
+Relying on `PATH` alone is fragile: a graphical autostart entry, an application
+launcher, or a warm-start handoff to an already-running instance may not have
+your Nix profile on `PATH`, in which case Codex Desktop fails with
+`Unable to locate the Codex CLI binary. Set CODEX_CLI_PATH ...`. Pinning the CLI
+explicitly avoids this. The Home Manager and NixOS modules can do this for you
+via [`programs.codexDesktopLinux.cliPackage`](#home-manager--nixos-module),
+which wraps the launcher so `CODEX_CLI_PATH` is always set.
+
+One direct upstream install path is the npm package:
+
+```bash
+npm i -g @openai/codex
+```
+
+### Community Nix CLI Packages
+
+If you want a Nix-native CLI setup, one community-maintained option is the
+`sadjow/codex-cli-nix` flake. It is not part of this repository and is not
+maintained by this project or by OpenAI. We do not control its release cadence,
+build recipe, binary cache, or support policy.
+
+Use it only if that trade-off makes sense for your configuration. Pin it to a
+tag or commit for reproducibility, review the flake and cache trust settings
+before using them, and report package/cache-specific issues to that project.
+Issues in this repository should be limited to Codex Desktop discovering and
+launching a working CLI binary.
+
+The community flake exposes Nix packages for the native binary and Node.js
+builds:
+
+```bash
+nix run github:sadjow/codex-cli-nix/main
+```
+
+For a declarative setup, add the CLI flake as an input:
+
+```nix
+{
+  inputs.codex-cli-nix = {
+    # Default branch is `main` on GitHub, not `master`.
+    url = "github:sadjow/codex-cli-nix/main";
+    inputs = {
+      nixpkgs.follows = "nixpkgs";
+      flake-utils.follows = "flake-utils";
+    };
+  };
+}
+```
+
+The flake also publishes a third-party Cachix cache for prebuilt binaries. This
+cache is independent from this repository's `codex-desktop-linux` cache. Enabling
+it means trusting substitutes signed by that cache key; omit this step if you
+prefer local builds.
+
+```bash
+cachix use codex-cli
+```
+
+For a declarative NixOS cache configuration:
+
+```nix
+{
+  nix.settings = {
+    substituters = [ "https://codex-cli.cachix.org" ];
+    trusted-public-keys = [
+      "codex-cli.cachix.org-1:1Br3H1hHoRYG22n//cGKJOk3cQXgYobUel6O8DgSing="
+    ];
+  };
+}
+```
+
+Then install its package next to Codex Desktop from Home Manager:
+
+```nix
+{ inputs, pkgs, ... }:
+let
+  codexCli = inputs.codex-cli-nix.packages.${pkgs.stdenv.hostPlatform.system}.default;
+in
+{
+  home.packages = [
+    codexCli
+  ];
+
+  programs.codexDesktopLinux = {
+    enable = true;
+    # Bake CODEX_CLI_PATH into the launcher so the Desktop app always finds this
+    # CLI, even when launched from a graphical session that lacks the profile on
+    # PATH.
+    cliPackage = codexCli;
+  };
+}
+```
+
+Setting `cliPackage` wraps the installed Codex Desktop launcher (and its
+`.desktop` entry) so it always starts with `CODEX_CLI_PATH` pointing at the
+package's `codex` binary. Because the value is baked into the launcher rather
+than exported as a session variable, it works for graphical, terminal, and
+warm-start launches and takes effect on the next app launch — no re-login
+required. An explicit `CODEX_CLI_PATH` already in the environment still wins. If
+you enable `remoteControl` but leave `cliPackage` unset, the module reuses
+`remoteControl.package` automatically.
+
+For a NixOS module, use the same package in `environment.systemPackages`
+instead of `home.packages`.
+
+If you enable the remote-control service, point it at the same CLI package:
+
+```nix
+{ inputs, pkgs, ... }:
+let
+  codexCli = inputs.codex-cli-nix.packages.${pkgs.stdenv.hostPlatform.system}.default;
+in
+{
+  programs.codexDesktopLinux = {
+    enable = true;
+    remoteControl = {
+      enable = true;
+      package = codexCli;
+    };
+  };
+}
+```
+
+Pinning `github:sadjow/codex-cli-nix` to a release tag or commit is
+recommended for fully reproducible configurations.
+
+If your graphical session does not put the selected profile on `PATH`, set
+`cliPackage` so the launcher is wrapped with `CODEX_CLI_PATH`:
+
+```nix
+{
+  # Preferred: wrap the launcher so CODEX_CLI_PATH is always set.
+  programs.codexDesktopLinux.cliPackage = codexCli;
+
+  # Manual fallback if you are not using the module (needs a re-login to apply):
+  # home.sessionVariables.CODEX_CLI_PATH = "${codexCli}/bin/codex";
+}
+```
+
+If `nix run` appears to do nothing, check the launcher log first:
+
+```bash
+sed -n '1,220p' ~/.cache/codex-desktop/launcher.log
+```
+
+## Feature Outputs
+
+Flakes do not include the git-ignored `linux-features/features.json` opt-in
+file, so Nix exposes feature-specific app variants.
+
+Remote mobile control:
+
+```bash
+nix run github:ilysenko/codex-desktop-linux#remote-mobile-control
+```
+
+Computer Use UI plus remote mobile control:
+
+```bash
+nix run github:ilysenko/codex-desktop-linux#computer-use-ui-remote-mobile-control
+```
+
+Computer Use UI only:
+
+```bash
+nix run github:ilysenko/codex-desktop-linux#codex-desktop-computer-use-ui
+```
+
+## Home Manager / NixOS Module
+
+For a declarative install with the mobile remote-control app-server managed by
+systemd instead of the Desktop launcher:
+
+```nix
+{
+  imports = [
+    inputs.codex-desktop-linux.homeManagerModules.default
+  ];
+
+  programs.codexDesktopLinux = {
+    enable = true;
+    computerUseUi.enable = true;
+    remoteMobileControl.enable = true;
+    remoteControl.enable = true;
+  };
+}
+```
+
+This installs the selected Codex Desktop package variant and starts a user
+`codex-remote-control.service` with:
+
+```text
+codex app-server --remote-control --listen unix://
+```
+
+A `nixosModules.default` export is also available for system-level
+configurations that prefer a global user unit.
+
+## Development Shell
+
+```bash
+nix develop github:ilysenko/codex-desktop-linux
+```
+
+## Cachix
+
+CI can populate a Cachix cache named `codex-desktop-linux` for flake package
+outputs. To push to the cache, create it in Cachix and add a repository secret
+named `CACHIX_AUTH_TOKEN` with write access.
+
+Users can opt in locally with:
+
+```bash
+cachix use codex-desktop-linux
+```
+
+The scheduled `Populate Cachix` workflow builds the default package,
+feature-specific package variants, and `.#installer`.

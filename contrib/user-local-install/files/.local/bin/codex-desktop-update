@@ -37,7 +37,9 @@ log() {
 }
 
 if [ "$record_only" -eq 1 ]; then
-    extract_icon
+    # Icon extraction is best-effort: without a usable cached Codex.dmg it
+    # must not abort metadata recording under set -e.
+    extract_icon || log "Icon extraction skipped: no usable cached Codex.dmg."
     record_metadata
     log "Metadata refreshed."
     exit 0
@@ -109,14 +111,18 @@ fi
 
 if [ "$dmg_changed" -eq 1 ]; then
     log "Refreshing cached Codex.dmg..."
-    rm -f "$DMG_FILE"
+    dmg_file="$(cached_dmg_file)"
+    rm -f "$dmg_file" "$dmg_file.metadata"
 fi
 
 log "Rebuilding wrapper..."
 (
     cd "$BUILD_REPO_DIR"
     mkdir -p "$STATE_DIR/tmp"
-    if [ -f "$SOURCE_REPO_DIR/linux-features/features.json" ]; then
+    # Honor a caller-provided feature config (e.g. the in-app Update button's
+    # feature picker) over the repo-local default, so a picked selection wins.
+    if [ -z "${CODEX_LINUX_FEATURES_CONFIG:-}" ] && \
+       [ -f "$SOURCE_REPO_DIR/linux-features/features.json" ]; then
         export CODEX_LINUX_FEATURES_CONFIG="$SOURCE_REPO_DIR/linux-features/features.json"
     fi
     TMPDIR="$STATE_DIR/tmp" \
@@ -126,7 +132,7 @@ log "Rebuilding wrapper..."
         ./install.sh
 )
 
-extract_icon
+extract_icon || log "Icon extraction skipped: no usable cached Codex.dmg."
 record_metadata
 
 if command -v update-desktop-database >/dev/null 2>&1; then

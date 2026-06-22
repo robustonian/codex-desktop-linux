@@ -10,7 +10,7 @@ module.exports = [
     phase: "webview-asset",
     order: 1050,
     ciPolicy: "optional",
-    pattern: /^composer-.*\.js$/,
+    pattern: /^composer-(?!external-footer).*\.js$/,
     missingDescription: "composer bundle",
     skipDescription: "persistent composer rate limit footer patch",
     apply: applyPersistentRateLimitFooterPatch,

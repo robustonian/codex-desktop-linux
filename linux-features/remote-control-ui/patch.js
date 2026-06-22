@@ -41,6 +41,13 @@ function applyRemoteControlConnectionsVisibilityPatch(source) {
   if (patched !== source || source.includes(`||${LINUX_GATE}`)) {
     return patched;
   }
+  if (
+    source.includes("function p(){let") &&
+    source.includes("remote_control_connections") &&
+    source.includes("addedRemoteControlEnvIds")
+  ) {
+    return source;
+  }
   warn(
     "Could not find remote control connections visibility gate",
     "remote control UI remote control connections visibility patch",
@@ -73,6 +80,9 @@ function applyMobileStatsigLinuxPatch(source, patchName) {
   if (patched !== source || source.includes(`||${LINUX_GATE}`)) {
     return patched;
   }
+  if (!source.includes("2798711298") && !source.includes("CODEX_MOBILE_SETUP_COMPLETED")) {
+    return source;
+  }
   if (source.includes("remote-connection-visibility-")) {
     return source;
   }
@@ -97,7 +107,7 @@ module.exports = {
       phase: "webview-asset",
       order: 20510,
       ciPolicy: "optional",
-      pattern: /^remote-control-connections-visibility-.*\.js$/,
+      pattern: /^(?:remote-control-connections-visibility|remote-connection-visibility)-.*\.js$/,
       missingDescription: "remote control connections visibility bundle",
       skipDescription: "remote control UI remote control connections visibility patch",
       apply: applyRemoteControlConnectionsVisibilityPatch,

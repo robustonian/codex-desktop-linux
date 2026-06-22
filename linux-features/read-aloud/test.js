@@ -64,6 +64,9 @@ test("main bundle patch adds a Linux read aloud handler", () => {
   assert.doesNotMatch(patched, /\|\|\s*`female1`/);
   assert.match(patched, /spd-say/);
   assert.match(patched, /espeak-ng/);
+  // A custom voice must win, otherwise fall back by language; without the
+  // parentheses any custom voice forced the Hebrew espeak voice.
+  assert.match(patched, /let espeakVoice=voice\|\|\(hasHebrew\?`he`:`en-us`\);/);
   assert.doesNotThrow(() => new Function("require", "process", patched));
 });
 
@@ -143,6 +146,121 @@ test("kokoro stdin runner compiles and makes a bounded first streaming chunk", (
     },
   );
   assert.equal(chunkCheck.status, 0, chunkCheck.stderr);
+});
+
+test("kokoro stdin runner waits for first PCM before launching aplay", (t) => {
+  const python = spawnSync("python3", ["--version"], { encoding: "utf8" });
+  if (python.error) {
+    t.skip("python3 not available");
+    return;
+  }
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-kokoro-"));
+  try {
+    const binDir = path.join(root, "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    const eventsPath = path.join(root, "events.log");
+    const pcmPath = path.join(root, "audio.pcm");
+
+    fs.writeFileSync(
+      path.join(root, "kokoro_onnx.py"),
+      [
+        "import os",
+        "import time",
+        "from pathlib import Path",
+        "",
+        "def event(name):",
+        "    with open(os.environ['KOKORO_TEST_EVENTS'], 'a', encoding='utf8') as handle:",
+        "        handle.write(name + '\\n')",
+        "",
+        "class Kokoro:",
+        "    def __init__(self, model, voices):",
+        "        self.model = model",
+        "        self.voices = voices",
+        "",
+        "    def create(self, chunk, voice, speed, lang):",
+        "        event('create-start')",
+        "        time.sleep(0.05)",
+        "        event('create-end')",
+        "        import numpy as np",
+        "        return np.array([0.25, -0.25]), 24000",
+      ].join("\n") + "\n",
+    );
+    fs.writeFileSync(
+      path.join(root, "numpy.py"),
+      [
+        "class Array:",
+        "    def __init__(self, values):",
+        "        self.values = values",
+        "",
+        "    def __mul__(self, scalar):",
+        "        return Array([value * scalar for value in self.values])",
+        "",
+        "    def astype(self, dtype):",
+        "        return self",
+        "",
+        "    def tobytes(self):",
+        "        return b'\\x01\\x00\\xff\\xff'",
+        "",
+        "def array(values):",
+        "    return Array(values)",
+        "",
+        "def clip(samples, low, high):",
+        "    return samples",
+      ].join("\n") + "\n",
+    );
+
+    const fakeAplay = path.join(binDir, "aplay");
+    fs.writeFileSync(
+      fakeAplay,
+      [
+        "#!/usr/bin/env python3",
+        "import os",
+        "import sys",
+        "from pathlib import Path",
+        "",
+        "def event(name):",
+        "    with open(os.environ['KOKORO_TEST_EVENTS'], 'a', encoding='utf8') as handle:",
+        "        handle.write(name + '\\n')",
+        "",
+        "event('aplay-start:' + ' '.join(sys.argv[1:]))",
+        "data = sys.stdin.buffer.read()",
+        "Path(os.environ['KOKORO_TEST_PCM']).write_bytes(data)",
+        "event('aplay-bytes:' + str(len(data)))",
+      ].join("\n") + "\n",
+    );
+    fs.chmodSync(fakeAplay, 0o755);
+
+    const runner = path.join(__dirname, "bin", "kokoro_stdin.py");
+    const result = spawnSync("python3", [runner], {
+      encoding: "utf8",
+      input: "First sentence for playback. ".repeat(12),
+      env: {
+        ...process.env,
+        CODEX_LINUX_READ_ALOUD_KOKORO_MODEL: path.join(root, "model.onnx"),
+        CODEX_LINUX_READ_ALOUD_KOKORO_VOICES: path.join(root, "voices.bin"),
+        KOKORO_TEST_EVENTS: eventsPath,
+        KOKORO_TEST_PCM: pcmPath,
+        PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
+        PYTHONDONTWRITEBYTECODE: "1",
+        PYTHONPATH: root,
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+
+    const events = fs.readFileSync(eventsPath, "utf8").trim().split("\n");
+    const firstCreateEnd = events.indexOf("create-end");
+    const aplayStart = events.findIndex((line) => line.startsWith("aplay-start:"));
+    assert.notEqual(firstCreateEnd, -1, events);
+    assert.notEqual(aplayStart, -1, events);
+    assert.ok(firstCreateEnd < aplayStart, events.join("\n"));
+    assert.match(events[aplayStart], /--buffer-time=500000/);
+    assert.match(events[aplayStart], /--period-time=100000/);
+    assert.ok(events.filter((line) => line === "create-start").length > 1, events);
+    assert.ok(fs.statSync(pcmPath).size > 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("main handler stores a chosen Kokoro model folder", async () => {
@@ -829,11 +947,161 @@ test("general settings patch exports a dedicated read aloud settings page", () =
   assert.match(patched, /settings\.readAloud\.voice\.title/);
 });
 
+test("general settings patch exports read aloud from the current inner chunk", () => {
+  const source = [
+    "function $n(){return (0,$.jsxs)(vt,{children:[]})}",
+    "export{ir as i,rr as n,$n as r,Cr as t};",
+  ].join("");
+  const patched = twice(applyGeneralSettingsPatch, source);
+  assert.match(patched, /function codexLinuxReadAloudSettingsPage/);
+  assert.match(patched, /codexLinuxReadAloudSettingsPage as ReadAloudSettings/);
+  assert.match(patched, /export\{ir as i,rr as n,\$n as r,Cr as t,codexLinuxReadAloudSettingsPage as ReadAloudSettings\}/);
+});
+
+test("general settings patch follows current export map instead of stale Gn aliases", () => {
+  const source = [
+    'import{s as e}from"./src-BRBmN298.js";',
+    'import{t as xt}from"./settings-content-layout-Dm8iYKt_.js";',
+    'import{a as st,r as K,t as ct}from"./dropdown-CTBRoADH.js";',
+    'import{r as J}from"./settings-row-FLzCWFCC.js";',
+    'import{t as Tg}from"./toggle-Cl52yCxI.js";',
+    'import{i as M,l as N,s as P}from"./lib-MoKmYgcO.js";',
+    'import{t as F}from"./clsx-DF17mjDp.js";',
+    'import{n as I,y as L}from"./app-shell-state-Dq2x034T.js";',
+    'import{n as m}from"./vscode-api-DjORcpSo.js";',
+    'import{n as v,t as y}from"./jsx-runtime-CiQ1k8xo.js";',
+    'import{t as St}from"./sun-BbSktlDj.js";',
+    'import{a as U,i as W}from"./setting-storage-CwKZnsvR.js";',
+    'import{n as wt}from"./external-agent-import-step-CfOKFuct.js";',
+    "var Q=e(v(),1),$=y();",
+    "function Gn(){return (0,$.jsx)(K,{label:`Service tier`})}",
+    "function nr(){return (0,$.jsx)(J,{label:`General`})}",
+    "export{or as i,ar as n,nr as r,Tr as t};",
+  ].join("");
+  const patched = twice(applyGeneralSettingsPatch, source);
+  assert.match(patched, /codexLinuxReadAloudSettingsAliasesV2/);
+  assert.match(patched, /function codexLinuxReadAloudSettingsPage\(\)\{return\(0,\$\.jsx\)\(xt/);
+  assert.match(patched, /\(0,\$\.jsx\)\(J,\{label:l/);
+  assert.doesNotMatch(patched, /\(0,\$\.jsx\)\(K,\{label:l/);
+  assert.match(patched, /\(0,\$\.jsx\)\(Tg,\{checked:e===!0/);
+  assert.match(patched, /c=N\(\);/);
+  assert.match(patched, /\(0,\$\.jsx\)\(P,\{id:`settings\.general\.readAloud\.label`/);
+  assert.match(patched, /\(0,\$\.jsx\)\(P,\{id:`settings\.readAloud\.title`/);
+  assert.doesNotMatch(patched, /c=F\(\);/);
+  assert.doesNotMatch(patched, /\(0,\$\.jsx\)\(I,\{id:`settings\.(general\.readAloud|readAloud)\./);
+  assert.match(patched, /\(0,Q\.useState\)\(!1\)/);
+  assert.match(patched, /m\(`get-global-state`,\{params:\{key:"codex-linux-read-aloud-enabled"\}\}\)/);
+  assert.match(patched, /m\(`set-global-state`,\{params:\{key:"codex-linux-read-aloud-enabled",value:n\}\}\)/);
+  assert.match(patched, /m\(`set-global-state`,\{params:\{key:"codex-linux-read-aloud-kokoro-speed",value:t\}\}\)/);
+  assert.match(patched, /codexLinuxReadAloudChooseFolderLabel=c\.formatMessage/);
+  assert.doesNotMatch(patched, /m=c\.formatMessage/);
+  assert.doesNotMatch(patched, /set-setting|get-setting/);
+  assert.doesNotMatch(patched, /let e=S\(D\),t=F\(\),n=\{key:"codex-linux-read-aloud-enabled",default:!1\}/);
+  assert.doesNotMatch(patched, /U\(e,n,t\)/);
+  assert.doesNotMatch(patched, /function codexLinuxReadAloudSettingsPage\(\)\{return\(0,\$\.jsx\)\(St/);
+  assert.doesNotMatch(patched, /\(0,\$\.jsx\)\(W,\{electron:!0/);
+  assert.doesNotMatch(patched, /\(0,\$\.jsx\)\(wt,\{children:\(0,\$\.jsx\)\(codexLinuxReadAloudSettingsRow,\{\}\)\}/);
+  assert.doesNotMatch(patched, /function codexLinuxReadAloudSettingsPage\(\)\{return\(0,\$\.jsx\)\(pt/);
+  assert.doesNotMatch(patched, /\(0,\$\.jsx\)\(ht,\{children:\(0,\$\.jsx\)\(codexLinuxReadAloudSettingsRow/);
+  assert.ok(patched.indexOf("function codexLinuxReadAloudSettingsRow") > patched.indexOf("function Gn(){"));
+  assert.ok(patched.indexOf("function codexLinuxReadAloudSettingsRow") < patched.indexOf("function nr(){"));
+});
+
+test("general settings patch upgrades a stale current read aloud settings page", () => {
+  const source = [
+    'import{s as e}from"./src-BRBmN298.js";',
+    'import{t as xt}from"./settings-content-layout-Dm8iYKt_.js";',
+    'import{a as st,r as K,t as ct}from"./dropdown-CTBRoADH.js";',
+    'import{r as J}from"./settings-row-FLzCWFCC.js";',
+    'import{t as Tg}from"./toggle-Cl52yCxI.js";',
+    'import{i as M,l as N,s as P}from"./lib-MoKmYgcO.js";',
+    'import{t as F}from"./clsx-DF17mjDp.js";',
+    'import{n as I,y as L}from"./app-shell-state-Dq2x034T.js";',
+    'import{n as m}from"./vscode-api-DjORcpSo.js";',
+    'import{n as v,t as y}from"./jsx-runtime-CiQ1k8xo.js";',
+    'import{t as St}from"./sun-BbSktlDj.js";',
+    'import{a as U,i as W}from"./setting-storage-CwKZnsvR.js";',
+    'import{n as wt}from"./external-agent-import-step-CfOKFuct.js";',
+    "var Q=e(v(),1),$=y();",
+    "function Gn(){return (0,$.jsx)(K,{label:`Service tier`})}",
+    "function codexLinuxReadAloudPaceValue(e){return 1.05}function codexLinuxReadAloudSettingsRow(){return `codex-linux-read-aloud-enabled codex-linux-read-aloud-kokoro-speed settings.general.readAloud.chooseFolder settings.general.readAloud.help`}function codexLinuxReadAloudSettingsPage(){return(0,$.jsx)(St,{children:(0,$.jsx)(W,{electron:!0,children:(0,$.jsx)(wt,{children:(0,$.jsx)(codexLinuxReadAloudSettingsRow,{})})})})}",
+    "function nr(){return (0,$.jsx)(J,{label:`General`})}",
+    "export{or as i,ar as n,nr as r,Tr as t,codexLinuxReadAloudSettingsPage as ReadAloudSettings};",
+  ].join("");
+  const patched = twice(applyGeneralSettingsPatch, source);
+  assert.equal((patched.match(/function codexLinuxReadAloudSettingsRow/g) ?? []).length, 1);
+  assert.equal((patched.match(/function codexLinuxReadAloudSettingsPage/g) ?? []).length, 1);
+  assert.match(patched, /codexLinuxReadAloudSettingsAliasesV2/);
+  assert.match(patched, /function codexLinuxReadAloudSettingsPage\(\)\{return\(0,\$\.jsx\)\(xt/);
+  assert.match(patched, /c=N\(\);/);
+  assert.match(patched, /\(0,\$\.jsx\)\(P,\{id:`settings\.readAloud\.title`/);
+  assert.doesNotMatch(patched, /\(0,\$\.jsx\)\(St,\{children:\(0,\$\.jsx\)\(W/);
+});
+
+test("general settings patch refreshes a current read aloud row with a stale settings-row alias", () => {
+  const source = [
+    'import{s as e}from"./src-BRBmN298.js";',
+    'import{t as xt}from"./settings-content-layout-Dm8iYKt_.js";',
+    'import{a as st,r as K,t as ct}from"./dropdown-CTBRoADH.js";',
+    'import{r as J}from"./settings-row-FLzCWFCC.js";',
+    'import{t as Tg}from"./toggle-Cl52yCxI.js";',
+    'import{i as M,l as N,s as P}from"./lib-MoKmYgcO.js";',
+    'import{t as F}from"./clsx-DF17mjDp.js";',
+    'import{n as I,y as L}from"./app-shell-state-Dq2x034T.js";',
+    'import{n as m}from"./vscode-api-DjORcpSo.js";',
+    'import{n as v,t as y}from"./jsx-runtime-CiQ1k8xo.js";',
+    "var Q=e(v(),1),$=y();",
+    "function Gn(){return (0,$.jsx)(K,{label:`Service tier`})}",
+    "/*codexLinuxReadAloudSettingsAliasesV2*/function codexLinuxReadAloudPaceValue(e){return 1.05}function codexLinuxReadAloudSettingsRow(){let e=!0,l=`codex-linux-read-aloud-enabled`,d=`codex-linux-read-aloud-kokoro-speed`;return(0,$.jsxs)($.Fragment,{children:[(0,$.jsx)(K,{label:l,description:`settings.general.readAloud.chooseFolder settings.general.readAloud.help`,control:null}),e?(0,$.jsx)(K,{label:d,description:`settings.general.readAloud.help`,control:null}):null]})}function codexLinuxReadAloudSettingsPage(){return(0,$.jsx)(xt,{children:(0,$.jsx)(codexLinuxReadAloudSettingsRow,{})})}",
+    "function nr(){return (0,$.jsx)(J,{label:`General`})}",
+    "export{or as i,ar as n,nr as r,Tr as t,codexLinuxReadAloudSettingsPage as ReadAloudSettings};",
+  ].join("");
+  const patched = twice(applyGeneralSettingsPatch, source);
+  assert.equal((patched.match(/function codexLinuxReadAloudSettingsRow/g) ?? []).length, 1);
+  assert.equal((patched.match(/function codexLinuxReadAloudSettingsPage/g) ?? []).length, 1);
+  assert.equal((patched.match(/codexLinuxReadAloudSettingsAliasesV2/g) ?? []).length, 1);
+  assert.match(patched, /codexLinuxReadAloudSettingsAliasesV2/);
+  assert.match(patched, /\(0,\$\.jsx\)\(J,\{label:l/);
+  assert.doesNotMatch(patched, /\(0,\$\.jsx\)\(K,\{label:l/);
+  assert.match(patched, /\(0,\$\.jsx\)\(Tg,\{checked:e===!0/);
+  assert.match(patched, /c=N\(\);/);
+  assert.match(patched, /\(0,\$\.jsx\)\(P,\{id:`settings\.general\.readAloud\.label`/);
+  assert.doesNotMatch(patched, /c=F\(\);/);
+  assert.doesNotMatch(patched, /\(0,\$\.jsx\)\(I,\{id:`settings\.(general\.readAloud|readAloud)\./);
+  assert.match(patched, /codexLinuxReadAloudChooseFolderLabel=c\.formatMessage/);
+  assert.doesNotMatch(patched, /m=c\.formatMessage/);
+});
+
 test("general settings wrapper re-exports the read aloud settings page", () => {
   const source = 'import{r as e}from"./general-settings-Bvwhh0-i.js";export{e as GeneralSettings};';
   const patched = twice(applyGeneralSettingsWrapperPatch, source);
+  assert.match(
+    patched,
+    /import\{r as e,ReadAloudSettings as codexLinuxReadAloudSettings\}from"\.\/general-settings-Bvwhh0-i\.js"/,
+  );
+  assert.match(patched, /export\{e as GeneralSettings,codexLinuxReadAloudSettings as ReadAloudSettings\}/);
+  assert.doesNotMatch(patched, /e as GeneralSettings,e as ReadAloudSettings/);
+});
+
+test("general settings wrapper preserves an existing read aloud import", () => {
+  const source =
+    'import{r as e,ReadAloudSettings as t}from"./general-settings-CV9Safs7.js";export{e as GeneralSettings,t as ReadAloudSettings};';
+  const patched = twice(applyGeneralSettingsWrapperPatch, source);
+  assert.equal(patched, source);
   assert.match(patched, /ReadAloudSettings as t/);
-  assert.match(patched, /t as ReadAloudSettings/);
+  assert.doesNotMatch(patched, /e as GeneralSettings,e as ReadAloudSettings/);
+});
+
+test("general settings wrapper re-exports read aloud when side-effect imports split the wrapper", () => {
+  const source =
+    'import"./src-BRBmN298.js";import{r as e}from"./general-settings-DobuGNrH.js";import"./general-settings.search-BiUmOZih.js";export{e as GeneralSettings};';
+  const patched = twice(applyGeneralSettingsWrapperPatch, source);
+  assert.match(
+    patched,
+    /import\{r as e,ReadAloudSettings as codexLinuxReadAloudSettings\}from"\.\/general-settings-DobuGNrH\.js"/,
+  );
+  assert.match(patched, /import"\.\/general-settings\.search-BiUmOZih\.js";/);
+  assert.match(patched, /export\{e as GeneralSettings,codexLinuxReadAloudSettings as ReadAloudSettings\}/);
 });
 
 test("settings nav patches add a visible read aloud section after computer use", () => {
@@ -862,8 +1130,67 @@ test("settings nav patches add a visible read aloud section after computer use",
   assert.match(patchedPage, /"read-aloud-settings":codexLinuxReadAloudSettingsIcon/);
   assert.match(patchedPage, /`computer-use`,`read-aloud-settings`,`data-controls`/);
   assert.match(patchedPage, /`computer-use`,`read-aloud-settings`,`local-environments`/);
-  assert.match(patchedPage, /case`read-aloud-settings`:return a;case`computer-use`/);
+  assert.match(patchedPage, /case`read-aloud-settings`:return!0;case`computer-use`/);
   assert.match(patchedPage, /case`read-aloud-settings`:z=!1;break bb0;case`computer-use`/);
+});
+
+test("settings nav patch adds the read aloud icon to the current settings page icon map", () => {
+  const page = [
+    "var ge=f(),_e=e(r()),$=i(),ve=e=>(0,$.jsxs)(`svg`,{children:[]}),ye={\"general-settings\":q,profile:ee,\"keyboard-shortcuts\":ve,\"browser-use\":me,\"computer-use\":fe,\"local-environments\":pe,worktrees:K};",
+    "xe=[`browser-use`,`computer-use`,`data-controls`];",
+    "Se=[{slugs:[`browser-use`,`computer-use`,`local-environments`]}];",
+    "case`computer-use`:return A;",
+    "case`computer-use`:z=D.isLoading||h.isLoading;break bb0;",
+  ].join("");
+  const patched = twice(applySettingsPageNavPatch, page);
+  assert.match(patched, /codexLinuxReadAloudSettingsIcon=e=>\(0,\$\.jsxs\)/);
+  assert.doesNotMatch(patched, /codexLinuxReadAloudSettingsIcon=e=>\(0,Z\.jsxs\)/);
+  assert.match(
+    patched,
+    /"browser-use":me,"computer-use":fe,"read-aloud-settings":codexLinuxReadAloudSettingsIcon,"local-environments":pe/,
+  );
+  assert.match(patched, /`computer-use`,`read-aloud-settings`,`data-controls`/);
+  assert.match(patched, /case`read-aloud-settings`:return!0;case`computer-use`/);
+  assert.match(patched, /case`read-aloud-settings`:z=!1;break bb0;case`computer-use`/);
+});
+
+test("settings nav patch repairs stale hidden read aloud visibility gates", () => {
+  const source =
+    "case`profile`:return y;case`read-aloud-settings`:return a;case`computer-use`:return A;case`browser-use`:return L;";
+  const patched = twice(applySettingsPageNavPatch, source);
+  assert.equal(
+    patched,
+    "case`profile`:return y;case`read-aloud-settings`:return!0;case`computer-use`:return A;case`browser-use`:return L;",
+  );
+});
+
+test("settings nav patch adds read aloud visibility before drifted computer-use aliases", () => {
+  const source = "case`profile`:return b;case`computer-use`:return E;case`browser-use`:return D;";
+  const patched = twice(applySettingsPageNavPatch, source);
+  assert.equal(
+    patched,
+    "case`profile`:return b;case`read-aloud-settings`:return!0;case`computer-use`:return E;case`browser-use`:return D;",
+  );
+});
+
+test("settings nav patch defines the read aloud icon before var icon maps", () => {
+  const page = [
+    "var $=i();",
+    "var codexLinuxAgentWorkspaceSettingsIcon=e=>(0,$.jsxs)(`svg`,{children:[]});",
+    'var qe={"general-settings":I,profile:J,"browser-use":ke,"computer-use":De,"read-aloud-settings":codexLinuxReadAloudSettingsIcon,"local-environments":Oe,"agent-workspaces":codexLinuxAgentWorkspaceSettingsIcon,worktrees:q};',
+    "Ye=[`browser-use`,`computer-use`,`data-controls`];",
+    "Ze=[{slugs:[`browser-use`,`computer-use`,`local-environments`]}];",
+    "case`computer-use`:return A;",
+    "case`computer-use`:I=T.isLoading||g.isLoading;break bb0;",
+  ].join("");
+  const patched = twice(applySettingsPageNavPatch, page);
+  assert.match(patched, /var codexLinuxReadAloudSettingsIcon=e=>\(0,\$\.jsxs\)/);
+  assert.ok(
+    patched.indexOf("codexLinuxReadAloudSettingsIcon=e=>") <
+      patched.indexOf('"read-aloud-settings":codexLinuxReadAloudSettingsIcon'),
+  );
+  assert.match(patched, /case`read-aloud-settings`:return!0;case`computer-use`/);
+  assert.match(patched, /case`read-aloud-settings`:I=!1;break bb0;case`computer-use`/);
 });
 
 test("app route patch wires read aloud settings to the generated page export", () => {
@@ -1025,6 +1352,10 @@ test("settings asset patch creates a first-class read aloud settings section", (
     assert.match(
       fs.readFileSync(path.join(assets, "app-main-current.js"), "utf8"),
       /default:e\.ReadAloudSettings/,
+    );
+    assert.match(
+      fs.readFileSync(path.join(assets, "general-settings-wrapper.js"), "utf8"),
+      /export\{e as GeneralSettings,codexLinuxReadAloudSettings as ReadAloudSettings\}/,
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

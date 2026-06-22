@@ -118,47 +118,127 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+const JS_IDENT = "[A-Za-z_$][\\w$]*";
+
+function objectPropVar(objectSource, name, fallback) {
+  return objectSource.match(new RegExp(`(?:^|,)\\s*${escapeRegExp(name)}:(${JS_IDENT})(?:,|$)`))?.[1] ?? fallback;
+}
+
+function currentComposerBinding(source) {
+  const propsPattern = new RegExp(`\\{([^{}]*voiceControls:${JS_IDENT}[^{}]*)\\}\\s*=\\s*${JS_IDENT}`, "g");
+  for (const propsMatch of source.matchAll(propsPattern)) {
+    const propsObject = propsMatch[1];
+    const voiceControlsVar = objectPropVar(propsObject, "voiceControls", null);
+    if (voiceControlsVar == null) {
+      continue;
+    }
+    const requiredProps = ["conversationId", "isResponseInProgress", "onStop", "submitBlockReason"];
+    if (!requiredProps.every((name) => objectPropVar(propsObject, name, null) != null)) {
+      continue;
+    }
+    const voiceControlsPattern = new RegExp(
+      `\\{([^{}]*startDictation:[^{}]*stopDictation:[^{}]*threadRealtime:[^{}]*)\\}\\s*=\\s*${escapeRegExp(voiceControlsVar)}`,
+      "g",
+    );
+    voiceControlsPattern.lastIndex = propsMatch.index + propsMatch[0].length;
+    const voiceControlsMatch = voiceControlsPattern.exec(source);
+    if (voiceControlsMatch != null) {
+      return { propsObject, voiceControlsObject: voiceControlsMatch[1], voiceControlsVar };
+    }
+  }
+  return null;
+}
+
+function voiceControlsObjectVar(source) {
+  const currentBinding = currentComposerBinding(source);
+  if (currentBinding != null) {
+    return currentBinding.voiceControlsVar;
+  }
+  return source.match(/voiceControls:([A-Za-z_$][\w$]*)/)?.[1] ?? "z";
+}
+
 function voiceControlVar(source, name, fallback) {
-  const match = source.match(/\{([^{}]*startDictation:[^{}]*stopDictation:[^{}]*threadRealtime:[^{}]*)\}=z/);
+  const currentBinding = currentComposerBinding(source);
+  if (currentBinding != null) {
+    return objectPropVar(currentBinding.voiceControlsObject, name, fallback);
+  }
+  const voiceControlsVar = voiceControlsObjectVar(source);
+  const match = source.match(
+    new RegExp(`\\{([^{}]*startDictation:[^{}]*stopDictation:[^{}]*threadRealtime:[^{}]*)\\}=${escapeRegExp(voiceControlsVar)}`),
+  );
   if (!match) {
     return fallback;
   }
-  return match[1].match(new RegExp(`${name}:([A-Za-z_$][\\w$]*)`))?.[1] ?? fallback;
+  return objectPropVar(match[1], name, fallback);
+}
+
+function composerPropVar(source, name, fallback) {
+  const currentBinding = currentComposerBinding(source);
+  if (currentBinding == null) {
+    return fallback;
+  }
+  return objectPropVar(currentBinding.propsObject, name, fallback);
+}
+
+function isLegacyComposerControlShape(source) {
+  return (
+    new RegExp(`\\{\\s*voiceControls:${JS_IDENT}\\s*\\}\\s*=\\s*${JS_IDENT}`).test(source) &&
+    source.includes("F===`empty-message`&&!A") &&
+    source.includes("ue.isAvailable&&ue.phase!==`active`")
+  );
+}
+
+function composerPropVars(source) {
+  if (currentComposerBinding(source) == null && !isLegacyComposerControlShape(source)) {
+    return null;
+  }
+  return {
+    conversationId: composerPropVar(source, "conversationId", "v"),
+    isResponseInProgress: composerPropVar(source, "isResponseInProgress", "A"),
+    onStop: composerPropVar(source, "onStop", "P"),
+    submitBlockReason: composerPropVar(source, "submitBlockReason", "F"),
+  };
 }
 
 function composerVoiceVars(source) {
+  const startRealtimeConversation = voiceControlVar(source, "startRealtimeConversation", null);
   return {
     isDictating: voiceControlVar(source, "isDictating", "J"),
     isDictationSupported: voiceControlVar(source, "isDictationSupported", "q"),
     isTranscribing: voiceControlVar(source, "isTranscribing", "re"),
     isNewRealtimeConversationAvailable: voiceControlVar(source, "isNewRealtimeConversationAvailable", "J"),
     startDictation: voiceControlVar(source, "startDictation", "se"),
-    startNewRealtimeConversation: voiceControlVar(source, "startNewRealtimeConversation", "ce"),
+    startRealtimeConversation: startRealtimeConversation ?? "ce",
+    startNewRealtimeConversation: voiceControlVar(
+      source,
+      "startNewRealtimeConversation",
+      startRealtimeConversation ?? "ce",
+    ),
     stopDictation: voiceControlVar(source, "stopDictation", "le"),
     threadRealtime: voiceControlVar(source, "threadRealtime", "ue"),
   };
 }
 
-function composerSyncPayload(vars) {
+function composerSyncPayload(vars, props) {
   return [
-    "isResponseInProgress:A",
+    `isResponseInProgress:${props.isResponseInProgress}`,
     `isDictating:${vars.isDictating}`,
     `isTranscribing:${vars.isTranscribing}`,
     `startDictation:${vars.startDictation}`,
     `stopDictation:${vars.stopDictation}`,
-    "onStop:P",
+    `onStop:${props.onStop}`,
   ].join(",");
 }
 
-function composerTogglePayload(vars) {
+function composerTogglePayload(vars, props) {
   return [
-    "conversationId:v",
+    `conversationId:${props.conversationId}`,
     `startDictation:${vars.startDictation}`,
     `stopDictation:${vars.stopDictation}`,
-    "onStop:P",
+    `onStop:${props.onStop}`,
     `isDictating:${vars.isDictating}`,
     `isTranscribing:${vars.isTranscribing}`,
-    "isResponseInProgress:A",
+    `isResponseInProgress:${props.isResponseInProgress}`,
     `isDictationSupported:${vars.isDictationSupported}`,
   ].join(",");
 }
@@ -166,36 +246,73 @@ function composerTogglePayload(vars) {
 function applyComposerControlPatch(source) {
   let patched = source;
   const vars = composerVoiceVars(patched);
-  const visiblePattern =
-    /let Be=ze,Ve=F===`empty-message`&&!A&&\((?:globalThis\.codexLinuxConversationAvailable\?\.\(\)\|\|)?([A-Za-z_$][\w$]*)\.isAvailable&&\1\.phase!==`active`\|\|([A-Za-z_$][\w$]*)\),He=([A-Za-z_$][\w$]*)\(fc,`composer\.startVoiceMode`\)/;
-  const visibleMatch = patched.match(visiblePattern);
-  if (visibleMatch && !patched.includes("codexLinuxConversationSync?.(v")) {
-    const threadRealtime = visibleMatch[1];
-    const realtimeAvailable = visibleMatch[2] || vars.isNewRealtimeConversationAvailable;
-    const shortcutFn = visibleMatch[3];
-    patched = patched.replace(
-      visiblePattern,
-      `let Be=ze;globalThis.codexLinuxConversationSync?.(v,{${composerSyncPayload(vars)}});let codexLinuxConversationActive=globalThis.codexLinuxConversationIsActive?.(v)===!0,Ve=codexLinuxConversationActive||F===\`empty-message\`&&!A&&((v&&globalThis.codexLinuxConversationAvailable?.())||${threadRealtime}.isAvailable&&${threadRealtime}.phase!==\`active\`||${realtimeAvailable}),He=${shortcutFn}(fc,\`composer.startVoiceMode\`)`,
+  const props = composerPropVars(patched);
+  if (props == null) {
+    warn("Could not resolve composer prop aliases", "conversation mode composer control patch");
+  } else {
+    const visiblePattern = new RegExp(
+      `let (${JS_IDENT})=(${JS_IDENT}),(${JS_IDENT})=${escapeRegExp(props.submitBlockReason)}` +
+        '===`empty-message`' +
+        `&&!${escapeRegExp(props.isResponseInProgress)}&&\\((?:(${JS_IDENT})&&)?` +
+        `${escapeRegExp(vars.threadRealtime)}\\.isAvailable&&${escapeRegExp(vars.threadRealtime)}\\.phase!==` +
+        '`active`' +
+        `\\|\\|(${JS_IDENT})\\),(${JS_IDENT})=(${JS_IDENT})\\((${JS_IDENT}),` +
+        '`composer\\.startVoiceMode`' +
+        "\\)",
     );
-  } else if (!patched.includes("codexLinuxConversationSync?.(v")) {
-    warn("Could not find composer voice button visibility gate", "conversation mode composer control patch");
+    const visibleMatch = patched.match(visiblePattern);
+    if (visibleMatch && !patched.includes(`codexLinuxConversationSync?.(${props.conversationId}`)) {
+      const labelVar = visibleMatch[1];
+      const labelSrc = visibleMatch[2];
+      const visVar = visibleMatch[3];
+      const existingRealtimeAvailable = visibleMatch[4] == null ? "" : `${visibleMatch[4]}&&`;
+      const realtimeAvailable = visibleMatch[5] || vars.isNewRealtimeConversationAvailable;
+      const shortcutResultVar = visibleMatch[6];
+      const shortcutFn = visibleMatch[7];
+      const shortcutArg = visibleMatch[8];
+      patched = patched.replace(
+        visiblePattern,
+        `let ${labelVar}=${labelSrc};globalThis.codexLinuxConversationSync?.(${props.conversationId},{${composerSyncPayload(vars, props)}});let codexLinuxConversationActive=globalThis.codexLinuxConversationIsActive?.(${props.conversationId})===!0,${visVar}=codexLinuxConversationActive||${props.submitBlockReason}===\`empty-message\`&&!${props.isResponseInProgress}&&((${props.conversationId}&&globalThis.codexLinuxConversationAvailable?.())||${existingRealtimeAvailable}${vars.threadRealtime}.isAvailable&&${vars.threadRealtime}.phase!==\`active\`||${realtimeAvailable}),${shortcutResultVar}=${shortcutFn}(${shortcutArg},\`composer.startVoiceMode\`)`,
+      );
+    } else if (!patched.includes(`codexLinuxConversationSync?.(${props.conversationId}`)) {
+      warn("Could not find composer voice button visibility gate", "conversation mode composer control patch");
+    }
   }
 
   const threadRealtime = escapeRegExp(vars.threadRealtime);
   const startNewRealtimeConversation = escapeRegExp(vars.startNewRealtimeConversation);
-  const clickPattern = new RegExp(
+  const legacyClickPattern = new RegExp(
     `([A-Za-z_$][\\w$]*)=\\(\\)=>\\{if\\(${threadRealtime}\\.phase===\`starting\`\\|\\|${threadRealtime}\\.phase===\`active\`\\)\\{${threadRealtime}\\.stopRealtime\\(\\);return\\}if\\(${threadRealtime}\\.isAvailable\\)\\{${threadRealtime}\\.phase===\`inactive\`&&${threadRealtime}\\.startRealtime\\(\`composer_button_existing_thread\`\\);return\\}${startNewRealtimeConversation}\\(\\)\\}`,
   );
-  const togglePattern =
-    /codexLinuxConversationToggle\?\.\(\{conversationId:v,startDictation:[A-Za-z_$][\w$]*,stopDictation:[A-Za-z_$][\w$]*,onStop:P,isDictating:[A-Za-z_$][\w$]*,isTranscribing:[A-Za-z_$][\w$]*,isResponseInProgress:A,isDictationSupported:[A-Za-z_$][\w$]*\}\)/;
-  const toggleCall = `codexLinuxConversationToggle?.({${composerTogglePayload(vars)}})`;
-  if (clickPattern.test(patched)) {
-    patched = patched.replace(
-      clickPattern,
-      `$1=()=>{if(globalThis.${toggleCall})return;if(${vars.threadRealtime}.phase===\`starting\`||${vars.threadRealtime}.phase===\`active\`){${vars.threadRealtime}.stopRealtime();return}if(${vars.threadRealtime}.isAvailable){${vars.threadRealtime}.phase===\`inactive\`&&${vars.threadRealtime}.startRealtime(\`composer_button_existing_thread\`);return}${vars.startNewRealtimeConversation}()}`,
+  const currentStartRealtimeConversation = escapeRegExp(vars.startRealtimeConversation);
+  const currentClickPattern = new RegExp(
+    `([A-Za-z_$][\\w$]*)=\\(\\)=>\\{if\\(${threadRealtime}\\.phase===\`starting\`\\|\\|${threadRealtime}\\.phase===\`active\`\\)\\{${threadRealtime}\\.stopRealtime\\(\\);return\\}if\\(${threadRealtime}\\.isAvailable\\)\\{${threadRealtime}\\.phase===\`inactive\`&&${currentStartRealtimeConversation}\\(\\);return\\}${currentStartRealtimeConversation}\\(\\)\\}`,
+  );
+  const anyTogglePattern = new RegExp(
+    `codexLinuxConversationToggle\\?\\.\\(\\{conversationId:${JS_IDENT},startDictation:${JS_IDENT},stopDictation:${JS_IDENT},onStop:${JS_IDENT},isDictating:${JS_IDENT},isTranscribing:${JS_IDENT},isResponseInProgress:${JS_IDENT},isDictationSupported:${JS_IDENT}\\}\\)`,
+  );
+  if (props != null) {
+    const togglePattern = new RegExp(
+      `codexLinuxConversationToggle\\?\\.\\(\\{conversationId:${escapeRegExp(props.conversationId)},startDictation:${JS_IDENT},stopDictation:${JS_IDENT},onStop:${escapeRegExp(props.onStop)},isDictating:${JS_IDENT},isTranscribing:${JS_IDENT},isResponseInProgress:${escapeRegExp(props.isResponseInProgress)},isDictationSupported:${JS_IDENT}\\}\\)`,
     );
-  } else if (togglePattern.test(patched)) {
-    patched = patched.replace(togglePattern, toggleCall);
+    const toggleCall = `codexLinuxConversationToggle?.({${composerTogglePayload(vars, props)}})`;
+    if (legacyClickPattern.test(patched)) {
+      patched = patched.replace(
+        legacyClickPattern,
+        `$1=()=>{if(globalThis.${toggleCall})return;if(${vars.threadRealtime}.phase===\`starting\`||${vars.threadRealtime}.phase===\`active\`){${vars.threadRealtime}.stopRealtime();return}if(${vars.threadRealtime}.isAvailable){${vars.threadRealtime}.phase===\`inactive\`&&${vars.threadRealtime}.startRealtime(\`composer_button_existing_thread\`);return}${vars.startNewRealtimeConversation}()}`,
+      );
+    } else if (currentClickPattern.test(patched)) {
+      patched = patched.replace(
+        currentClickPattern,
+        `$1=()=>{if(globalThis.${toggleCall})return;if(${vars.threadRealtime}.phase===\`starting\`||${vars.threadRealtime}.phase===\`active\`){${vars.threadRealtime}.stopRealtime();return}if(${vars.threadRealtime}.isAvailable){${vars.threadRealtime}.phase===\`inactive\`&&${vars.startRealtimeConversation}();return}${vars.startRealtimeConversation}()}`,
+      );
+    } else if (togglePattern.test(patched)) {
+      patched = patched.replace(togglePattern, toggleCall);
+    } else if (anyTogglePattern.test(patched)) {
+      patched = patched.replace(anyTogglePattern, toggleCall);
+    } else if (!patched.includes("codexLinuxConversationToggle")) {
+      warn("Could not find composer voice button click handler", "conversation mode composer control patch");
+    }
   } else if (!patched.includes("codexLinuxConversationToggle")) {
     warn("Could not find composer voice button click handler", "conversation mode composer control patch");
   }
@@ -220,6 +337,14 @@ function applyComposerControlPatch(source) {
 }
 
 function applyDictationEndpointPatch(source) {
+  if (
+    !source.includes("global-dictation-record-history-item") &&
+    !source.includes("navigator.mediaDevices.getUserMedia({audio:{channelCount:1}})") &&
+    !source.includes("new MediaRecorder")
+  ) {
+    return source;
+  }
+
   let patched = source;
   const getUserMediaNeedle = "navigator.mediaDevices.getUserMedia({audio:{channelCount:1}})";
   if (patched.includes(getUserMediaNeedle)) {
@@ -227,27 +352,56 @@ function applyDictationEndpointPatch(source) {
       getUserMediaNeedle,
       "navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:!0,noiseSuppression:!0,autoGainControl:!0}})",
     );
+  } else {
+    const currentMicConstraintsPattern =
+      /([A-Za-z_$][\w$]*)=await ([A-Za-z_$][\w$]*)\(\{channelCount:1\}\)/u;
+    if (currentMicConstraintsPattern.test(patched)) {
+      patched = patched.replace(
+        currentMicConstraintsPattern,
+        "$1=await $2({channelCount:1,echoCancellation:!0,noiseSuppression:!0,autoGainControl:!0})",
+      );
+    }
   }
 
-  const cleanupNeedle = "r&&(r.ondataavailable=null,r.onstop=null),m.current=null,O();";
+  const cleanupNeedle = "r&&(r.ondataavailable=null,r.onstop=null),m.current=null,D();";
   if (!patched.includes("codexLinuxConversationCleanup?.()") && patched.includes(cleanupNeedle)) {
     patched = patched.replace(
       cleanupNeedle,
-      "r?.codexLinuxConversationCleanup?.(),r&&(r.ondataavailable=null,r.onstop=null),m.current=null,O();",
+      "r?.codexLinuxConversationCleanup?.(),r&&(r.ondataavailable=null,r.onstop=null),m.current=null,D();",
     );
   } else if (!patched.includes("codexLinuxConversationCleanup")) {
-    warn("Could not find dictation cleanup point", "conversation mode dictation endpoint patch");
+    const currentCleanupPattern =
+      /([A-Za-z_$][\w$]*)&&\(\1\.ondataavailable=null,\1\.onstop=null\),([A-Za-z_$][\w$]*)\.current=null,([A-Za-z_$][\w$]*)\(\);/u;
+    if (currentCleanupPattern.test(patched)) {
+      patched = patched.replace(
+        currentCleanupPattern,
+        "$1?.codexLinuxConversationCleanup?.(),$1&&($1.ondataavailable=null,$1.onstop=null),$2.current=null,$3();",
+      );
+    } else {
+      warn("Could not find dictation cleanup point", "conversation mode dictation endpoint patch");
+    }
   }
 
   const recorderNeedle =
-    "t.ondataavailable=e=>{e.data.size>0&&v.current.push(e.data)},t.onstop=()=>{M()},t.start(),l(!0)";
+    "t.ondataavailable=e=>{e.data.size>0&&g.current.push(e.data)},t.onstop=()=>{A()},t.start(),l(!0)";
   if (!patched.includes("codexLinuxConversationEndpoint?.(") && patched.includes(recorderNeedle)) {
     patched = patched.replace(
       recorderNeedle,
-      "t.ondataavailable=e=>{e.data.size>0&&v.current.push(e.data)},t.onstop=()=>{M()},t.codexLinuxConversationCleanup=globalThis.codexLinuxConversationEndpoint?.({stream:e,stop:()=>P(`send`),isActive:()=>m.current===t&&t.state!==`inactive`}),t.start(),l(!0)",
+      "t.ondataavailable=e=>{e.data.size>0&&g.current.push(e.data)},t.onstop=()=>{A()},t.codexLinuxConversationCleanup=globalThis.codexLinuxConversationEndpoint?.({stream:e,stop:()=>a(`send`),isActive:()=>m.current===t&&t.state!==`inactive`}),t.start(),l(!0)",
     );
   } else if (!patched.includes("codexLinuxConversationEndpoint")) {
-    warn("Could not find dictation recorder start point", "conversation mode dictation endpoint patch");
+    const currentActionRef = patched.match(/let [A-Za-z_$][\w$]*=([A-Za-z_$][\w$]*)\.current\?\?`insert`/)?.[1] ?? "w";
+    const currentRecorderPattern =
+      /let ([A-Za-z_$][\w$]*)=new MediaRecorder\(([A-Za-z_$][\w$]*)\);if\(([A-Za-z_$][\w$]*)\.current=\1,([A-Za-z_$][\w$]*)\.current=\[\],\1\.ondataavailable=([A-Za-z_$][\w$]*)=>\{\5\.data\.size>0&&\4\.current\.push\(\5\.data\)\},\1\.onstop=\(\)=>\{([A-Za-z_$][\w$]*)\(\)\},\1\.start\(\),([A-Za-z_$][\w$]*)\(!0\)/u;
+    if (currentRecorderPattern.test(patched)) {
+      patched = patched.replace(
+        currentRecorderPattern,
+        (_needle, recorderVar, streamVar, recorderRefVar, chunksRefVar, dataVar, finishFn, activeSetterVar) =>
+          `let ${recorderVar}=new MediaRecorder(${streamVar});if(${recorderRefVar}.current=${recorderVar},${chunksRefVar}.current=[],${recorderVar}.ondataavailable=${dataVar}=>{${dataVar}.data.size>0&&${chunksRefVar}.current.push(${dataVar}.data)},${recorderVar}.onstop=()=>{${finishFn}()},${recorderVar}.codexLinuxConversationCleanup=globalThis.codexLinuxConversationEndpoint?.({stream:${streamVar},stop:()=>{${currentActionRef}.current=\`send\`;${recorderVar}.state!==\`inactive\`&&${recorderVar}.stop()},isActive:()=>${recorderRefVar}.current===${recorderVar}&&${recorderVar}.state!==\`inactive\`}),${recorderVar}.start(),${activeSetterVar}(!0)`,
+      );
+    } else {
+      warn("Could not find dictation recorder start point", "conversation mode dictation endpoint patch");
+    }
   }
 
   const globalStopNeedle = "p.current!==e.sessionId||(p.current=null,o(`insert`))";
@@ -259,14 +413,23 @@ function applyDictationEndpointPatch(source) {
   }
 
   const transcriptSendNeedle =
-    "i.length>0&&(h.getInstance().dispatchMessage(`global-dictation-record-history-item`,{text:i}),e===`send`?n.onTranscriptSend(i):n.onTranscriptInsert(i))";
+    "i.length>0&&(j.getInstance().dispatchMessage(`global-dictation-record-history-item`,{text:i}),e===`send`?n.onTranscriptSend(i):n.onTranscriptInsert(i))";
   if (!patched.includes("codexLinuxConversationShouldSendTranscript") && patched.includes(transcriptSendNeedle)) {
     patched = patched.replace(
       transcriptSendNeedle,
-      "i.length>0&&e!==`discard`&&globalThis.codexLinuxConversationShouldSendTranscript?.(i,e)!==!1&&(h.getInstance().dispatchMessage(`global-dictation-record-history-item`,{text:i}),e===`send`?n.onTranscriptSend(i):n.onTranscriptInsert(i))",
+      "i.length>0&&e!==`discard`&&globalThis.codexLinuxConversationShouldSendTranscript?.(i,e)!==!1&&(j.getInstance().dispatchMessage(`global-dictation-record-history-item`,{text:i}),e===`send`?n.onTranscriptSend(i):n.onTranscriptInsert(i))",
     );
   } else if (!patched.includes("codexLinuxConversationShouldSendTranscript")) {
-    warn("Could not find dictation transcript send point", "conversation mode transcript dedupe patch");
+    const currentTranscriptPattern =
+      /([A-Za-z_$][\w$]*)\.length>0&&\(([A-Za-z_$][\w$]*)\.getInstance\(\)\.dispatchMessage\(`global-dictation-record-history-item`,\{text:\1\}\),([A-Za-z_$][\w$]*)===`send`\?([A-Za-z_$][\w$]*)\.onTranscriptSend\(\1\):\4\.onTranscriptInsert\(\1\)\)/u;
+    if (currentTranscriptPattern.test(patched)) {
+      patched = patched.replace(
+        currentTranscriptPattern,
+        "$1.length>0&&$3!==`discard`&&globalThis.codexLinuxConversationShouldSendTranscript?.($1,$3)!==!1&&($2.getInstance().dispatchMessage(`global-dictation-record-history-item`,{text:$1}),$3===`send`?$4.onTranscriptSend($1):$4.onTranscriptInsert($1))",
+      );
+    } else {
+      warn("Could not find dictation transcript send point", "conversation mode transcript dedupe patch");
+    }
   }
 
   return patched;
@@ -286,7 +449,7 @@ function applyAssistantRenderPatch(source) {
     return source;
   }
   const jsxCallPattern =
-    /\(0,([A-Za-z_$][\w$]*)\.jsx\)\(([A-Za-z_$][\w$]*),\{item:([A-Za-z_$][\w$]*),([^{}]*?)assistantCopyText:([A-Za-z_$][\w$]*),([^{}]*?)conversationId:([A-Za-z_$][\w$]*),([^{}]*?)renderCodeBlocksAsWritingBlocks:([A-Za-z_$][\w$]*)\}\)/g;
+    /\(0,([A-Za-z_$][\w$]*)\.jsx\)\(([A-Za-z_$][\w$]*),\{item:([A-Za-z_$][\w$]*),([^{}]*?)assistantCopyText:([A-Za-z_$][\w$]*),([^{}]*?)conversationId:([A-Za-z_$][\w$]*),[^{}]*?\}\)/g;
   const patched = source.replace(
     jsxCallPattern,
     (match, jsxVar, _component, itemVar, _beforeCopy, copyVar, _beforeConversation, conversationVar) =>
@@ -328,7 +491,7 @@ module.exports = {
       phase: "webview-asset",
       order: 20690,
       ciPolicy: "optional",
-      pattern: /^annotation-comment-editor-card-.*\.js$/,
+      pattern: /^(?:browser-sidebar-comment-light-dismiss|use-dictation(?!-hotkey))-.*\.js$/,
       missingDescription: "composer dictation bundle",
       skipDescription: "conversation mode dictation endpoint patch",
       apply: applyDictationEndpointPatch,
