@@ -19,9 +19,14 @@ const DEVICE_KEY_REQUIRE_NEEDLE =
 const REMOTE_CONTROL_VISIBILITY_NEEDLE =
   "function a({remoteControlConnectionsState:e,slingshotEnabled:t}){return t&&(e?.available??!0)&&e?.accessRequired!==!0}";
 const REMOTE_CONTROL_VISIBILITY_REPLACEMENT =
+  "function a({remoteControlConnectionsState:e,slingshotEnabled:t}){let n=typeof navigator!=`undefined`&&navigator.userAgent.includes(`Linux`);return n||t&&(e?.available??!0)&&e?.accessRequired!==!0}";
+const REMOTE_CONTROL_VISIBILITY_PREVIOUS_REPLACEMENT =
   "function a({remoteControlConnectionsState:e,slingshotEnabled:t}){let n=typeof navigator!=`undefined`&&navigator.userAgent.includes(`Linux`);return(n||t)&&(n||(e?.available??!0))&&e?.accessRequired!==!0}";
 const REMOTE_CONTROL_VISIBILITY_OLD_REPLACEMENT =
   "function a({remoteControlConnectionsState:e,slingshotEnabled:t}){let n=typeof navigator!=`undefined`&&navigator.userAgent.includes(`Linux`);return t&&(n||(e?.available??!0))&&e?.accessRequired!==!0}";
+const REMOTE_CONTROL_PROFILE_AVAILABILITY_MARKER = "codexLinuxRemoteControlProfileAvailability";
+const REMOTE_CONTROL_PROFILE_AVAILABILITY_NEEDLE =
+  /function ([A-Za-z_$][\w$]*)\(\{remoteControlConnectionsState:([A-Za-z_$][\w$]*),slingshotEnabled:([A-Za-z_$][\w$]*)\}\)\{let codexLinuxRemoteControlProfileAvailability=typeof navigator!=`undefined`&&navigator\.userAgent\.includes\(`Linux`\);return \3&&\(\2\?\.available\?\?!0\)&&\(codexLinuxRemoteControlProfileAvailability\|\|\2\?\.accessRequired!==!0\)\}/u;
 const REMOTE_CONTROL_SETTINGS_VISIBILITY_NEEDLE =
   /function ([A-Za-z_$][\w$]*)\(\{remoteControlConnectionsState:([A-Za-z_$][\w$]*),slingshotEnabled:([A-Za-z_$][\w$]*)\}\)\{return \3&&\(\2\?\.available\?\?!0\)(?:&&\2\?\.accessRequired!==!0)?\}/u;
 const REMOTE_CONTROL_SETTINGS_UX_MARKER = "codexLinuxRemoteControlSettingsTabs";
@@ -724,15 +729,31 @@ function applyLinuxRemoteControlFeatureSyncHostScopePatch(source) {
 }
 
 function applyLinuxRemoteControlVisibilityPatch(source) {
-  if (
-    source.includes(REMOTE_CONTROL_VISIBILITY_REPLACEMENT) ||
-    source.includes("remoteControlConnectionsState") &&
-      source.includes("navigator.userAgent.includes(`Linux`)")
-  ) {
+  if (source.includes(REMOTE_CONTROL_VISIBILITY_REPLACEMENT)) {
     return source;
+  }
+  if (source.includes(REMOTE_CONTROL_PROFILE_AVAILABILITY_MARKER)) {
+    const profileAvailabilityMatch = source.match(REMOTE_CONTROL_PROFILE_AVAILABILITY_NEEDLE);
+    if (profileAvailabilityMatch == null) {
+      return source;
+    }
+    const [, functionName, stateVar, slingshotVar] = profileAvailabilityMatch;
+    return source.replace(
+      REMOTE_CONTROL_PROFILE_AVAILABILITY_NEEDLE,
+      `function ${functionName}({remoteControlConnectionsState:${stateVar},slingshotEnabled:${slingshotVar}}){let n=typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`);return n||${slingshotVar}&&(${stateVar}?.available??!0)&&${stateVar}?.accessRequired!==!0}`,
+    );
+  }
+  if (source.includes(REMOTE_CONTROL_VISIBILITY_PREVIOUS_REPLACEMENT)) {
+    return source.replace(REMOTE_CONTROL_VISIBILITY_PREVIOUS_REPLACEMENT, REMOTE_CONTROL_VISIBILITY_REPLACEMENT);
   }
   if (source.includes(REMOTE_CONTROL_VISIBILITY_OLD_REPLACEMENT)) {
     return source.replace(REMOTE_CONTROL_VISIBILITY_OLD_REPLACEMENT, REMOTE_CONTROL_VISIBILITY_REPLACEMENT);
+  }
+  if (
+    source.includes("remoteControlConnectionsState") &&
+    source.includes("navigator.userAgent.includes(`Linux`)")
+  ) {
+    return source;
   }
   if (!source.includes(REMOTE_CONTROL_VISIBILITY_NEEDLE)) {
     if (!source.includes("remoteControlConnectionsState")) {
@@ -748,7 +769,7 @@ function applyLinuxRemoteControlVisibilityPatch(source) {
     const [, functionName, stateVar, slingshotVar] = settingsVisibilityMatch;
     return source.replace(
       REMOTE_CONTROL_SETTINGS_VISIBILITY_NEEDLE,
-      `function ${functionName}({remoteControlConnectionsState:${stateVar},slingshotEnabled:${slingshotVar}}){let n=typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`);return(n||${slingshotVar})&&(n||(${stateVar}?.available??!0))&&${stateVar}?.accessRequired!==!0}`,
+      `function ${functionName}({remoteControlConnectionsState:${stateVar},slingshotEnabled:${slingshotVar}}){let n=typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`);return n||${slingshotVar}&&(${stateVar}?.available??!0)&&${stateVar}?.accessRequired!==!0}`,
     );
   }
   return source.replace(REMOTE_CONTROL_VISIBILITY_NEEDLE, REMOTE_CONTROL_VISIBILITY_REPLACEMENT);

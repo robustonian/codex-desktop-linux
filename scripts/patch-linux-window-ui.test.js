@@ -67,6 +67,7 @@ const {
   applyLinuxProfiledRemoteControlAuthClientPatch,
   applyLinuxSetIconPatch,
   applyLinuxRemoteControlConfigPreservationPatch,
+  applyLinuxRemoteControlProfileAvailabilityPatch,
   applyLinuxSingleInstancePatch,
   applyLinuxTrayCloseSettingPatch,
   applyLinuxTrayPatch,
@@ -709,6 +710,7 @@ test("default core patch descriptors are grouped and unique", () => {
     "linux-local-app-server-feature-enablement-handler",
     "linux-remote-control-config-preservation",
     "linux-profiled-remote-control-auth-client",
+    "linux-remote-control-profile-availability",
     "linux-app-updater-menu",
     "linux-tray-close-setting",
     "linux-settings-persistence",
@@ -1477,6 +1479,52 @@ test("uses unprofiled auth client for remote control when a Codex profile wraps 
   assert.match(patched, /prodApiBaseUrl:e\.prodApiBaseUrl},codexLinuxDesktopAuthAppServerClient,this\.remoteControlDeviceKeyClient/);
   assert.match(patched, /this\.desktopAuthAppServerClient\?\?this\.getLocalAppServerClient\(\)/);
   assert.equal((patched.match(/CODEX_LINUX_PROFILED_CLI_PATH/g) ?? []).length, 2);
+});
+
+test("keeps remote-control connections visible on Linux when a profile app-server requires auth", () => {
+  const source =
+    "function dt({remoteControlConnectionsState:e,slingshotEnabled:t}){return t&&(e?.available??!0)&&e?.accessRequired!==!0}";
+
+  const patched = applyPatchTwice(
+    applyLinuxRemoteControlProfileAvailabilityPatch,
+    source,
+  );
+
+  assert.match(patched, /codexLinuxRemoteControlProfileAvailability/);
+  assert.match(
+    patched,
+    /return t&&\(e\?\.available\?\?!0\)&&\(codexLinuxRemoteControlProfileAvailability\|\|e\?\.accessRequired!==!0\)/,
+  );
+
+  const context = {
+    linuxResult: null,
+    macResult: null,
+    navigator: { userAgent: "Linux x86_64" },
+  };
+  vm.runInNewContext(
+    `${patched};linuxResult=dt({remoteControlConnectionsState:{available:true,accessRequired:true},slingshotEnabled:true});`,
+    context,
+  );
+  context.navigator = { userAgent: "Macintosh" };
+  vm.runInNewContext(
+    `${patched};macResult=dt({remoteControlConnectionsState:{available:true,accessRequired:true},slingshotEnabled:true});`,
+    context,
+  );
+
+  assert.equal(context.linuxResult, true);
+  assert.equal(context.macResult, false);
+});
+
+test("warns when the remote-control profile availability gate drifts", () => {
+  const source =
+    "function dt({remoteControlConnectionsState:e,slingshotEnabled:t}){return t&&e?.accessRequired!==!0}";
+
+  const { value, warnings } = captureWarns(() =>
+    applyLinuxRemoteControlProfileAvailabilityPatch(source),
+  );
+
+  assert.equal(value, source);
+  assert.match(warnings.join("\n"), /remote-control profile availability gate/);
 });
 
 test("registers local app-server feature enablement in internal and Electron handlers", () => {

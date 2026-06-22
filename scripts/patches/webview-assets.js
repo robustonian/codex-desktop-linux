@@ -868,6 +868,34 @@ function applyLinuxAppServerBackfillWaitPatch(currentSource) {
   return patchedSource;
 }
 
+function applyLinuxRemoteControlProfileAvailabilityPatch(currentSource) {
+  const marker = "codexLinuxRemoteControlProfileAvailability";
+  if (currentSource.includes(marker)) {
+    return currentSource;
+  }
+
+  const visibilityGateRegex =
+    /function ([A-Za-z_$][\w$]*)\(\{remoteControlConnectionsState:([A-Za-z_$][\w$]*),slingshotEnabled:([A-Za-z_$][\w$]*)\}\)\{return \3&&\(\2\?\.available\?\?!0\)&&\2\?\.accessRequired!==!0\}/u;
+  const match = currentSource.match(visibilityGateRegex);
+  if (match == null) {
+    if (
+      currentSource.includes("remoteControlConnectionsState") &&
+      currentSource.includes("accessRequired")
+    ) {
+      console.warn(
+        "WARN: Could not find remote-control profile availability gate — skipping Linux remote-control profile availability patch",
+      );
+    }
+    return currentSource;
+  }
+
+  const [, functionName, stateVar, slingshotVar] = match;
+  return currentSource.replace(
+    visibilityGateRegex,
+    `function ${functionName}({remoteControlConnectionsState:${stateVar},slingshotEnabled:${slingshotVar}}){let ${marker}=typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`);return ${slingshotVar}&&(${stateVar}?.available??!0)&&(${marker}||${stateVar}?.accessRequired!==!0)}`,
+  );
+}
+
 function applyLinuxI18nGatePatch(currentSource) {
   const alreadyPatchedI18nGateRegexes = [
     /([A-Za-z_$][\w$]*)=[^;]*?\.get\(`enable_i18n`,!1\)[^;]*;let [^;]*,([A-Za-z_$][\w$]*)=[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\.localeOverride\),[A-Za-z_$][\w$]*=\1\|\|\2!=null/u,
@@ -1827,6 +1855,7 @@ module.exports = {
   applyLinuxBrowserUseNonLocalNavigationPatch,
   applyLinuxConfigWriteVersionConflictPatch,
   applyLinuxI18nGatePatch,
+  applyLinuxRemoteControlProfileAvailabilityPatch,
   applyLinuxProfileSettingsMenuPatch,
   applyPersistentRateLimitFooterPatch,
   applyLinuxAppSunsetPatch,

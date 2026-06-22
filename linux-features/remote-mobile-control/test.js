@@ -1017,7 +1017,7 @@ test("Linux remote-control visibility patch allows Linux when upstream marks ava
 
   assert.notEqual(patched, source);
   assert.match(patched, /navigator\.userAgent\.includes\(`Linux`\)/);
-  assert.match(patched, /\(n\|\|t\)&&\(n\|\|\(e\?\.available\?\?!0\)\)&&e\?\.accessRequired!==!0/);
+  assert.match(patched, /return n\|\|t&&\(e\?\.available\?\?!0\)&&e\?\.accessRequired!==!0/);
   assert.equal(applyLinuxRemoteControlVisibilityPatch(patched), patched);
 });
 
@@ -1027,7 +1027,7 @@ test("Linux remote-control visibility patch handles current settings bundle shap
 
   assert.notEqual(patched, source);
   assert.match(patched, /navigator\.userAgent\.includes\(`Linux`\)/);
-  assert.match(patched, /return\(n\|\|t\)&&\(n\|\|\(e\?\.available\?\?!0\)\)&&e\?\.accessRequired!==!0/);
+  assert.match(patched, /return n\|\|t&&\(e\?\.available\?\?!0\)&&e\?\.accessRequired!==!0/);
   assert.equal(applyLinuxRemoteControlVisibilityPatch(patched), patched);
 });
 
@@ -1037,7 +1037,17 @@ test("Linux remote-control visibility patch handles current use-plugin gate shap
 
   assert.notEqual(patched, source);
   assert.match(patched, /navigator\.userAgent\.includes\(`Linux`\)/);
-  assert.match(patched, /return\(n\|\|t\)&&\(n\|\|\(e\?\.available\?\?!0\)\)&&e\?\.accessRequired!==!0/);
+  assert.match(patched, /return n\|\|t&&\(e\?\.available\?\?!0\)&&e\?\.accessRequired!==!0/);
+  assert.equal(applyLinuxRemoteControlVisibilityPatch(patched), patched);
+});
+
+test("Linux remote-control visibility patch upgrades the core profile availability gate", () => {
+  const source =
+    "function dt({remoteControlConnectionsState:e,slingshotEnabled:t}){let codexLinuxRemoteControlProfileAvailability=typeof navigator!=`undefined`&&navigator.userAgent.includes(`Linux`);return t&&(e?.available??!0)&&(codexLinuxRemoteControlProfileAvailability||e?.accessRequired!==!0)}";
+  const patched = applyLinuxRemoteControlVisibilityPatch(source);
+
+  assert.notEqual(patched, source);
+  assert.match(patched, /return n\|\|t&&\(e\?\.available\?\?!0\)&&e\?\.accessRequired!==!0/);
   assert.equal(applyLinuxRemoteControlVisibilityPatch(patched), patched);
 });
 
