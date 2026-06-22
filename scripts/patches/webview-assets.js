@@ -870,7 +870,20 @@ function applyLinuxAppServerBackfillWaitPatch(currentSource) {
 
 function applyLinuxRemoteControlProfileAvailabilityPatch(currentSource) {
   const marker = "codexLinuxRemoteControlProfileAvailability";
+  const patchedVisibilityGateRegex =
+    /function ([A-Za-z_$][\w$]*)\(\{remoteControlConnectionsState:([A-Za-z_$][\w$]*),slingshotEnabled:([A-Za-z_$][\w$]*)\}\)\{let codexLinuxRemoteControlProfileAvailability=typeof navigator!=`undefined`&&navigator\.userAgent\.includes\(`Linux`\);return \3&&\(\2\?\.available\?\?!0\)&&\(codexLinuxRemoteControlProfileAvailability\|\|\2\?\.accessRequired!==!0\)\}/u;
+  const buildReplacement = (functionName, stateVar, slingshotVar) =>
+    `function ${functionName}({remoteControlConnectionsState:${stateVar},slingshotEnabled:${slingshotVar}}){let ${marker}=typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`);return ${marker}||${slingshotVar}&&(${stateVar}?.available??!0)&&${stateVar}?.accessRequired!==!0}`;
+
   if (currentSource.includes(marker)) {
+    const patchedMatch = currentSource.match(patchedVisibilityGateRegex);
+    if (patchedMatch != null) {
+      const [, functionName, stateVar, slingshotVar] = patchedMatch;
+      return currentSource.replace(
+        patchedVisibilityGateRegex,
+        buildReplacement(functionName, stateVar, slingshotVar),
+      );
+    }
     return currentSource;
   }
 
@@ -892,7 +905,7 @@ function applyLinuxRemoteControlProfileAvailabilityPatch(currentSource) {
   const [, functionName, stateVar, slingshotVar] = match;
   return currentSource.replace(
     visibilityGateRegex,
-    `function ${functionName}({remoteControlConnectionsState:${stateVar},slingshotEnabled:${slingshotVar}}){let ${marker}=typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`);return ${slingshotVar}&&(${stateVar}?.available??!0)&&(${marker}||${stateVar}?.accessRequired!==!0)}`,
+    buildReplacement(functionName, stateVar, slingshotVar),
   );
 }
 

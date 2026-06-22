@@ -204,8 +204,9 @@ profile config from startup.
 When a profile points the local app-server at a custom model provider, Linux
 keeps remote-control authorization on the unprofiled Codex CLI so Codex Mobile
 can still use the existing ChatGPT sign-in. The Connections UI also ignores the
-profile app-server's ChatGPT-auth-required flag on Linux, since that flag can be
-set by custom-provider profiles even while the Desktop app is signed in.
+profile app-server's remote-control rollout, availability, and auth-required
+gates on Linux, since those gates can be disabled by custom-provider profiles
+even while the Desktop app is signed in.
 
 Use a local DMG:
 

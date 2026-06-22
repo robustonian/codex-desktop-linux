@@ -1481,7 +1481,7 @@ test("uses unprofiled auth client for remote control when a Codex profile wraps 
   assert.equal((patched.match(/CODEX_LINUX_PROFILED_CLI_PATH/g) ?? []).length, 2);
 });
 
-test("keeps remote-control connections visible on Linux when a profile app-server requires auth", () => {
+test("keeps remote-control connections visible on Linux when a profile app-server disables the gate", () => {
   const source =
     "function dt({remoteControlConnectionsState:e,slingshotEnabled:t}){return t&&(e?.available??!0)&&e?.accessRequired!==!0}";
 
@@ -1493,16 +1493,17 @@ test("keeps remote-control connections visible on Linux when a profile app-serve
   assert.match(patched, /codexLinuxRemoteControlProfileAvailability/);
   assert.match(
     patched,
-    /return t&&\(e\?\.available\?\?!0\)&&\(codexLinuxRemoteControlProfileAvailability\|\|e\?\.accessRequired!==!0\)/,
+    /return codexLinuxRemoteControlProfileAvailability\|\|t&&\(e\?\.available\?\?!0\)&&e\?\.accessRequired!==!0/,
   );
 
   const context = {
     linuxResult: null,
     macResult: null,
+    macAllowedResult: null,
     navigator: { userAgent: "Linux x86_64" },
   };
   vm.runInNewContext(
-    `${patched};linuxResult=dt({remoteControlConnectionsState:{available:true,accessRequired:true},slingshotEnabled:true});`,
+    `${patched};linuxResult=dt({remoteControlConnectionsState:{available:false,accessRequired:true},slingshotEnabled:false});`,
     context,
   );
   context.navigator = { userAgent: "Macintosh" };
@@ -1510,9 +1511,29 @@ test("keeps remote-control connections visible on Linux when a profile app-serve
     `${patched};macResult=dt({remoteControlConnectionsState:{available:true,accessRequired:true},slingshotEnabled:true});`,
     context,
   );
+  vm.runInNewContext(
+    `${patched};macAllowedResult=dt({remoteControlConnectionsState:{available:true,accessRequired:false},slingshotEnabled:true});`,
+    context,
+  );
 
   assert.equal(context.linuxResult, true);
   assert.equal(context.macResult, false);
+  assert.equal(context.macAllowedResult, true);
+});
+
+test("upgrades the earlier Linux remote-control profile availability patch", () => {
+  const source =
+    "function dt({remoteControlConnectionsState:e,slingshotEnabled:t}){let codexLinuxRemoteControlProfileAvailability=typeof navigator!=`undefined`&&navigator.userAgent.includes(`Linux`);return t&&(e?.available??!0)&&(codexLinuxRemoteControlProfileAvailability||e?.accessRequired!==!0)}";
+
+  const patched = applyPatchTwice(
+    applyLinuxRemoteControlProfileAvailabilityPatch,
+    source,
+  );
+
+  assert.match(
+    patched,
+    /return codexLinuxRemoteControlProfileAvailability\|\|t&&\(e\?\.available\?\?!0\)&&e\?\.accessRequired!==!0/,
+  );
 });
 
 test("warns when the remote-control profile availability gate drifts", () => {
