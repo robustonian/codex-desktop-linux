@@ -229,6 +229,12 @@ dpkg-query -W -f='${Version}\n' codex-desktop
 cat /opt/codex-desktop/.codex-linux/build-info.json
 ```
 
+Or compare `/opt/codex-desktop` against a built artifact directly:
+
+```bash
+bash scripts/verify-installed.sh
+```
+
 The package version and build metadata under `/opt/codex-desktop` must match
 the artifact you just built. If they do not, the running app is still using an
 older Linux wrapper even when the upstream Codex App version is unchanged.
