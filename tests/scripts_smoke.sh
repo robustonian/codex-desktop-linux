@@ -3104,10 +3104,14 @@ if 'configure_codex_profile_cli_path\nexport_packaged_runtime_env' not in runtim
 profile_wrapper_body = source.split("configure_codex_profile_cli_path() {", 1)[1].split("is_interactive_terminal() {", 1)[0]
 if 'if codex_args_allow_profile "$@"; then' not in profile_wrapper_body:
     raise SystemExit("profile wrapper must filter CLI commands before injecting --profile")
-if 'login|logout|plugin|mcp-server|remote-control|completion|update|doctor|apply|a|cloud|exec-server|features|help|version)' not in profile_wrapper_body:
+if 'login|logout|plugin|mcp-server|app-server|remote-control|completion|update|doctor|apply|a|cloud|exec-server|features|help|version)' not in profile_wrapper_body:
     raise SystemExit("profile wrapper must leave Codex management commands unprofiled")
 if 'exec "$CODEX_LINUX_PROFILED_CLI_PATH" --profile "$CODEX_LINUX_CODEX_PROFILE" "$@"' not in profile_wrapper_body:
     raise SystemExit("profile wrapper must still invoke runtime CLI commands with --profile")
+if 'codex_exec_app_server_with_profile_overrides "$@"' not in profile_wrapper_body:
+    raise SystemExit("profile wrapper must translate profiles into app-server config overrides")
+if 'exec "$CODEX_LINUX_PROFILED_CLI_PATH" "${profile_config_args[@]}" "$@"' not in profile_wrapper_body:
+    raise SystemExit("profile wrapper must invoke app-server with profile config overrides")
 if 'exec "$CODEX_LINUX_PROFILED_CLI_PATH" "$@"' not in profile_wrapper_body:
     raise SystemExit("profile wrapper must pass unsupported profile commands through unmodified")
 if 'CODEX_CLI_PATH="$wrapper_path"' not in profile_wrapper_body:
@@ -3545,10 +3549,21 @@ test_launcher_profile_wrapper_filters_cli_commands() {
     local workspace="$TMP_DIR/profile-wrapper"
     local wrapper="$workspace/codex-wrapper"
     local real_cli="$workspace/real-codex"
+    local fake_codex_home="$workspace/codex-home"
     local log="$workspace/argv.log"
+    local app_server_profile_args
     local output
 
-    mkdir -p "$workspace"
+    mkdir -p "$workspace" "$fake_codex_home"
+    cat > "$fake_codex_home/desktop_fugu.config.toml" <<'TOML'
+model = "fugu-ultra"
+model_provider = "sakana"
+
+[model_providers.sakana]
+base_url = "http://127.0.0.1:4000/v1"
+stream_max_retries = 5
+TOML
+    app_server_profile_args='<-c> <model="fugu-ultra"> <-c> <model_provider="sakana"> <-c> <model_providers.sakana.base_url="http://127.0.0.1:4000/v1"> <-c> <model_providers.sakana.stream_max_retries=5>'
     python3 - "$REPO_DIR/launcher/start.sh.template" "$wrapper" <<'PY'
 import sys
 
@@ -3582,6 +3597,7 @@ SCRIPT
         CODEX_LINUX_PROFILED_CLI_PATH="$real_cli" \
             CODEX_LINUX_CODEX_PROFILE="desktop_fugu" \
             CODEX_PROFILE_WRAPPER_LOG="$log" \
+            CODEX_HOME="$fake_codex_home" \
             "$wrapper" "$@"
         cat "$log"
     }
@@ -3610,9 +3626,9 @@ SCRIPT
     output="$(run_profile_wrapper_case plugin list)"
     [ "$output" = "<plugin> <list>" ] || fail "plugin should not receive profile: $output"
     output="$(run_profile_wrapper_case app-server daemon version)"
-    [ "$output" = "<--profile> <desktop_fugu> <app-server> <daemon> <version>" ] || fail "app-server should receive profile: $output"
+    [ "$output" = "$app_server_profile_args <app-server> <daemon> <version>" ] || fail "app-server should receive profile config overrides: $output"
     output="$(run_profile_wrapper_case -c model=\"gpt-5\" app-server daemon version)"
-    [ "$output" = "<--profile> <desktop_fugu> <-c> <model=\"gpt-5\"> <app-server> <daemon> <version>" ] || fail "app-server after top-level config should receive profile: $output"
+    [ "$output" = "$app_server_profile_args <-c> <model=\"gpt-5\"> <app-server> <daemon> <version>" ] || fail "app-server after top-level config should receive profile config overrides: $output"
     output="$(run_profile_wrapper_case debug app-server)"
     [ "$output" = "<debug> <app-server>" ] || fail "debug commands other than prompt-input should not receive profile: $output"
     output="$(run_profile_wrapper_case --version)"
