@@ -221,6 +221,18 @@ make package
 make install
 ```
 
+Verify the installed native package when testing Linux wrapper changes. On
+Debian-based systems:
+
+```bash
+dpkg-query -W -f='${Version}\n' codex-desktop
+cat /opt/codex-desktop/.codex-linux/build-info.json
+```
+
+The package version and build metadata under `/opt/codex-desktop` must match
+the artifact you just built. If they do not, the running app is still using an
+older Linux wrapper even when the upstream Codex App version is unchanged.
+
 Build a specific artifact:
 
 ```bash
