@@ -1536,6 +1536,82 @@ test("upgrades the earlier Linux remote-control profile availability patch", () 
   );
 });
 
+test("keeps remote-control settings tabs visible on Linux when the profile app-server disables the section", () => {
+  const source = [
+    "let T=U(`782640499`),Ne=Xe(),X=!T,Pe=k==null;",
+    "let Ge=P?.authRequired===!0,qe=P?.clientAuthorized===!0;",
+    "let Je=br({remoteControlConnectionsAuthorized:qe,remoteControlConnectionsAuthRequired:Ge,showRemoteControlConnectionsSection:Ne});",
+    "let nt=Ne&&!0,rt=X&&(Ne||!1),it=Ne&&!0;",
+    "let ft=Ze({selectedConnectionsTab:ot,showControlOtherDevices:X,showControlThisMacTab:nt,showRemoteControlConnectionsSection:Ne,showRemoteSshConnections:!0,showTabbedSshPage:it});",
+    "let hn=[...nt?pn:[],...rt?fn:[],...mn];",
+    "let marker=`remote_control_connections_state`;",
+  ].join("");
+
+  const patched = applyPatchTwice(
+    applyLinuxRemoteControlProfileAvailabilityPatch,
+    source,
+  );
+
+  assert.match(patched, /codexLinuxRemoteControlProfileTabsAvailable/);
+  assert.match(patched, /Ne=codexLinuxRemoteControlProfileTabsAvailable\(Xe\(\)\),X=codexLinuxRemoteControlProfileTabsAvailable\(!T\)/);
+
+  const runPatched = (userAgent) => {
+    const context = {
+      U: () => true,
+      Xe: () => false,
+      br: ({ showRemoteControlConnectionsSection }) =>
+        showRemoteControlConnectionsSection,
+      Ze: (value) => value,
+      k: null,
+      P: {},
+      ot: "control-this-mac",
+      pn: [{ key: "control-this-mac" }],
+      fn: [{ key: "access-other-devices" }],
+      mn: [{ key: "ssh" }],
+      result: null,
+      navigator: { userAgent },
+    };
+    vm.runInNewContext(
+      `${patched};result={Ne,X,nt,rt,it,tabKeys:hn.map((tab)=>tab.key),ft};`,
+      context,
+    );
+    return JSON.parse(JSON.stringify(context.result));
+  };
+
+  assert.deepEqual(runPatched("Linux x86_64"), {
+    Ne: true,
+    X: true,
+    nt: true,
+    rt: true,
+    it: true,
+    tabKeys: ["control-this-mac", "access-other-devices", "ssh"],
+    ft: {
+      selectedConnectionsTab: "control-this-mac",
+      showControlOtherDevices: true,
+      showControlThisMacTab: true,
+      showRemoteControlConnectionsSection: true,
+      showRemoteSshConnections: true,
+      showTabbedSshPage: true,
+    },
+  });
+  assert.deepEqual(runPatched("Macintosh"), {
+    Ne: false,
+    X: false,
+    nt: false,
+    rt: false,
+    it: false,
+    tabKeys: ["ssh"],
+    ft: {
+      selectedConnectionsTab: "control-this-mac",
+      showControlOtherDevices: false,
+      showControlThisMacTab: false,
+      showRemoteControlConnectionsSection: false,
+      showRemoteSshConnections: true,
+      showTabbedSshPage: false,
+    },
+  });
+});
+
 test("warns when the remote-control profile availability gate drifts", () => {
   const source =
     "function dt({remoteControlConnectionsState:e,slingshotEnabled:t}){return t&&e?.accessRequired!==!0}";

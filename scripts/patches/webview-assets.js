@@ -870,10 +870,33 @@ function applyLinuxAppServerBackfillWaitPatch(currentSource) {
 
 function applyLinuxRemoteControlProfileAvailabilityPatch(currentSource) {
   const marker = "codexLinuxRemoteControlProfileAvailability";
+  const settingsMarker = "codexLinuxRemoteControlProfileTabsAvailable";
   const patchedVisibilityGateRegex =
     /function ([A-Za-z_$][\w$]*)\(\{remoteControlConnectionsState:([A-Za-z_$][\w$]*),slingshotEnabled:([A-Za-z_$][\w$]*)\}\)\{let codexLinuxRemoteControlProfileAvailability=typeof navigator!=`undefined`&&navigator\.userAgent\.includes\(`Linux`\);return \3&&\(\2\?\.available\?\?!0\)&&\(codexLinuxRemoteControlProfileAvailability\|\|\2\?\.accessRequired!==!0\)\}/u;
+  const settingsTabsGateRegex =
+    /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\),([A-Za-z_$][\w$]*)=!([A-Za-z_$][\w$]*)(?=,[\s\S]*?showRemoteControlConnectionsSection:\1)/u;
   const buildReplacement = (functionName, stateVar, slingshotVar) =>
     `function ${functionName}({remoteControlConnectionsState:${stateVar},slingshotEnabled:${slingshotVar}}){let ${marker}=typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`);return ${marker}||${slingshotVar}&&(${stateVar}?.available??!0)&&${stateVar}?.accessRequired!==!0}`;
+
+  if (currentSource.includes(settingsMarker)) {
+    return currentSource;
+  }
+
+  const settingsTabsMatch = currentSource.match(settingsTabsGateRegex);
+  if (
+    settingsTabsMatch != null &&
+    currentSource.includes("remote_control_connections_state") &&
+    currentSource.includes("showRemoteControlConnectionsSection")
+  ) {
+    const [, sectionVar, sectionFn, otherDevicesVar, otherDevicesGateVar] =
+      settingsTabsMatch;
+    const settingsHelper =
+      `function ${settingsMarker}(e){return typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`)?!0:e}`;
+    return `${currentSource.replace(
+      settingsTabsGateRegex,
+      `${sectionVar}=${settingsMarker}(${sectionFn}()),${otherDevicesVar}=${settingsMarker}(!${otherDevicesGateVar})`,
+    )}${settingsHelper}`;
+  }
 
   if (currentSource.includes(marker)) {
     const patchedMatch = currentSource.match(patchedVisibilityGateRegex);
