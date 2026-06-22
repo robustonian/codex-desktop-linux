@@ -162,12 +162,74 @@ function applyLinuxReadyToShowWindowStatePatch(currentSource) {
   return currentSource;
 }
 
+// Newer bundles (app 26.609+ / Electron 42 era) decide window opacity with a
+// surface-color helper keyed on `opaqueWindowSurfaceEnabled` plus a
+// `BrowserWindow.isSystemBackdropSupported` capability probe. Linux supports
+// neither mica nor vibrancy, so report the backdrop as unsupported (which
+// forces the opaque window surface and tells the renderer to paint opaque
+// chrome) and add an opaque Linux fallback color to the surface helper.
+function applyLinuxOpaqueSurfaceShapePatch(currentSource) {
+  const surfaceColorFuncRegex =
+    /function\s+[A-Za-z_$][\w$]*\(\{platform:([A-Za-z_$][\w$]*),appearance:([A-Za-z_$][\w$]*),opaqueWindowSurfaceEnabled:([A-Za-z_$][\w$]*),prefersDarkColors:([A-Za-z_$][\w$]*)\}\)\{return\s*\3\?\{backgroundColor:\4\?([A-Za-z_$][\w$]*):([A-Za-z_$][\w$]*),backgroundMaterial:\1===`win32`\?`none`:null\}:\1===`win32`&&!([A-Za-z_$][\w$]*)\(\2\)\?\{backgroundColor:([A-Za-z_$][\w$]*),backgroundMaterial:`mica`\}:\{backgroundColor:\8,backgroundMaterial:null\}\}/;
+  const surfaceColorMatch = currentSource.match(surfaceColorFuncRegex);
+  if (surfaceColorMatch == null) {
+    return null;
+  }
+
+  const [
+    surfaceFuncText,
+    platformParam,
+    appearanceParam,
+    ,
+    prefersDarkParam,
+    darkVar,
+    lightVar,
+    transparentAppearancePredicate,
+    transparentVar,
+  ] = surfaceColorMatch;
+  const fallbackNeedle = `:{backgroundColor:${transparentVar},backgroundMaterial:null}}`;
+  const linuxBranch =
+    `:${platformParam}===\`linux\`&&!${transparentAppearancePredicate}(${appearanceParam})?{backgroundColor:${prefersDarkParam}?${darkVar}:${lightVar},backgroundMaterial:null}`;
+  let patchedSource = currentSource.replace(
+    surfaceFuncText,
+    surfaceFuncText.slice(0, surfaceFuncText.length - fallbackNeedle.length) +
+      linuxBranch +
+      fallbackNeedle,
+  );
+
+  const backdropSupportRegex =
+    /function\s+([A-Za-z_$][\w$]*)\(\)\{return typeof ([A-Za-z_$][\w$]*)\.BrowserWindow\.isSystemBackdropSupported==`function`\?\2\.BrowserWindow\.isSystemBackdropSupported\(\):!0\}/;
+  const backdropMatch = patchedSource.match(backdropSupportRegex);
+  if (backdropMatch != null) {
+    const [backdropText, backdropFn, electronVar] = backdropMatch;
+    patchedSource = patchedSource.replace(
+      backdropText,
+      `function ${backdropFn}(){return process.platform===\`linux\`?!1:typeof ${electronVar}.BrowserWindow.isSystemBackdropSupported==\`function\`?${electronVar}.BrowserWindow.isSystemBackdropSupported():!0}`,
+    );
+  } else if (
+    !/===`linux`\?!1:typeof [A-Za-z_$][\w$]*\.BrowserWindow\.isSystemBackdropSupported/.test(
+      patchedSource,
+    )
+  ) {
+    console.warn(
+      "WARN: Could not find system backdrop support probe — Linux window chrome may stay translucent",
+    );
+  }
+
+  return patchedSource;
+}
+
 function applyLinuxOpaqueBackgroundPatch(currentSource) {
   if (
     currentSource.includes("===`linux`&&!OM(") ||
     /===`linux`&&![A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\)\?\{backgroundColor:[^{}]+,backgroundMaterial:null\}/.test(currentSource)
   ) {
     return currentSource;
+  }
+
+  const surfaceShapeResult = applyLinuxOpaqueSurfaceShapePatch(currentSource);
+  if (surfaceShapeResult != null) {
+    return surfaceShapeResult;
   }
 
   const colorConstRegex =

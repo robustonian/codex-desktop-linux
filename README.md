@@ -321,6 +321,18 @@ CODEX_MULTI_LAUNCH_PORT_RANGE=5175-5199 ./codex-app/start.sh --new-instance
 CODEX_MULTI_LAUNCH=1 CODEX_MULTI_LAUNCH_PORT_RANGE=5175-5199 ./codex-app/start.sh
 ```
 
+To start Codex Desktop through a named Codex CLI profile, pass `--profile NAME`
+or `-p NAME`:
+
+```bash
+./codex-app/start.sh --profile desktop_fugu
+```
+
+Profile launches are automatically separate instances so an already-running
+default app does not absorb the request through warm-start. The profile name is
+passed to the underlying CLI as `codex --profile NAME`, so it uses the same
+config overlay as CLI commands, such as `~/.codex/desktop_fugu.config.toml`.
+
 ## Auto-update Manager
 
 By default, the native package installs a companion `systemd --user` service named `codex-update-manager`.

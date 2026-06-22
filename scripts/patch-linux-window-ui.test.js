@@ -79,6 +79,8 @@ const opaqueBackgroundBundleWithDriftingGw =
   "var cM=`#00000000`,lM=`#000000`,uM=`#f9f9f9`;function OM(e){return e===`avatarOverlay`||e===`browserCommentPopup`}function jM({platform:e,appearance:t,opaqueWindowsEnabled:n,prefersDarkColors:r}){return e===`win32`&&!OM(t)?n?{backgroundColor:r?lM:uM,backgroundMaterial:`none`}:{backgroundColor:cM,backgroundMaterial:`mica`}:{backgroundColor:cM,backgroundMaterial:null}}function gw(e){return e.page==null?e.snapshot.url:mw(e.page)}";
 const currentOpaqueBackgroundBundle =
   "var QK=`#00000000`,$K=`#000000`,eq=`#f9f9f9`;function vq(e){return e===`avatarOverlay`||e===`browserCommentPopup`||e===`globalDictation`||e===`hotkeyWindowHome`||e===`hotkeyWindowThread`}function xq({platform:e,appearance:t,opaqueWindowsEnabled:n,prefersDarkColors:r}){return n&&!vq(t)&&(e===`darwin`||e===`win32`)?{backgroundColor:r?$K:eq,backgroundMaterial:e===`win32`?`none`:null}:e===`win32`&&!vq(t)?{backgroundColor:QK,backgroundMaterial:`mica`}:{backgroundColor:QK,backgroundMaterial:null}}";
+const surfaceShapeOpaqueBackgroundBundle =
+  "var Z3=`#00000000`,Q3=`#000000`,$3=`#f9f9f9`;function C6(e){return e===`avatarOverlay`||e===`browserCommentPopup`||e===`globalDictation`||e===`hotkeyWindowHome`||e===`hotkeyWindowThread`}function k6({platform:e,appearance:t,opaqueWindowSurfaceEnabled:n,prefersDarkColors:r}){return n?{backgroundColor:r?Q3:$3,backgroundMaterial:e===`win32`?`none`:null}:e===`win32`&&!C6(t)?{backgroundColor:Z3,backgroundMaterial:`mica`}:{backgroundColor:Z3,backgroundMaterial:null}}function Xj(){return typeof n.BrowserWindow.isSystemBackdropSupported==`function`?n.BrowserWindow.isSystemBackdropSupported():!0}";
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -826,6 +828,22 @@ test("patches current BrowserWindow background helper shape for Linux opaque bac
     /:e===`linux`&&!vq\(t\)\?\{backgroundColor:r\?\$K:eq,backgroundMaterial:null\}:e===`win32`&&!vq\(t\)\?/,
   );
   assert.match(patched, /vq\(e\).*hotkeyWindowThread/);
+});
+
+test("patches opaque window surface helper shape for Linux opaque backgrounds", () => {
+  const patched = applyPatchTwice(
+    applyLinuxOpaqueBackgroundPatch,
+    surfaceShapeOpaqueBackgroundBundle,
+  );
+
+  assert.match(
+    patched,
+    /:e===`linux`&&!C6\(t\)\?\{backgroundColor:r\?Q3:\$3,backgroundMaterial:null\}:\{backgroundColor:Z3,backgroundMaterial:null\}\}/,
+  );
+  assert.match(
+    patched,
+    /function Xj\(\)\{return process\.platform===`linux`\?!1:typeof n\.BrowserWindow\.isSystemBackdropSupported==`function`\?n\.BrowserWindow\.isSystemBackdropSupported\(\):!0\}/,
+  );
 });
 
 test("patches current webview opaque window default bundle shapes", () => {

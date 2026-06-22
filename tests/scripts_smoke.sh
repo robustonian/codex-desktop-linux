@@ -1795,6 +1795,10 @@ test_launcher_template_sanity() {
     assert_contains "$REPO_DIR/launcher/start.sh.template" "CODEX_MULTI_LAUNCH_PORT_RANGE"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "choose_multi_launch_port"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "configure_multi_launch_instance"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" "--profile NAME"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" "CODEX_LINUX_CODEX_PROFILE"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" "CODEX_LINUX_PROFILED_CLI_PATH"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" "configure_codex_profile_cli_path"
     assert_contains "$REPO_DIR/launcher/start.sh.template" 'launcher-$CODEX_LINUX_INSTANCE_ID.log'
     assert_contains "$REPO_DIR/launcher/start.sh.template" "ADOPTED_WEBVIEW_PID"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "Reusing webview server pid="
@@ -1827,6 +1831,7 @@ webview_probe_body = source.split("webview_port_is_open() {", 1)[1].split("wait_
 cold_start_hooks_body = source.split("run_cold_start_hooks() {", 1)[1].split("run_cli_preflight() {", 1)[0]
 stop_body = source.split("stop_owned_webview_server() {", 1)[1].split("owned_webview_server_pid() {", 1)[0]
 stale_body = source.split("pid_is_stale_webview_server() {", 1)[1].split("stop_owned_webview_server() {", 1)[0]
+parse_body = source.split("parse_launcher_args() {", 1)[1].split("configure_multi_launch_instance() {", 1)[0]
 multi_body = source.split("configure_multi_launch_instance() {", 1)[1].split('WEBVIEW_ORIGIN="http://127.0.0.1:$CODEX_LINUX_WEBVIEW_PORT"', 1)[0]
 adopt_body = source.split("adopt_existing_webview_server() {", 1)[1].split("ensure_webview_server() {", 1)[0]
 ensure_body = source.split("ensure_webview_server() {", 1)[1].split("wait_for_webview_server", 1)[0]
@@ -1837,6 +1842,16 @@ if 'configure_multi_launch_instance "$@"' not in source:
     raise SystemExit("launcher must configure multi-launch before deriving WEBVIEW_ORIGIN")
 if 'unset CODEX_LINUX_MULTI_LAUNCH' not in source.split('parse_launcher_args() {', 1)[0]:
     raise SystemExit("launcher must clear inherited internal multi-launch markers before parsing args")
+if 'unset CODEX_LINUX_PROFILED_CLI_PATH' not in source.split('parse_launcher_args() {', 1)[0]:
+    raise SystemExit("launcher must clear inherited internal profiled CLI markers before parsing args")
+if '--profile|-p)' not in parse_body or '--profile=*)' not in parse_body:
+    raise SystemExit("launcher must parse --profile, --profile=NAME, and -p before Electron args")
+if 'CODEX_LINUX_CODEX_PROFILE="$1"' not in parse_body or 'CODEX_LINUX_CODEX_PROFILE="$profile"' not in parse_body:
+    raise SystemExit("launcher must capture the requested Codex profile")
+if parse_body.count('MULTI_LAUNCH_REQUESTED=1') < 3:
+    raise SystemExit("profile launches must request a separate app instance")
+if 'validate_codex_profile_name "$1"' not in parse_body or 'validate_codex_profile_name "$profile"' not in parse_body:
+    raise SystemExit("launcher must validate profile names before using them in the CLI wrapper")
 if '$((CODEX_LINUX_WEBVIEW_PORT + 4))' not in source:
     raise SystemExit("multi-launch default range must cap the default at five ports")
 if '( trap - EXIT\n      exec 3<>/dev/tcp/127.0.0.1/"$CODEX_LINUX_WEBVIEW_PORT" )' not in webview_probe_body:
@@ -1900,6 +1915,13 @@ if '"$HOME/.bun/bin/codex"' not in source:
     raise SystemExit("CLI lookup must include bun global install path")
 if "if needs_cold_start;" not in runtime_body:
     raise SystemExit("second-instance handoff must skip CLI preflight")
+if 'configure_codex_profile_cli_path\nexport_packaged_runtime_env' not in runtime_body:
+    raise SystemExit("profile CLI wrapping must happen after CLI discovery/preflight and before runtime export")
+profile_wrapper_body = source.split("configure_codex_profile_cli_path() {", 1)[1].split("is_interactive_terminal() {", 1)[0]
+if 'exec "$CODEX_LINUX_PROFILED_CLI_PATH" --profile "$CODEX_LINUX_CODEX_PROFILE" "$@"' not in profile_wrapper_body:
+    raise SystemExit("profile wrapper must invoke the real CLI with --profile before app-server args")
+if 'CODEX_CLI_PATH="$wrapper_path"' not in profile_wrapper_body:
+    raise SystemExit("profile wrapper must replace CODEX_CLI_PATH for Electron/app-server")
 if 'run_cold_start_hooks' not in runtime_body:
     raise SystemExit("cold start must run feature-staged hooks before Electron launches")
 if 'COLD_START_HOOK_DIR' not in cold_start_hooks_body or '"$hook" "$SCRIPT_DIR" "$APP_STATE_DIR" "$LOG_DIR"' not in cold_start_hooks_body:

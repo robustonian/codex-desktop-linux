@@ -37,10 +37,12 @@ APP_NOTIFICATION_ICON_REPO="$SCRIPT_DIR/../assets/codex.png"
 MULTI_LAUNCH_REQUESTED=0
 MULTI_LAUNCH_ACTIVE=0
 CODEX_LINUX_INSTANCE_ID=""
+CODEX_LINUX_CODEX_PROFILE=""
 LAUNCHER_ARGS=()
 
 # Internal marker consumed by patched Electron bundles; never trust inheritance.
 unset CODEX_LINUX_MULTI_LAUNCH
+unset CODEX_LINUX_PROFILED_CLI_PATH
 
 early_truthy_env_value() {
     case "${1:-}" in
@@ -76,6 +78,17 @@ normalize_tcp_port() {
 
 validate_tcp_port() {
     normalize_tcp_port "$1" "$2" >/dev/null
+}
+
+validate_codex_profile_name() {
+    local profile="$1"
+
+    if [[ "$profile" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        return 0
+    fi
+
+    echo "Codex profile name must contain only letters, numbers, hyphens, and underscores" >&2
+    return 1
 }
 
 if ! CODEX_LINUX_WEBVIEW_PORT="$(normalize_tcp_port "CODEX_WEBVIEW_PORT" "$CODEX_LINUX_WEBVIEW_PORT")"; then
@@ -122,6 +135,7 @@ choose_multi_launch_port() {
 
 parse_launcher_args() {
     local passthrough=0
+    local profile
 
     LAUNCHER_ARGS=()
     if early_truthy_env_value "${CODEX_MULTI_LAUNCH:-}"; then
@@ -141,6 +155,26 @@ parse_launcher_args() {
                 LAUNCHER_ARGS+=("$1")
                 ;;
             --new-instance|--multi-instance|--multi-launch)
+                MULTI_LAUNCH_REQUESTED=1
+                ;;
+            --profile|-p)
+                shift
+                if [ "$#" -eq 0 ]; then
+                    echo "--profile requires a profile name" >&2
+                    exit 1
+                fi
+                validate_codex_profile_name "$1" || exit 1
+                CODEX_LINUX_CODEX_PROFILE="$1"
+                MULTI_LAUNCH_REQUESTED=1
+                ;;
+            --profile=*)
+                profile="${1#--profile=}"
+                if [ -z "$profile" ]; then
+                    echo "--profile requires a profile name" >&2
+                    exit 1
+                fi
+                validate_codex_profile_name "$profile" || exit 1
+                CODEX_LINUX_CODEX_PROFILE="$profile"
                 MULTI_LAUNCH_REQUESTED=1
                 ;;
             *)
@@ -204,6 +238,7 @@ Launches the $CODEX_LINUX_APP_DISPLAY_NAME app.
 Options:
   -h, --help                  Show this help message and exit
   --new-instance              Start a separate app instance on the first free port in the multi-launch range
+  -p, --profile NAME          Start a separate app instance using the named Codex profile
   --new-chat                  Open the main window on a new chat
   --quick-chat                Open a projectless quick chat
   --prompt-chat               Show the compact prompt for a new chat
@@ -1075,6 +1110,34 @@ run_cli_preflight_background() {
             echo "Codex CLI background preflight failed. Continuing with the current CLI."
         fi
     ) &
+}
+
+configure_codex_profile_cli_path() {
+    [ -n "$CODEX_LINUX_CODEX_PROFILE" ] || return 0
+    [ -n "${CODEX_CLI_PATH:-}" ] || return 0
+
+    local real_cli="${CODEX_LINUX_PROFILED_CLI_PATH:-$CODEX_CLI_PATH}"
+    local wrapper_dir="$APP_STATE_DIR/profile-cli"
+    local wrapper_path="$wrapper_dir/codex"
+
+    mkdir -p "$wrapper_dir"
+    cat > "$wrapper_path" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ -z "${CODEX_LINUX_PROFILED_CLI_PATH:-}" ] || [ -z "${CODEX_LINUX_CODEX_PROFILE:-}" ]; then
+    echo "Codex Desktop profile wrapper is missing launcher environment." >&2
+    exit 1
+fi
+
+exec "$CODEX_LINUX_PROFILED_CLI_PATH" --profile "$CODEX_LINUX_CODEX_PROFILE" "$@"
+SCRIPT
+    chmod 700 "$wrapper_path"
+
+    CODEX_LINUX_PROFILED_CLI_PATH="$real_cli"
+    CODEX_CLI_PATH="$wrapper_path"
+    export CODEX_LINUX_PROFILED_CLI_PATH CODEX_LINUX_CODEX_PROFILE CODEX_CLI_PATH
+    echo "Using Codex profile: $CODEX_LINUX_CODEX_PROFILE"
 }
 
 is_interactive_terminal() {
@@ -2110,6 +2173,7 @@ if needs_cold_start; then
     fi
 fi
 
+configure_codex_profile_cli_path
 export_packaged_runtime_env
 if needs_cold_start; then
     clear_bundled_marketplace_tmp_cache
