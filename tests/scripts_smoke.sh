@@ -3102,8 +3102,14 @@ if "if needs_cold_start;" not in runtime_body:
 if 'configure_codex_profile_cli_path\nexport_packaged_runtime_env' not in runtime_body:
     raise SystemExit("profile CLI wrapping must happen after CLI discovery/preflight and before runtime export")
 profile_wrapper_body = source.split("configure_codex_profile_cli_path() {", 1)[1].split("is_interactive_terminal() {", 1)[0]
+if 'if codex_args_allow_profile "$@"; then' not in profile_wrapper_body:
+    raise SystemExit("profile wrapper must filter CLI commands before injecting --profile")
+if 'login|logout|plugin|mcp-server|app-server|remote-control|completion|update|doctor|apply|a|cloud|exec-server|features|help|version)' not in profile_wrapper_body:
+    raise SystemExit("profile wrapper must leave Codex management commands unprofiled")
 if 'exec "$CODEX_LINUX_PROFILED_CLI_PATH" --profile "$CODEX_LINUX_CODEX_PROFILE" "$@"' not in profile_wrapper_body:
-    raise SystemExit("profile wrapper must invoke the real CLI with --profile before app-server args")
+    raise SystemExit("profile wrapper must still invoke runtime CLI commands with --profile")
+if 'exec "$CODEX_LINUX_PROFILED_CLI_PATH" "$@"' not in profile_wrapper_body:
+    raise SystemExit("profile wrapper must pass unsupported profile commands through unmodified")
 if 'CODEX_CLI_PATH="$wrapper_path"' not in profile_wrapper_body:
     raise SystemExit("profile wrapper must replace CODEX_CLI_PATH for Electron/app-server")
 if 'run_cold_start_hooks' not in runtime_body:
@@ -3532,6 +3538,87 @@ if (!launcher.includes('ln -sfnT "$target" "$link_path"')) {
   throw new Error("replace_symlink must replace plugin links as paths, not as directory children");
 }
 NODE
+}
+
+test_launcher_profile_wrapper_filters_cli_commands() {
+    info "Checking launcher Codex profile wrapper command filtering"
+    local workspace="$TMP_DIR/profile-wrapper"
+    local wrapper="$workspace/codex-wrapper"
+    local real_cli="$workspace/real-codex"
+    local log="$workspace/argv.log"
+    local output
+
+    mkdir -p "$workspace"
+    python3 - "$REPO_DIR/launcher/start.sh.template" "$wrapper" <<'PY'
+import sys
+
+source_path, output_path = sys.argv[1:3]
+source = open(source_path, encoding="utf-8").read()
+marker = 'cat > "$wrapper_path" <<\'SCRIPT\'\n'
+body = source.split(marker, 1)[1].split("\nSCRIPT\n", 1)[0]
+open(output_path, "w", encoding="utf-8").write(body)
+PY
+    chmod +x "$wrapper"
+    cat > "$real_cli" <<'SCRIPT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+{
+    first=1
+    for arg in "$@"; do
+        if [ "$first" -eq 0 ]; then
+            printf ' '
+        fi
+        printf '<%s>' "$arg"
+        first=0
+    done
+    printf '\n'
+} > "$CODEX_PROFILE_WRAPPER_LOG"
+SCRIPT
+    chmod +x "$real_cli"
+
+    run_profile_wrapper_case() {
+        : > "$log"
+        CODEX_LINUX_PROFILED_CLI_PATH="$real_cli" \
+            CODEX_LINUX_CODEX_PROFILE="desktop_fugu" \
+            CODEX_PROFILE_WRAPPER_LOG="$log" \
+            "$wrapper" "$@"
+        cat "$log"
+    }
+
+    output="$(run_profile_wrapper_case)"
+    [ "$output" = "<--profile> <desktop_fugu>" ] || fail "empty Codex invocation should receive profile: $output"
+    output="$(run_profile_wrapper_case exec)"
+    [ "$output" = "<--profile> <desktop_fugu> <exec>" ] || fail "exec should receive profile: $output"
+    output="$(run_profile_wrapper_case -c model=\"gpt-5\" exec)"
+    [ "$output" = "<--profile> <desktop_fugu> <-c> <model=\"gpt-5\"> <exec>" ] || fail "runtime command after top-level config should receive profile: $output"
+    output="$(run_profile_wrapper_case mcp list)"
+    [ "$output" = "<--profile> <desktop_fugu> <mcp> <list>" ] || fail "mcp should receive profile: $output"
+    output="$(run_profile_wrapper_case debug prompt-input hello)"
+    [ "$output" = "<--profile> <desktop_fugu> <debug> <prompt-input> <hello>" ] || fail "debug prompt-input should receive profile: $output"
+    output="$(run_profile_wrapper_case debug --config model=\"gpt-5\" prompt-input)"
+    [ "$output" = "<--profile> <desktop_fugu> <debug> <--config> <model=\"gpt-5\"> <prompt-input>" ] || fail "debug prompt-input after debug config should receive profile: $output"
+    output="$(run_profile_wrapper_case summarize this)"
+    [ "$output" = "<--profile> <desktop_fugu> <summarize> <this>" ] || fail "prompt-style invocation should receive profile: $output"
+    output="$(run_profile_wrapper_case -- summarize this)"
+    [ "$output" = "<--profile> <desktop_fugu> <--> <summarize> <this>" ] || fail "-- prompt invocation should receive profile: $output"
+
+    output="$(run_profile_wrapper_case login status)"
+    [ "$output" = "<login> <status>" ] || fail "login should not receive profile: $output"
+    output="$(run_profile_wrapper_case doctor --summary)"
+    [ "$output" = "<doctor> <--summary>" ] || fail "doctor should not receive profile: $output"
+    output="$(run_profile_wrapper_case plugin list)"
+    [ "$output" = "<plugin> <list>" ] || fail "plugin should not receive profile: $output"
+    output="$(run_profile_wrapper_case app-server daemon version)"
+    [ "$output" = "<app-server> <daemon> <version>" ] || fail "app-server should not receive profile: $output"
+    output="$(run_profile_wrapper_case -c model=\"gpt-5\" app-server daemon version)"
+    [ "$output" = "<-c> <model=\"gpt-5\"> <app-server> <daemon> <version>" ] || fail "management command after top-level config should not receive profile: $output"
+    output="$(run_profile_wrapper_case debug app-server)"
+    [ "$output" = "<debug> <app-server>" ] || fail "debug commands other than prompt-input should not receive profile: $output"
+    output="$(run_profile_wrapper_case --version)"
+    [ "$output" = "<--version>" ] || fail "--version should not receive profile: $output"
+    output="$(run_profile_wrapper_case --help)"
+    [ "$output" = "<--help>" ] || fail "--help should not receive profile: $output"
 }
 
 test_process_detection_helper_cmdline_shapes() {
@@ -6264,6 +6351,7 @@ main() {
     test_chrome_marketplace_fallback_synthesis
     test_chrome_native_host_manifest_writer
     test_launcher_template_sanity
+    test_launcher_profile_wrapper_filters_cli_commands
     test_process_detection_helper_cmdline_shapes
     test_webview_probe_equivalence
     test_side_by_side_launcher_identity

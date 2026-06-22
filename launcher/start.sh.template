@@ -1269,7 +1269,86 @@ if [ -z "${CODEX_LINUX_PROFILED_CLI_PATH:-}" ] || [ -z "${CODEX_LINUX_CODEX_PROF
     exit 1
 fi
 
-exec "$CODEX_LINUX_PROFILED_CLI_PATH" --profile "$CODEX_LINUX_CODEX_PROFILE" "$@"
+codex_debug_prompt_input_allows_profile() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -c|--config|--enable|--disable)
+                shift
+                [ "$#" -gt 0 ] || return 1
+                shift
+                ;;
+            --config=*|--enable=*|--disable=*)
+                shift
+                ;;
+            -h|--help|--)
+                return 1
+                ;;
+            prompt-input)
+                return 0
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    done
+
+    return 1
+}
+
+codex_args_allow_profile() {
+    local command=""
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --)
+                return 0
+                ;;
+            -c|--config|--enable|--disable|--remote|--remote-auth-token-env|-i|--image|-m|--model|--local-provider|-s|--sandbox|-C|--cd|--add-dir|-a|--ask-for-approval|-p|--profile)
+                shift
+                [ "$#" -gt 0 ] || return 0
+                shift
+                ;;
+            --config=*|--enable=*|--disable=*|--remote=*|--remote-auth-token-env=*|--image=*|--model=*|--local-provider=*|--sandbox=*|--cd=*|--add-dir=*|--ask-for-approval=*|--profile=*)
+                shift
+                ;;
+            --oss|--strict-config|--dangerously-bypass-approvals-and-sandbox|--dangerously-bypass-hook-trust|--search|--no-alt-screen)
+                shift
+                ;;
+            -h|--help|-V|--version)
+                return 1
+                ;;
+            -*)
+                return 0
+                ;;
+            *)
+                command="$1"
+                shift
+                break
+                ;;
+        esac
+    done
+
+    case "$command" in
+        ""|exec|e|review|resume|archive|delete|unarchive|fork|mcp|sandbox)
+            return 0
+            ;;
+        debug)
+            codex_debug_prompt_input_allows_profile "$@"
+            ;;
+        login|logout|plugin|mcp-server|app-server|remote-control|completion|update|doctor|apply|a|cloud|exec-server|features|help|version)
+            return 1
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+if codex_args_allow_profile "$@"; then
+    exec "$CODEX_LINUX_PROFILED_CLI_PATH" --profile "$CODEX_LINUX_CODEX_PROFILE" "$@"
+fi
+
+exec "$CODEX_LINUX_PROFILED_CLI_PATH" "$@"
 SCRIPT
     chmod 700 "$wrapper_path"
 
