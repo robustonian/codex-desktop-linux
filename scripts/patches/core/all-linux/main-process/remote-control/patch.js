@@ -2,6 +2,7 @@
 
 const {
   applyLinuxLocalAppServerFeatureEnablementHandlerPatch,
+  applyLinuxProfiledRemoteControlAuthClientPatch,
   applyLinuxRemoteControlConfigPreservationPatch,
 } = require("../../../../main-process.js");
 
@@ -19,5 +20,12 @@ module.exports = [
     order: 185,
     ciPolicy: "optional",
     apply: applyLinuxRemoteControlConfigPreservationPatch,
+  },
+  {
+    id: "linux-profiled-remote-control-auth-client",
+    phase: "main-bundle",
+    order: 186,
+    ciPolicy: "optional",
+    apply: applyLinuxProfiledRemoteControlAuthClientPatch,
   },
 ];

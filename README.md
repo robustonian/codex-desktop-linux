@@ -201,6 +201,10 @@ checks and plugin discovery are left unprofiled when Codex CLI does not accept
 before restarting with a different profile so the app-server uses the new
 profile config from startup.
 
+When a profile points the local app-server at a custom model provider, Linux
+keeps remote-control authorization on the unprofiled Codex CLI so Codex Mobile
+can still use the existing ChatGPT sign-in.
+
 Use a local DMG:
 
 ```bash

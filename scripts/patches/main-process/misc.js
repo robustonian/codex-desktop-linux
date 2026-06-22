@@ -257,6 +257,67 @@ function applyLinuxRemoteControlConfigPreservationPatch(currentSource) {
   return currentSource;
 }
 
+function applyLinuxProfiledRemoteControlAuthClientPatch(currentSource) {
+  const marker = "CODEX_LINUX_PROFILED_CLI_PATH";
+  if (currentSource.includes("codexLinuxDesktopAuthAppServerClient")) {
+    return currentSource;
+  }
+
+  let patchedSource = currentSource;
+  const localConnectionNeedle =
+    "let i=this.createAppServerConnection(z);if(this.remoteControlDeviceKeyClient=";
+  const localConnectionPatch =
+    "let i=this.createAppServerConnection(z),codexLinuxDesktopAuthAppServerClient=i;if(process.platform===`linux`&&process.env.CODEX_LINUX_PROFILED_CLI_PATH){let codexLinuxAuthHostConfig={...Su,codex_cli_command:[process.env.CODEX_LINUX_PROFILED_CLI_PATH,`app-server`,`--analytics-default-enabled`]};codexLinuxDesktopAuthAppServerClient=this.createAppServerConnection(`local-auth`,codexLinuxAuthHostConfig)}this.desktopAuthAppServerClient=codexLinuxDesktopAuthAppServerClient;if(this.remoteControlDeviceKeyClient=";
+  if (patchedSource.includes(localConnectionNeedle)) {
+    patchedSource = patchedSource.replace(localConnectionNeedle, localConnectionPatch);
+  } else if (
+    patchedSource.includes("this.createAppServerConnection(z)") &&
+    patchedSource.includes("this.remoteControlDeviceKeyClient=")
+  ) {
+    console.warn(
+      "WARN: Could not find local app-server creation for profiled remote-control auth client patch",
+    );
+  }
+
+  const handlerNeedle =
+    "prodApiBaseUrl:e.prodApiBaseUrl},i,this.remoteControlDeviceKeyClient,";
+  if (patchedSource.includes(handlerNeedle)) {
+    patchedSource = patchedSource.replace(
+      handlerNeedle,
+      "prodApiBaseUrl:e.prodApiBaseUrl},codexLinuxDesktopAuthAppServerClient,this.remoteControlDeviceKeyClient,",
+    );
+  } else if (
+    patchedSource.includes("this.remoteConnectionsHandler=new") &&
+    patchedSource.includes("prodApiBaseUrl:e.prodApiBaseUrl")
+  ) {
+    console.warn(
+      "WARN: Could not find remote-connections handler auth argument for profiled remote-control auth client patch",
+    );
+  }
+
+  const remoteConnectionNeedle =
+    "this.createAppServerConnection(e.hostId,t,!0,this.getLocalAppServerClient(),this.remoteControlDeviceKeyClient)";
+  if (patchedSource.includes(remoteConnectionNeedle)) {
+    patchedSource = patchedSource.replace(
+      remoteConnectionNeedle,
+      "this.createAppServerConnection(e.hostId,t,!0,this.desktopAuthAppServerClient??this.getLocalAppServerClient(),this.remoteControlDeviceKeyClient)",
+    );
+  } else if (
+    patchedSource.includes("createAndRegisterRemoteConnection") &&
+    patchedSource.includes("this.getLocalAppServerClient()")
+  ) {
+    console.warn(
+      "WARN: Could not find remote-control transport auth argument for profiled remote-control auth client patch",
+    );
+  }
+
+  if (patchedSource.includes(marker) || !currentSource.includes("this.createAppServerConnection(z)")) {
+    return patchedSource;
+  }
+
+  return patchedSource;
+}
+
 function applyLinuxXdgDocumentsDirPatch(currentSource) {
   if (currentSource.includes("codexLinuxXdgDocumentsDir")) {
     return currentSource;
@@ -364,6 +425,7 @@ module.exports = {
   applyLinuxGitOriginsSourceFallbackPatch,
   applyLinuxLocalAppServerFeatureEnablementHandlerPatch,
   applyLinuxOwlFeatureBindingFallbackPatch,
+  applyLinuxProfiledRemoteControlAuthClientPatch,
   applyLinuxWorkerFileManagerPatch,
   patchLinuxOwlFeatureBindingFallbackAssets,
   patchLinuxWorkerFileManagerTarget,

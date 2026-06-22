@@ -64,6 +64,7 @@ const {
   applyLinuxOpaqueWindowsDefaultPatch,
   applyLinuxReadyToShowWindowStatePatch,
   applyLinuxResizeRepaintPatch,
+  applyLinuxProfiledRemoteControlAuthClientPatch,
   applyLinuxSetIconPatch,
   applyLinuxRemoteControlConfigPreservationPatch,
   applyLinuxSingleInstancePatch,
@@ -707,6 +708,7 @@ test("default core patch descriptors are grouped and unique", () => {
     "linux-chrome-extension-status",
     "linux-local-app-server-feature-enablement-handler",
     "linux-remote-control-config-preservation",
+    "linux-profiled-remote-control-auth-client",
     "linux-app-updater-menu",
     "linux-tray-close-setting",
     "linux-settings-persistence",
@@ -1453,6 +1455,28 @@ test("warns when upstream still strips remote_control but the guard shape drifts
 
   assert.equal(value, source);
   assert.match(warnings.join("\n"), /remote-control config stripper guard/);
+});
+
+test("uses unprofiled auth client for remote control when a Codex profile wraps the local app-server", () => {
+  const source = [
+    "class I1{constructor(e){this.options=e,this.sharedObjectRepository=new t.o;",
+    "let i=this.createAppServerConnection(z);if(this.remoteControlDeviceKeyClient=L$({resourcesPath:tt({env:process.env,resourcesPath:process.resourcesPath})}),",
+    "this.appServerClients.set(z,i),this.appServerConnectionRegistry=new t.kn,this.appServerConnectionRegistry.addConnection(z,i),this.durableThreadHostConfig!=null){}",
+    "this.remoteConnectionsHandler=new b$(this.appState,this.sharedObjectRepository,z,this.appServerConnectionRegistry,{desktopOriginator:e.desktopOriginator,devApiBaseUrl:e.devApiBaseUrl,prodApiBaseUrl:e.prodApiBaseUrl},i,this.remoteControlDeviceKeyClient,this.getHostConfigForHostId.bind(this),this.getAppServerClient.bind(this),this.createAndRegisterRemoteConnection.bind(this),this.disposeRemoteConnection.bind(this));}",
+    "createAndRegisterRemoteConnection(e){let t=X$(e),n=this.createAppServerConnection(e.hostId,t,!0,this.getLocalAppServerClient(),this.remoteControlDeviceKeyClient);this.appServerClients.set(e.hostId,n)}}",
+  ].join("");
+
+  const patched = applyPatchTwice(
+    applyLinuxProfiledRemoteControlAuthClientPatch,
+    source,
+  );
+
+  assert.match(patched, /CODEX_LINUX_PROFILED_CLI_PATH/);
+  assert.match(patched, /codex_cli_command:\[process\.env\.CODEX_LINUX_PROFILED_CLI_PATH,`app-server`,`--analytics-default-enabled`\]/);
+  assert.match(patched, /this\.desktopAuthAppServerClient=codexLinuxDesktopAuthAppServerClient/);
+  assert.match(patched, /prodApiBaseUrl:e\.prodApiBaseUrl},codexLinuxDesktopAuthAppServerClient,this\.remoteControlDeviceKeyClient/);
+  assert.match(patched, /this\.desktopAuthAppServerClient\?\?this\.getLocalAppServerClient\(\)/);
+  assert.equal((patched.match(/CODEX_LINUX_PROFILED_CLI_PATH/g) ?? []).length, 2);
 });
 
 test("registers local app-server feature enablement in internal and Electron handlers", () => {
