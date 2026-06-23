@@ -1545,6 +1545,7 @@ test("keeps remote-control settings tabs visible on Linux when the profile app-s
     "let ft=Ze({selectedConnectionsTab:ot,showControlOtherDevices:X,showControlThisMacTab:nt,showRemoteControlConnectionsSection:Ne,showRemoteSshConnections:!0,showTabbedSshPage:it});",
     "let hn=[...nt?pn:[],...rt?fn:[],...mn];",
     "let marker=`remote_control_connections_state`;",
+    "//# sourceMappingURL=remote-connections-settings-B47AgXB8.js.map",
   ].join("");
 
   const patched = applyPatchTwice(
@@ -1554,6 +1555,11 @@ test("keeps remote-control settings tabs visible on Linux when the profile app-s
 
   assert.match(patched, /codexLinuxRemoteControlProfileTabsAvailable/);
   assert.match(patched, /Ne=codexLinuxRemoteControlProfileTabsAvailable\(Xe\(\)\),X=codexLinuxRemoteControlProfileTabsAvailable\(!T\)/);
+  assert.match(
+    patched,
+    /\/\/# sourceMappingURL=remote-connections-settings-B47AgXB8\.js\.map\nfunction codexLinuxRemoteControlProfileTabsAvailable/,
+  );
+  assert.doesNotMatch(patched, /\.js\.mapfunction codexLinuxRemoteControlProfileTabsAvailable/);
 
   const runPatched = (userAgent) => {
     const context = {
@@ -1610,6 +1616,68 @@ test("keeps remote-control settings tabs visible on Linux when the profile app-s
       showTabbedSshPage: false,
     },
   });
+});
+
+test("keeps the Codex Mobile sidebar setup entry visible on Linux profiles", () => {
+  const source =
+    "function iD({enabled:e,hasCompletedCodexMobileSetup:t,isChatGptAuth:n,remoteControlFeaturesVisible:r,remoteControlOnboardingEnabled:i}){return e&&n&&r&&i&&!t}";
+
+  const patched = applyPatchTwice(
+    applyLinuxRemoteControlProfileAvailabilityPatch,
+    source,
+  );
+
+  assert.match(patched, /codexLinuxCodexMobileProfileAvailability/);
+  assert.match(
+    patched,
+    /return !t&&\(codexLinuxCodexMobileProfileAvailability\|\|e&&n&&r&&i\)/,
+  );
+
+  const context = {
+    linuxResult: null,
+    linuxCompleteResult: null,
+    macResult: null,
+    macAllowedResult: null,
+    navigator: { userAgent: "Linux x86_64" },
+  };
+  vm.runInNewContext(
+    `${patched};linuxResult=iD({enabled:false,hasCompletedCodexMobileSetup:false,isChatGptAuth:false,remoteControlFeaturesVisible:false,remoteControlOnboardingEnabled:false});`,
+    context,
+  );
+  vm.runInNewContext(
+    `${patched};linuxCompleteResult=iD({enabled:false,hasCompletedCodexMobileSetup:true,isChatGptAuth:false,remoteControlFeaturesVisible:false,remoteControlOnboardingEnabled:false});`,
+    context,
+  );
+  context.navigator = { userAgent: "Macintosh" };
+  vm.runInNewContext(
+    `${patched};macResult=iD({enabled:false,hasCompletedCodexMobileSetup:false,isChatGptAuth:false,remoteControlFeaturesVisible:false,remoteControlOnboardingEnabled:false});`,
+    context,
+  );
+  vm.runInNewContext(
+    `${patched};macAllowedResult=iD({enabled:true,hasCompletedCodexMobileSetup:false,isChatGptAuth:true,remoteControlFeaturesVisible:true,remoteControlOnboardingEnabled:true});`,
+    context,
+  );
+
+  assert.equal(context.linuxResult, true);
+  assert.equal(context.linuxCompleteResult, false);
+  assert.equal(context.macResult, false);
+  assert.equal(context.macAllowedResult, true);
+});
+
+test("repairs remote-control settings helper appended into a source map comment", () => {
+  const source =
+    "let Ne=codexLinuxRemoteControlProfileTabsAvailable(Xe()),X=codexLinuxRemoteControlProfileTabsAvailable(!T),marker=`remote_control_connections_state`,showRemoteControlConnectionsSection=Ne;//# sourceMappingURL=remote-connections-settings-B47AgXB8.js.mapfunction codexLinuxRemoteControlProfileTabsAvailable(e){return typeof navigator!=`undefined`&&navigator.userAgent.includes(`Linux`)?!0:e}";
+
+  const patched = applyPatchTwice(
+    applyLinuxRemoteControlProfileAvailabilityPatch,
+    source,
+  );
+
+  assert.match(
+    patched,
+    /\/\/# sourceMappingURL=remote-connections-settings-B47AgXB8\.js\.map\nfunction codexLinuxRemoteControlProfileTabsAvailable/,
+  );
+  assert.doesNotMatch(patched, /\.js\.mapfunction codexLinuxRemoteControlProfileTabsAvailable/);
 });
 
 test("warns when the remote-control profile availability gate drifts", () => {

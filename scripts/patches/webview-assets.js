@@ -871,15 +871,63 @@ function applyLinuxAppServerBackfillWaitPatch(currentSource) {
 function applyLinuxRemoteControlProfileAvailabilityPatch(currentSource) {
   const marker = "codexLinuxRemoteControlProfileAvailability";
   const settingsMarker = "codexLinuxRemoteControlProfileTabsAvailable";
+  const mobileSidebarMarker = "codexLinuxCodexMobileProfileAvailability";
+  const commentedSettingsHelperRegex = new RegExp(
+    `(//# sourceMappingURL=[^\\n]*\\.js\\.map)(function ${settingsMarker}\\()`,
+    "u",
+  );
   const patchedVisibilityGateRegex =
     /function ([A-Za-z_$][\w$]*)\(\{remoteControlConnectionsState:([A-Za-z_$][\w$]*),slingshotEnabled:([A-Za-z_$][\w$]*)\}\)\{let codexLinuxRemoteControlProfileAvailability=typeof navigator!=`undefined`&&navigator\.userAgent\.includes\(`Linux`\);return \3&&\(\2\?\.available\?\?!0\)&&\(codexLinuxRemoteControlProfileAvailability\|\|\2\?\.accessRequired!==!0\)\}/u;
   const settingsTabsGateRegex =
     /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\),([A-Za-z_$][\w$]*)=!([A-Za-z_$][\w$]*)(?=,[\s\S]*?showRemoteControlConnectionsSection:\1)/u;
+  const mobileSidebarGateRegex =
+    /function ([A-Za-z_$][\w$]*)\(\{enabled:([A-Za-z_$][\w$]*),hasCompletedCodexMobileSetup:([A-Za-z_$][\w$]*),isChatGptAuth:([A-Za-z_$][\w$]*),remoteControlFeaturesVisible:([A-Za-z_$][\w$]*),remoteControlOnboardingEnabled:([A-Za-z_$][\w$]*)\}\)\{return \2&&\4&&\5&&\6&&!\3\}/u;
   const buildReplacement = (functionName, stateVar, slingshotVar) =>
     `function ${functionName}({remoteControlConnectionsState:${stateVar},slingshotEnabled:${slingshotVar}}){let ${marker}=typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`);return ${marker}||${slingshotVar}&&(${stateVar}?.available??!0)&&${stateVar}?.accessRequired!==!0}`;
+  const buildMobileSidebarReplacement = (
+    functionName,
+    enabledVar,
+    setupCompleteVar,
+    chatGptAuthVar,
+    featuresVisibleVar,
+    onboardingEnabledVar,
+  ) =>
+    `function ${functionName}({enabled:${enabledVar},hasCompletedCodexMobileSetup:${setupCompleteVar},isChatGptAuth:${chatGptAuthVar},remoteControlFeaturesVisible:${featuresVisibleVar},remoteControlOnboardingEnabled:${onboardingEnabledVar}}){let ${mobileSidebarMarker}=typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`);return !${setupCompleteVar}&&(${mobileSidebarMarker}||${enabledVar}&&${chatGptAuthVar}&&${featuresVisibleVar}&&${onboardingEnabledVar})}`;
+
+  if (commentedSettingsHelperRegex.test(currentSource)) {
+    return currentSource.replace(commentedSettingsHelperRegex, "$1\n$2");
+  }
 
   if (currentSource.includes(settingsMarker)) {
     return currentSource;
+  }
+
+  if (currentSource.includes(mobileSidebarMarker)) {
+    return currentSource;
+  }
+
+  const mobileSidebarMatch = currentSource.match(mobileSidebarGateRegex);
+  if (mobileSidebarMatch != null) {
+    const [
+      ,
+      functionName,
+      enabledVar,
+      setupCompleteVar,
+      chatGptAuthVar,
+      featuresVisibleVar,
+      onboardingEnabledVar,
+    ] = mobileSidebarMatch;
+    return currentSource.replace(
+      mobileSidebarGateRegex,
+      buildMobileSidebarReplacement(
+        functionName,
+        enabledVar,
+        setupCompleteVar,
+        chatGptAuthVar,
+        featuresVisibleVar,
+        onboardingEnabledVar,
+      ),
+    );
   }
 
   const settingsTabsMatch = currentSource.match(settingsTabsGateRegex);
@@ -895,7 +943,7 @@ function applyLinuxRemoteControlProfileAvailabilityPatch(currentSource) {
     return `${currentSource.replace(
       settingsTabsGateRegex,
       `${sectionVar}=${settingsMarker}(${sectionFn}()),${otherDevicesVar}=${settingsMarker}(!${otherDevicesGateVar})`,
-    )}${settingsHelper}`;
+    )}\n${settingsHelper}`;
   }
 
   if (currentSource.includes(marker)) {

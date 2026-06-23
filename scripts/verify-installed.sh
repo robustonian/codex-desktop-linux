@@ -9,6 +9,8 @@ SYSTEM_BUILD_INFO="$SYSTEM_ROOT/.codex-linux/build-info.json"
 SYSTEM_ASSETS_ROOT="$SYSTEM_ROOT/content/webview/assets"
 REMOTE_AVAILABILITY_MARKER="codexLinuxRemoteControlProfileAvailability||"
 REMOTE_TABS_MARKER="codexLinuxRemoteControlProfileTabsAvailable"
+REMOTE_TABS_COMMENT_BUG=".js.mapfunction $REMOTE_TABS_MARKER"
+CODEX_MOBILE_SIDEBAR_MARKER="codexLinuxCodexMobileProfileAvailability"
 
 info() {
     echo "[INFO] $*" >&2
@@ -161,6 +163,21 @@ asset_marker_present() {
     grep -Fq "$marker" "$SYSTEM_ASSETS_ROOT/$asset"
 }
 
+asset_marker_absent() {
+    local prefix="$1"
+    local marker="$2"
+    local asset
+
+    [ -d "$SYSTEM_ASSETS_ROOT" ] || return 1
+    asset="$(
+        find "$SYSTEM_ASSETS_ROOT" -maxdepth 1 -type f -name "${prefix}*.js" -printf '%f\n' \
+            | sort \
+            | head -n 1
+    )"
+    [ -n "$asset" ] || return 1
+    ! grep -Fq "$marker" "$SYSTEM_ASSETS_ROOT/$asset"
+}
+
 main() {
     case "${1:-}" in
         -h|--help)
@@ -209,6 +226,20 @@ main() {
         echo "Remote connections settings tabs marker: present"
     else
         warn "Remote connections settings tabs marker is missing from installed webview assets"
+        failed=1
+    fi
+
+    if asset_marker_absent "remote-connections-settings-" "$REMOTE_TABS_COMMENT_BUG"; then
+        echo "Remote connections settings tabs helper placement: valid"
+    else
+        warn "Remote connections settings tabs helper is commented out by a sourceMappingURL line"
+        failed=1
+    fi
+
+    if asset_marker_present "app-main-" "$CODEX_MOBILE_SIDEBAR_MARKER"; then
+        echo "Codex Mobile sidebar profile marker: present"
+    else
+        warn "Codex Mobile sidebar profile marker is missing from installed webview assets"
         failed=1
     fi
 

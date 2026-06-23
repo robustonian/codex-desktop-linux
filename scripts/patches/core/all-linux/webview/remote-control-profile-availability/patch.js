@@ -9,7 +9,7 @@ module.exports = {
   phase: "webview-asset",
   order: 1120,
   ciPolicy: "optional",
-  pattern: /^(?:remote-connections-settings|use-plugin-install-flow)-.*\.js$/,
+  pattern: /^(?:app-main|remote-connections-settings|use-plugin-install-flow)-.*\.js$/,
   missingDescription: "remote-control profile availability bundle",
   skipDescription: "Linux remote-control profile availability patch",
   apply: applyLinuxRemoteControlProfileAvailabilityPatch,
