@@ -1,7 +1,7 @@
 "use strict";
 
 const HANDLER_NAME = "linux-read-aloud";
-const RUNTIME_VERSION = "conversation-mode-v19";
+const RUNTIME_VERSION = "conversation-mode-v20";
 
 function warn(message, patchName) {
   console.warn(`WARN: ${message} - skipping ${patchName}`);
@@ -71,11 +71,11 @@ function conversationRuntimeSource() {
     `function sync(conversation,controls){if(!state.active)return false;let id=conversationId(conversation);if(id!==state.activeConversationId){deactivate("insert");return false}let was=isResponseInProgress();mergeControls(controls);let now=isResponseInProgress();if(now&&!was){(!state.allowAssistant||state.awaitingUserTranscript)&&stopSpeech(!0);state.awaitingUserTranscript=false;state.allowAssistant=true;state.muted||startInterruptMonitor()}else if(now&&!state.muted)startInterruptMonitor();if(was&&!now){state.finalizing=true;finishAssistantSoon(650)}updateComposerAura();return true}`,
     `function isActive(conversation){return state.active&&conversationId(conversation)===state.activeConversationId}`,
     `function estimateMs(text){let words=text.split(/\\s+/).filter(Boolean).length;return Math.max(2200,Math.min(600000,words*430))}`,
-    `function speechSettings(){let quiet=Number(localStorage.getItem("codex-linux-conversation-silence-ms")||1800),threshold=Number(localStorage.getItem("codex-linux-conversation-vad-threshold")||0.01),interrupt=Number(localStorage.getItem("codex-linux-conversation-interrupt-threshold")||0.035);threshold=Number.isFinite(threshold)?Math.min(.2,Math.max(.002,threshold)):.01;let possibleThreshold=Math.max(.002,threshold*.45);interrupt=Number.isFinite(interrupt)?Math.min(.25,Math.max(threshold*1.8,interrupt)):.035;return{quietMs:Number.isFinite(quiet)?Math.min(2000,Math.max(900,quiet)):1800,threshold,possibleThreshold,interruptThreshold:interrupt,speechMs:220,interruptMs:420,interruptGraceMs:180}}`,
+    `function speechSettings(){let quiet=Number(localStorage.getItem("codex-linux-conversation-silence-ms")||1800),threshold=Number(localStorage.getItem("codex-linux-conversation-vad-threshold")||0.01),interrupt=Number(localStorage.getItem("codex-linux-conversation-interrupt-threshold")||0.035);threshold=Number.isFinite(threshold)?Math.min(.2,Math.max(.002,threshold)):.01;let possibleThreshold=Math.max(.002,threshold*.45);interrupt=Number.isFinite(interrupt)?Math.min(.25,Math.max(threshold*1.8,interrupt)):.035;return{quietMs:Number.isFinite(quiet)?Math.min(2000,Math.max(900,quiet)):1800,threshold,possibleThreshold,interruptThreshold:interrupt,speechMs:220,interruptMs:420,interruptGraceMs:180,audioPollMs:32}}`,
     `function micConstraints(){return{audio:{channelCount:1,echoCancellation:!0,noiseSuppression:!0,autoGainControl:!0}}}`,
     `function stopTracks(stream){try{stream?.getTracks?.().forEach(e=>e.stop())}catch{}}`,
-    `function makeAudioGraph(stream){let ctx=null,source=null,analyser=null;try{ctx=new (window.AudioContext||window.webkitAudioContext)(),source=ctx.createMediaStreamSource(stream),analyser=ctx.createAnalyser(),analyser.fftSize=1024,source.connect(analyser)}catch{try{source?.disconnect?.()}catch{}try{ctx?.close?.()}catch{}return null}let data=new Float32Array(analyser.fftSize);return{level(){analyser.getFloatTimeDomainData(data);let sum=0;for(let i=0;i<data.length;i++)sum+=data[i]*data[i];return Math.sqrt(sum/data.length)},close(){try{source?.disconnect?.()}catch{}try{ctx?.close?.()}catch{}}}}`,
-    `function makeMonitor(stream,onSpeech){let graph=makeAudioGraph(stream);if(!graph){stopTracks(stream);return null}let raf=0,closed=false,voicedSince=0,startedAt=performance.now(),{interruptThreshold,interruptMs,interruptGraceMs}=speechSettings(),finish=()=>{if(closed)return;closed=true,cancelAnimationFrame(raf);graph.close()},tick=()=>{if(closed)return;let now=performance.now();if(now-startedAt<interruptGraceMs){raf=requestAnimationFrame(tick);return}if(graph.level()>interruptThreshold){voicedSince||(voicedSince=now);if(now-voicedSince>=interruptMs){finish();onSpeech();return}}else voicedSince=0;raf=requestAnimationFrame(tick)};raf=requestAnimationFrame(tick);return finish}`,
+    `function makeAudioGraph(stream){let ctx=null,source=null,analyser=null;try{ctx=new (window.AudioContext||window.webkitAudioContext)(),source=ctx.createMediaStreamSource(stream),analyser=ctx.createAnalyser(),analyser.fftSize=512,source.connect(analyser)}catch{try{source?.disconnect?.()}catch{}try{ctx?.close?.()}catch{}return null}let data=new Float32Array(analyser.fftSize);return{level(){analyser.getFloatTimeDomainData(data);let sum=0;for(let i=0;i<data.length;i++)sum+=data[i]*data[i];return Math.sqrt(sum/data.length)},close(){try{source?.disconnect?.()}catch{}try{ctx?.close?.()}catch{}}}}`,
+    `function makeMonitor(stream,onSpeech){let graph=makeAudioGraph(stream);if(!graph){stopTracks(stream);return null}let timer=0,closed=false,voicedSince=0,startedAt=performance.now(),{interruptThreshold,interruptMs,interruptGraceMs,audioPollMs}=speechSettings(),finish=()=>{if(closed)return;closed=true,clearTimeout(timer);graph.close()},schedule=()=>{timer=setTimeout(tick,audioPollMs)},tick=()=>{if(closed)return;let now=performance.now();if(now-startedAt<interruptGraceMs){schedule();return}if(graph.level()>interruptThreshold){voicedSince||(voicedSince=now);if(now-voicedSince>=interruptMs){finish();onSpeech();return}}else voicedSince=0;schedule()};schedule();return finish}`,
     `function startInterruptMonitor(){if(!state.active||state.muted||state.listening||state.interruptCleanup||state.interruptPendingEpoch||!navigator.mediaDevices?.getUserMedia)return;let monitorEpoch=state.epoch,monitorSerial=state.interruptSerial;state.interruptPendingEpoch=monitorEpoch;navigator.mediaDevices.getUserMedia(micConstraints()).then(stream=>{state.interruptPendingEpoch===monitorEpoch&&state.interruptSerial===monitorSerial&&(state.interruptPendingEpoch=0);if(monitorEpoch!==state.epoch||monitorSerial!==state.interruptSerial||!state.active||state.muted||state.listening||state.interruptCleanup){stopTracks(stream);return}let cleanup=makeMonitor(stream,()=>{stopTracks(stream);state.interruptCleanup=null;state.awaitingUserTranscript=true;state.allowAssistant=false;stopSpeech(!0);state.controls?.onStop?.();startListeningSoon(0,!0)});if(!cleanup)return;state.interruptCleanup=()=>{cleanup();stopTracks(stream)}}).catch(()=>{state.interruptPendingEpoch===monitorEpoch&&state.interruptSerial===monitorSerial&&(state.interruptPendingEpoch=0)})}`,
     `function stopInterruptMonitor(){state.interruptCleanup?.();state.interruptCleanup=null}`,
     `function rememberSpoken(text){let normalized=normalizeSent(text);if(!normalized)return;state.spokenEchoText=(state.spokenEchoText+" "+normalized).trim().slice(-2400);state.spokenEchoAt=Date.now()}`,
@@ -98,7 +98,7 @@ function conversationRuntimeSource() {
     `function assistant(item,copyText,cid,turnKey,turnInProgress){if(!state.active||state.awaitingUserTranscript)return null;let id=conversationId(cid);if(id)state.lastConversationId=id;if(id!==state.activeConversationId){deactivate("insert");return null}let text=clean(copyText||item?.content||"");if(!text)return null;let responding=isResponseInProgress(),liveTurn=turnInProgress===!0,key=assistantKey(item,text,turnKey,liveTurn||responding),completed=item?.completed===!0,finalTurn=!liveTurn||completed,seen=key&&state.seenAssistantKeys.has(key),sameAssistant=state.assistantText&&(text.startsWith(state.assistantText)||state.assistantText.startsWith(text)),canObserve=state.allowAssistant||responding||state.finalizing||state.assistantKey!=null;if(beforeCursor(item)){key&&state.seenAssistantKeys.add(key);return null}if(!canObserve){key&&state.seenAssistantKeys.add(key);return null}if(seen&&completed&&key!==state.assistantKey){key&&state.seenAssistantKeys.add(key);return null}if(!state.assistantKey){if(!liveTurn&&!responding&&!state.finalizing&&!state.allowAssistant){key&&state.seenAssistantKeys.add(key);return null}beginAssistant(key)}else if(key&&key!==state.assistantKey&&!sameAssistant){if(responding&&completed&&!liveTurn&&!state.assistantFinalSpoken){state.seenAssistantKeys.add(key);return null}if(!responding&&!liveTurn&&!state.finalizing&&(!state.allowAssistant||completed||seen)){state.seenAssistantKeys.add(key);return null}beginAssistant(key)}rememberAssistantKey(key);key&&state.seenAssistantKeys.add(key);if(text!==state.assistantText){state.assistantText=text;state.assistantFinalSpoken=state.assistantSpokenText===state.assistantText;if(liveTurn&&!completed){clearTimeout(state.restartTimer);return null}}else if(liveTurn&&!completed)return null;if(responding&&completed&&!liveTurn&&state.speaking)return null;if(!finalTurn||state.assistantFinalSpoken)return null;if(state.finalizing&&!responding){finishAssistantSoon(250);return null}if(!speakAssistantText())return null;if(responding)startInterruptMonitor();else{clearTimeout(state.restartTimer);let epoch=state.epoch;state.restartTimer=setTimeout(()=>waitForQuietAssistant(epoch),700)}return null}`,
     `function startListeningSoon(delay=250,force=false){clearTimeout(state.restartTimer);if(!state.active||state.muted||state.listening||state.transcribing||(!force&&isResponseInProgress()))return;let wait=Math.max(delay,state.speechCooldownUntil-Date.now());let epoch=state.epoch;state.restartTimer=setTimeout(()=>{if(epoch!==state.epoch||!state.active||state.muted||state.listening||state.transcribing||(!force&&isResponseInProgress())||Date.now()<state.speechCooldownUntil)return;stopInterruptMonitor();state.controls?.startDictation?.()},wait)}`,
     `function toggle(controls){if(!available())return false;let id=conversationId(controls?.conversationId);if(!id)return false;if(state.active){deactivate("discard");return true}state.controls=controls;state.active=true;state.muted=false;state.activeConversationId=id;state.epoch++;state.awaitingUserTranscript=controls?.isResponseInProgress===!0;state.allowAssistant=false;state.seenAssistantKeys.clear();state.spokenAssistant.clear();state.spokenAssistantTexts=[];state.cursorSentAtMs=0;resetTranscriptState();resetTurnState();stopSpeech();updateUi();if(controls?.isResponseInProgress)controls.onStop?.();startListeningSoon(0,!0);return true}`,
-    `function endpoint({stream,stop,isActive}){if(!state.active||state.muted)return null;state.listening=true;let graph=makeAudioGraph(stream);if(!graph){state.listening=false;stopTracks(stream);return()=>{}}let sawSpeech=false,lastSpeech=0,voicedSince=0,{quietMs,threshold,possibleThreshold,speechMs}=speechSettings(),raf=0,done=false,finish=()=>{if(done)return;done=true;cancelAnimationFrame(raf);graph.close();state.listening=false},tick=()=>{if(done)return;if(!state.active||state.muted||!isActive?.()){finish();return}let now=performance.now(),level=graph.level(),voiced=level>threshold,possible=level>possibleThreshold;if(voiced){voicedSince||(voicedSince=now);if(now-voicedSince>=speechMs){sawSpeech||stopSpeech(!0);sawSpeech=!0;lastSpeech=now;stopInterruptMonitor()}}else if(sawSpeech&&possible){lastSpeech=now;voicedSince=0}else voicedSince=0;if(sawSpeech&&now-lastSpeech>=quietMs){finish();stop?.();return}raf=requestAnimationFrame(tick)};raf=requestAnimationFrame(tick);return finish}`,
+    `function endpoint({stream,stop,isActive}){if(!state.active||state.muted)return null;state.listening=true;let graph=makeAudioGraph(stream);if(!graph){state.listening=false;stopTracks(stream);return()=>{}}let sawSpeech=false,lastSpeech=0,voicedSince=0,{quietMs,threshold,possibleThreshold,speechMs,audioPollMs}=speechSettings(),timer=0,done=false,finish=()=>{if(done)return;done=true;clearTimeout(timer);graph.close();state.listening=false},schedule=()=>{timer=setTimeout(tick,audioPollMs)},tick=()=>{if(done)return;if(!state.active||state.muted||!isActive?.()){finish();return}let now=performance.now(),level=graph.level(),voiced=level>threshold,possible=level>possibleThreshold;if(voiced){voicedSince||(voicedSince=now);if(now-voicedSince>=speechMs){sawSpeech||stopSpeech(!0);sawSpeech=!0;lastSpeech=now;stopInterruptMonitor()}}else if(sawSpeech&&possible){lastSpeech=now;voicedSince=0}else voicedSince=0;if(sawSpeech&&now-lastSpeech>=quietMs){finish();stop?.();return}schedule()};schedule();return finish}`,
     `function normalizeSent(text){return clean(text).toLowerCase().replace(/\\s+/g," ").trim()}`,
     `function tokenSimilarity(a,b){let A=[...new Set(a.split(/\\s+/).filter(e=>e.length>2))],B=new Set(b.split(/\\s+/).filter(e=>e.length>2));if(A.length<4||B.size<4)return false;let hits=0;for(let word of A)B.has(word)&&hits++;return hits/Math.min(A.length,B.size)>=.72}`,
     `function isLikelySpeechEcho(normalized){if(!normalized||Date.now()-state.spokenEchoAt>45e3)return false;let echo=state.spokenEchoText;if(!echo)return false;return normalized.length>=16&&(echo.includes(normalized)||normalized.includes(echo)||tokenSimilarity(normalized,echo))}`,
@@ -118,47 +118,127 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+const JS_IDENT = "[A-Za-z_$][\\w$]*";
+
+function objectPropVar(objectSource, name, fallback) {
+  return objectSource.match(new RegExp(`(?:^|,)\\s*${escapeRegExp(name)}:(${JS_IDENT})(?:,|$)`))?.[1] ?? fallback;
+}
+
+function currentComposerBinding(source) {
+  const propsPattern = new RegExp(`\\{([^{}]*voiceControls:${JS_IDENT}[^{}]*)\\}\\s*=\\s*${JS_IDENT}`, "g");
+  for (const propsMatch of source.matchAll(propsPattern)) {
+    const propsObject = propsMatch[1];
+    const voiceControlsVar = objectPropVar(propsObject, "voiceControls", null);
+    if (voiceControlsVar == null) {
+      continue;
+    }
+    const requiredProps = ["conversationId", "isResponseInProgress", "onStop", "submitBlockReason"];
+    if (!requiredProps.every((name) => objectPropVar(propsObject, name, null) != null)) {
+      continue;
+    }
+    const voiceControlsPattern = new RegExp(
+      `\\{([^{}]*startDictation:[^{}]*stopDictation:[^{}]*threadRealtime:[^{}]*)\\}\\s*=\\s*${escapeRegExp(voiceControlsVar)}`,
+      "g",
+    );
+    voiceControlsPattern.lastIndex = propsMatch.index + propsMatch[0].length;
+    const voiceControlsMatch = voiceControlsPattern.exec(source);
+    if (voiceControlsMatch != null) {
+      return { propsObject, voiceControlsObject: voiceControlsMatch[1], voiceControlsVar };
+    }
+  }
+  return null;
+}
+
+function voiceControlsObjectVar(source) {
+  const currentBinding = currentComposerBinding(source);
+  if (currentBinding != null) {
+    return currentBinding.voiceControlsVar;
+  }
+  return source.match(/voiceControls:([A-Za-z_$][\w$]*)/)?.[1] ?? "z";
+}
+
 function voiceControlVar(source, name, fallback) {
-  const match = source.match(/\{([^{}]*startDictation:[^{}]*stopDictation:[^{}]*threadRealtime:[^{}]*)\}=z/);
+  const currentBinding = currentComposerBinding(source);
+  if (currentBinding != null) {
+    return objectPropVar(currentBinding.voiceControlsObject, name, fallback);
+  }
+  const voiceControlsVar = voiceControlsObjectVar(source);
+  const match = source.match(
+    new RegExp(`\\{([^{}]*startDictation:[^{}]*stopDictation:[^{}]*threadRealtime:[^{}]*)\\}=${escapeRegExp(voiceControlsVar)}`),
+  );
   if (!match) {
     return fallback;
   }
-  return match[1].match(new RegExp(`${name}:([A-Za-z_$][\\w$]*)`))?.[1] ?? fallback;
+  return objectPropVar(match[1], name, fallback);
+}
+
+function composerPropVar(source, name, fallback) {
+  const currentBinding = currentComposerBinding(source);
+  if (currentBinding == null) {
+    return fallback;
+  }
+  return objectPropVar(currentBinding.propsObject, name, fallback);
+}
+
+function isLegacyComposerControlShape(source) {
+  return (
+    new RegExp(`\\{\\s*voiceControls:${JS_IDENT}\\s*\\}\\s*=\\s*${JS_IDENT}`).test(source) &&
+    source.includes("F===`empty-message`&&!A") &&
+    source.includes("ue.isAvailable&&ue.phase!==`active`")
+  );
+}
+
+function composerPropVars(source) {
+  if (currentComposerBinding(source) == null && !isLegacyComposerControlShape(source)) {
+    return null;
+  }
+  return {
+    conversationId: composerPropVar(source, "conversationId", "v"),
+    isResponseInProgress: composerPropVar(source, "isResponseInProgress", "A"),
+    onStop: composerPropVar(source, "onStop", "P"),
+    submitBlockReason: composerPropVar(source, "submitBlockReason", "F"),
+  };
 }
 
 function composerVoiceVars(source) {
+  const startRealtimeConversation = voiceControlVar(source, "startRealtimeConversation", null);
   return {
     isDictating: voiceControlVar(source, "isDictating", "J"),
     isDictationSupported: voiceControlVar(source, "isDictationSupported", "q"),
     isTranscribing: voiceControlVar(source, "isTranscribing", "re"),
     isNewRealtimeConversationAvailable: voiceControlVar(source, "isNewRealtimeConversationAvailable", "J"),
     startDictation: voiceControlVar(source, "startDictation", "se"),
-    startNewRealtimeConversation: voiceControlVar(source, "startNewRealtimeConversation", "ce"),
+    startRealtimeConversation: startRealtimeConversation ?? "ce",
+    startNewRealtimeConversation: voiceControlVar(
+      source,
+      "startNewRealtimeConversation",
+      startRealtimeConversation ?? "ce",
+    ),
     stopDictation: voiceControlVar(source, "stopDictation", "le"),
     threadRealtime: voiceControlVar(source, "threadRealtime", "ue"),
   };
 }
 
-function composerSyncPayload(vars) {
+function composerSyncPayload(vars, props) {
   return [
-    "isResponseInProgress:A",
+    `isResponseInProgress:${props.isResponseInProgress}`,
     `isDictating:${vars.isDictating}`,
     `isTranscribing:${vars.isTranscribing}`,
     `startDictation:${vars.startDictation}`,
     `stopDictation:${vars.stopDictation}`,
-    "onStop:P",
+    `onStop:${props.onStop}`,
   ].join(",");
 }
 
-function composerTogglePayload(vars) {
+function composerTogglePayload(vars, props) {
   return [
-    "conversationId:v",
+    `conversationId:${props.conversationId}`,
     `startDictation:${vars.startDictation}`,
     `stopDictation:${vars.stopDictation}`,
-    "onStop:P",
+    `onStop:${props.onStop}`,
     `isDictating:${vars.isDictating}`,
     `isTranscribing:${vars.isTranscribing}`,
-    "isResponseInProgress:A",
+    `isResponseInProgress:${props.isResponseInProgress}`,
     `isDictationSupported:${vars.isDictationSupported}`,
   ].join(",");
 }
@@ -166,36 +246,73 @@ function composerTogglePayload(vars) {
 function applyComposerControlPatch(source) {
   let patched = source;
   const vars = composerVoiceVars(patched);
-  const visiblePattern =
-    /let Be=ze,Ve=F===`empty-message`&&!A&&\((?:globalThis\.codexLinuxConversationAvailable\?\.\(\)\|\|)?([A-Za-z_$][\w$]*)\.isAvailable&&\1\.phase!==`active`\|\|([A-Za-z_$][\w$]*)\),He=([A-Za-z_$][\w$]*)\(fc,`composer\.startVoiceMode`\)/;
-  const visibleMatch = patched.match(visiblePattern);
-  if (visibleMatch && !patched.includes("codexLinuxConversationSync?.(v")) {
-    const threadRealtime = visibleMatch[1];
-    const realtimeAvailable = visibleMatch[2] || vars.isNewRealtimeConversationAvailable;
-    const shortcutFn = visibleMatch[3];
-    patched = patched.replace(
-      visiblePattern,
-      `let Be=ze;globalThis.codexLinuxConversationSync?.(v,{${composerSyncPayload(vars)}});let codexLinuxConversationActive=globalThis.codexLinuxConversationIsActive?.(v)===!0,Ve=codexLinuxConversationActive||F===\`empty-message\`&&!A&&((v&&globalThis.codexLinuxConversationAvailable?.())||${threadRealtime}.isAvailable&&${threadRealtime}.phase!==\`active\`||${realtimeAvailable}),He=${shortcutFn}(fc,\`composer.startVoiceMode\`)`,
+  const props = composerPropVars(patched);
+  if (props == null) {
+    warn("Could not resolve composer prop aliases", "conversation mode composer control patch");
+  } else {
+    const visiblePattern = new RegExp(
+      `let (${JS_IDENT})=(${JS_IDENT}),(${JS_IDENT})=${escapeRegExp(props.submitBlockReason)}` +
+        '===`empty-message`' +
+        `&&!${escapeRegExp(props.isResponseInProgress)}&&\\((?:(${JS_IDENT})&&)?` +
+        `${escapeRegExp(vars.threadRealtime)}\\.isAvailable&&${escapeRegExp(vars.threadRealtime)}\\.phase!==` +
+        '`active`' +
+        `\\|\\|(${JS_IDENT})\\),(${JS_IDENT})=(${JS_IDENT})\\((${JS_IDENT}),` +
+        '`composer\\.startVoiceMode`' +
+        "\\)",
     );
-  } else if (!patched.includes("codexLinuxConversationSync?.(v")) {
-    warn("Could not find composer voice button visibility gate", "conversation mode composer control patch");
+    const visibleMatch = patched.match(visiblePattern);
+    if (visibleMatch && !patched.includes(`codexLinuxConversationSync?.(${props.conversationId}`)) {
+      const labelVar = visibleMatch[1];
+      const labelSrc = visibleMatch[2];
+      const visVar = visibleMatch[3];
+      const existingRealtimeAvailable = visibleMatch[4] == null ? "" : `${visibleMatch[4]}&&`;
+      const realtimeAvailable = visibleMatch[5] || vars.isNewRealtimeConversationAvailable;
+      const shortcutResultVar = visibleMatch[6];
+      const shortcutFn = visibleMatch[7];
+      const shortcutArg = visibleMatch[8];
+      patched = patched.replace(
+        visiblePattern,
+        `let ${labelVar}=${labelSrc};globalThis.codexLinuxConversationSync?.(${props.conversationId},{${composerSyncPayload(vars, props)}});let codexLinuxConversationActive=globalThis.codexLinuxConversationIsActive?.(${props.conversationId})===!0,${visVar}=codexLinuxConversationActive||${props.submitBlockReason}===\`empty-message\`&&!${props.isResponseInProgress}&&((${props.conversationId}&&globalThis.codexLinuxConversationAvailable?.())||${existingRealtimeAvailable}${vars.threadRealtime}.isAvailable&&${vars.threadRealtime}.phase!==\`active\`||${realtimeAvailable}),${shortcutResultVar}=${shortcutFn}(${shortcutArg},\`composer.startVoiceMode\`)`,
+      );
+    } else if (!patched.includes(`codexLinuxConversationSync?.(${props.conversationId}`)) {
+      warn("Could not find composer voice button visibility gate", "conversation mode composer control patch");
+    }
   }
 
   const threadRealtime = escapeRegExp(vars.threadRealtime);
   const startNewRealtimeConversation = escapeRegExp(vars.startNewRealtimeConversation);
-  const clickPattern = new RegExp(
+  const legacyClickPattern = new RegExp(
     `([A-Za-z_$][\\w$]*)=\\(\\)=>\\{if\\(${threadRealtime}\\.phase===\`starting\`\\|\\|${threadRealtime}\\.phase===\`active\`\\)\\{${threadRealtime}\\.stopRealtime\\(\\);return\\}if\\(${threadRealtime}\\.isAvailable\\)\\{${threadRealtime}\\.phase===\`inactive\`&&${threadRealtime}\\.startRealtime\\(\`composer_button_existing_thread\`\\);return\\}${startNewRealtimeConversation}\\(\\)\\}`,
   );
-  const togglePattern =
-    /codexLinuxConversationToggle\?\.\(\{conversationId:v,startDictation:[A-Za-z_$][\w$]*,stopDictation:[A-Za-z_$][\w$]*,onStop:P,isDictating:[A-Za-z_$][\w$]*,isTranscribing:[A-Za-z_$][\w$]*,isResponseInProgress:A,isDictationSupported:[A-Za-z_$][\w$]*\}\)/;
-  const toggleCall = `codexLinuxConversationToggle?.({${composerTogglePayload(vars)}})`;
-  if (clickPattern.test(patched)) {
-    patched = patched.replace(
-      clickPattern,
-      `$1=()=>{if(globalThis.${toggleCall})return;if(${vars.threadRealtime}.phase===\`starting\`||${vars.threadRealtime}.phase===\`active\`){${vars.threadRealtime}.stopRealtime();return}if(${vars.threadRealtime}.isAvailable){${vars.threadRealtime}.phase===\`inactive\`&&${vars.threadRealtime}.startRealtime(\`composer_button_existing_thread\`);return}${vars.startNewRealtimeConversation}()}`,
+  const currentStartRealtimeConversation = escapeRegExp(vars.startRealtimeConversation);
+  const currentClickPattern = new RegExp(
+    `([A-Za-z_$][\\w$]*)=\\(\\)=>\\{if\\(${threadRealtime}\\.phase===\`starting\`\\|\\|${threadRealtime}\\.phase===\`active\`\\)\\{${threadRealtime}\\.stopRealtime\\(\\);return\\}if\\(${threadRealtime}\\.isAvailable\\)\\{${threadRealtime}\\.phase===\`inactive\`&&${currentStartRealtimeConversation}\\(\\);return\\}${currentStartRealtimeConversation}\\(\\)\\}`,
+  );
+  const anyTogglePattern = new RegExp(
+    `codexLinuxConversationToggle\\?\\.\\(\\{conversationId:${JS_IDENT},startDictation:${JS_IDENT},stopDictation:${JS_IDENT},onStop:${JS_IDENT},isDictating:${JS_IDENT},isTranscribing:${JS_IDENT},isResponseInProgress:${JS_IDENT},isDictationSupported:${JS_IDENT}\\}\\)`,
+  );
+  if (props != null) {
+    const togglePattern = new RegExp(
+      `codexLinuxConversationToggle\\?\\.\\(\\{conversationId:${escapeRegExp(props.conversationId)},startDictation:${JS_IDENT},stopDictation:${JS_IDENT},onStop:${escapeRegExp(props.onStop)},isDictating:${JS_IDENT},isTranscribing:${JS_IDENT},isResponseInProgress:${escapeRegExp(props.isResponseInProgress)},isDictationSupported:${JS_IDENT}\\}\\)`,
     );
-  } else if (togglePattern.test(patched)) {
-    patched = patched.replace(togglePattern, toggleCall);
+    const toggleCall = `codexLinuxConversationToggle?.({${composerTogglePayload(vars, props)}})`;
+    if (legacyClickPattern.test(patched)) {
+      patched = patched.replace(
+        legacyClickPattern,
+        `$1=()=>{if(globalThis.${toggleCall})return;if(${vars.threadRealtime}.phase===\`starting\`||${vars.threadRealtime}.phase===\`active\`){${vars.threadRealtime}.stopRealtime();return}if(${vars.threadRealtime}.isAvailable){${vars.threadRealtime}.phase===\`inactive\`&&${vars.threadRealtime}.startRealtime(\`composer_button_existing_thread\`);return}${vars.startNewRealtimeConversation}()}`,
+      );
+    } else if (currentClickPattern.test(patched)) {
+      patched = patched.replace(
+        currentClickPattern,
+        `$1=()=>{if(globalThis.${toggleCall})return;if(${vars.threadRealtime}.phase===\`starting\`||${vars.threadRealtime}.phase===\`active\`){${vars.threadRealtime}.stopRealtime();return}if(${vars.threadRealtime}.isAvailable){${vars.threadRealtime}.phase===\`inactive\`&&${vars.startRealtimeConversation}();return}${vars.startRealtimeConversation}()}`,
+      );
+    } else if (togglePattern.test(patched)) {
+      patched = patched.replace(togglePattern, toggleCall);
+    } else if (anyTogglePattern.test(patched)) {
+      patched = patched.replace(anyTogglePattern, toggleCall);
+    } else if (!patched.includes("codexLinuxConversationToggle")) {
+      warn("Could not find composer voice button click handler", "conversation mode composer control patch");
+    }
   } else if (!patched.includes("codexLinuxConversationToggle")) {
     warn("Could not find composer voice button click handler", "conversation mode composer control patch");
   }
@@ -220,6 +337,14 @@ function applyComposerControlPatch(source) {
 }
 
 function applyDictationEndpointPatch(source) {
+  if (
+    !source.includes("global-dictation-record-history-item") &&
+    !source.includes("navigator.mediaDevices.getUserMedia({audio:{channelCount:1}})") &&
+    !source.includes("new MediaRecorder")
+  ) {
+    return source;
+  }
+
   let patched = source;
   const getUserMediaNeedle = "navigator.mediaDevices.getUserMedia({audio:{channelCount:1}})";
   if (patched.includes(getUserMediaNeedle)) {
@@ -227,27 +352,56 @@ function applyDictationEndpointPatch(source) {
       getUserMediaNeedle,
       "navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:!0,noiseSuppression:!0,autoGainControl:!0}})",
     );
+  } else {
+    const currentMicConstraintsPattern =
+      /([A-Za-z_$][\w$]*)=await ([A-Za-z_$][\w$]*)\(\{channelCount:1\}\)/u;
+    if (currentMicConstraintsPattern.test(patched)) {
+      patched = patched.replace(
+        currentMicConstraintsPattern,
+        "$1=await $2({channelCount:1,echoCancellation:!0,noiseSuppression:!0,autoGainControl:!0})",
+      );
+    }
   }
 
-  const cleanupNeedle = "r&&(r.ondataavailable=null,r.onstop=null),m.current=null,O();";
+  const cleanupNeedle = "r&&(r.ondataavailable=null,r.onstop=null),m.current=null,D();";
   if (!patched.includes("codexLinuxConversationCleanup?.()") && patched.includes(cleanupNeedle)) {
     patched = patched.replace(
       cleanupNeedle,
-      "r?.codexLinuxConversationCleanup?.(),r&&(r.ondataavailable=null,r.onstop=null),m.current=null,O();",
+      "r?.codexLinuxConversationCleanup?.(),r&&(r.ondataavailable=null,r.onstop=null),m.current=null,D();",
     );
   } else if (!patched.includes("codexLinuxConversationCleanup")) {
-    warn("Could not find dictation cleanup point", "conversation mode dictation endpoint patch");
+    const currentCleanupPattern =
+      /([A-Za-z_$][\w$]*)&&\(\1\.ondataavailable=null,\1\.onstop=null\),([A-Za-z_$][\w$]*)\.current=null,([A-Za-z_$][\w$]*)\(\);/u;
+    if (currentCleanupPattern.test(patched)) {
+      patched = patched.replace(
+        currentCleanupPattern,
+        "$1?.codexLinuxConversationCleanup?.(),$1&&($1.ondataavailable=null,$1.onstop=null),$2.current=null,$3();",
+      );
+    } else {
+      warn("Could not find dictation cleanup point", "conversation mode dictation endpoint patch");
+    }
   }
 
   const recorderNeedle =
-    "t.ondataavailable=e=>{e.data.size>0&&v.current.push(e.data)},t.onstop=()=>{M()},t.start(),l(!0)";
+    "t.ondataavailable=e=>{e.data.size>0&&g.current.push(e.data)},t.onstop=()=>{A()},t.start(),l(!0)";
   if (!patched.includes("codexLinuxConversationEndpoint?.(") && patched.includes(recorderNeedle)) {
     patched = patched.replace(
       recorderNeedle,
-      "t.ondataavailable=e=>{e.data.size>0&&v.current.push(e.data)},t.onstop=()=>{M()},t.codexLinuxConversationCleanup=globalThis.codexLinuxConversationEndpoint?.({stream:e,stop:()=>P(`send`),isActive:()=>m.current===t&&t.state!==`inactive`}),t.start(),l(!0)",
+      "t.ondataavailable=e=>{e.data.size>0&&g.current.push(e.data)},t.onstop=()=>{A()},t.codexLinuxConversationCleanup=globalThis.codexLinuxConversationEndpoint?.({stream:e,stop:()=>a(`send`),isActive:()=>m.current===t&&t.state!==`inactive`}),t.start(),l(!0)",
     );
   } else if (!patched.includes("codexLinuxConversationEndpoint")) {
-    warn("Could not find dictation recorder start point", "conversation mode dictation endpoint patch");
+    const currentActionRef = patched.match(/let [A-Za-z_$][\w$]*=([A-Za-z_$][\w$]*)\.current\?\?`insert`/)?.[1] ?? "w";
+    const currentRecorderPattern =
+      /let ([A-Za-z_$][\w$]*)=new MediaRecorder\(([A-Za-z_$][\w$]*)\);if\(([A-Za-z_$][\w$]*)\.current=\1,([A-Za-z_$][\w$]*)\.current=\[\],\1\.ondataavailable=([A-Za-z_$][\w$]*)=>\{\5\.data\.size>0&&\4\.current\.push\(\5\.data\)\},\1\.onstop=\(\)=>\{([A-Za-z_$][\w$]*)\(\)\},\1\.start\(\),([A-Za-z_$][\w$]*)\(!0\)/u;
+    if (currentRecorderPattern.test(patched)) {
+      patched = patched.replace(
+        currentRecorderPattern,
+        (_needle, recorderVar, streamVar, recorderRefVar, chunksRefVar, dataVar, finishFn, activeSetterVar) =>
+          `let ${recorderVar}=new MediaRecorder(${streamVar});if(${recorderRefVar}.current=${recorderVar},${chunksRefVar}.current=[],${recorderVar}.ondataavailable=${dataVar}=>{${dataVar}.data.size>0&&${chunksRefVar}.current.push(${dataVar}.data)},${recorderVar}.onstop=()=>{${finishFn}()},${recorderVar}.codexLinuxConversationCleanup=globalThis.codexLinuxConversationEndpoint?.({stream:${streamVar},stop:()=>{${currentActionRef}.current=\`send\`;${recorderVar}.state!==\`inactive\`&&${recorderVar}.stop()},isActive:()=>${recorderRefVar}.current===${recorderVar}&&${recorderVar}.state!==\`inactive\`}),${recorderVar}.start(),${activeSetterVar}(!0)`,
+      );
+    } else {
+      warn("Could not find dictation recorder start point", "conversation mode dictation endpoint patch");
+    }
   }
 
   const globalStopNeedle = "p.current!==e.sessionId||(p.current=null,o(`insert`))";
@@ -259,14 +413,23 @@ function applyDictationEndpointPatch(source) {
   }
 
   const transcriptSendNeedle =
-    "i.length>0&&(h.getInstance().dispatchMessage(`global-dictation-record-history-item`,{text:i}),e===`send`?n.onTranscriptSend(i):n.onTranscriptInsert(i))";
+    "i.length>0&&(j.getInstance().dispatchMessage(`global-dictation-record-history-item`,{text:i}),e===`send`?n.onTranscriptSend(i):n.onTranscriptInsert(i))";
   if (!patched.includes("codexLinuxConversationShouldSendTranscript") && patched.includes(transcriptSendNeedle)) {
     patched = patched.replace(
       transcriptSendNeedle,
-      "i.length>0&&e!==`discard`&&globalThis.codexLinuxConversationShouldSendTranscript?.(i,e)!==!1&&(h.getInstance().dispatchMessage(`global-dictation-record-history-item`,{text:i}),e===`send`?n.onTranscriptSend(i):n.onTranscriptInsert(i))",
+      "i.length>0&&e!==`discard`&&globalThis.codexLinuxConversationShouldSendTranscript?.(i,e)!==!1&&(j.getInstance().dispatchMessage(`global-dictation-record-history-item`,{text:i}),e===`send`?n.onTranscriptSend(i):n.onTranscriptInsert(i))",
     );
   } else if (!patched.includes("codexLinuxConversationShouldSendTranscript")) {
-    warn("Could not find dictation transcript send point", "conversation mode transcript dedupe patch");
+    const currentTranscriptPattern =
+      /([A-Za-z_$][\w$]*)\.length>0&&\(([A-Za-z_$][\w$]*)\.getInstance\(\)\.dispatchMessage\(`global-dictation-record-history-item`,\{text:\1\}\),([A-Za-z_$][\w$]*)===`send`\?([A-Za-z_$][\w$]*)\.onTranscriptSend\(\1\):\4\.onTranscriptInsert\(\1\)\)/u;
+    if (currentTranscriptPattern.test(patched)) {
+      patched = patched.replace(
+        currentTranscriptPattern,
+        "$1.length>0&&$3!==`discard`&&globalThis.codexLinuxConversationShouldSendTranscript?.($1,$3)!==!1&&($2.getInstance().dispatchMessage(`global-dictation-record-history-item`,{text:$1}),$3===`send`?$4.onTranscriptSend($1):$4.onTranscriptInsert($1))",
+      );
+    } else {
+      warn("Could not find dictation transcript send point", "conversation mode transcript dedupe patch");
+    }
   }
 
   return patched;
@@ -286,7 +449,7 @@ function applyAssistantRenderPatch(source) {
     return source;
   }
   const jsxCallPattern =
-    /\(0,([A-Za-z_$][\w$]*)\.jsx\)\(([A-Za-z_$][\w$]*),\{item:([A-Za-z_$][\w$]*),([^{}]*?)assistantCopyText:([A-Za-z_$][\w$]*),([^{}]*?)conversationId:([A-Za-z_$][\w$]*),([^{}]*?)renderCodeBlocksAsWritingBlocks:([A-Za-z_$][\w$]*)\}\)/g;
+    /\(0,([A-Za-z_$][\w$]*)\.jsx\)\(([A-Za-z_$][\w$]*),\{item:([A-Za-z_$][\w$]*),([^{}]*?)assistantCopyText:([A-Za-z_$][\w$]*),([^{}]*?)conversationId:([A-Za-z_$][\w$]*),[^{}]*?\}\)/g;
   const patched = source.replace(
     jsxCallPattern,
     (match, jsxVar, _component, itemVar, _beforeCopy, copyVar, _beforeConversation, conversationVar) =>
@@ -315,7 +478,7 @@ module.exports = {
   applyComposerRuntimePatch,
   applyDictationEndpointPatch,
   applyReadAloudMainBundlePatch,
-  patches: [
+  descriptors: [
     {
       id: "read-aloud-conversation-source",
       phase: "main-bundle",
@@ -328,7 +491,8 @@ module.exports = {
       phase: "webview-asset",
       order: 20690,
       ciPolicy: "optional",
-      pattern: /^annotation-comment-editor-card-.*\.js$/,
+      pattern:
+        /^(?:(?:browser-sidebar-comment-light-dismiss|use-dictation(?!-hotkey))-|app-initial~app-main~.*onboarding-page).*\.js$/,
       missingDescription: "composer dictation bundle",
       skipDescription: "conversation mode dictation endpoint patch",
       apply: applyDictationEndpointPatch,
@@ -348,7 +512,7 @@ module.exports = {
       phase: "webview-asset",
       order: 20710,
       ciPolicy: "optional",
-      pattern: /^(index|local-conversation-thread)-.*\.js$/,
+      pattern: /^(index|local-conversation-thread|local-conversation-turn)-.*\.js$/,
       missingDescription: "conversation thread bundle",
       skipDescription: "conversation mode assistant observer patch",
       apply: applyAssistantRenderPatch,

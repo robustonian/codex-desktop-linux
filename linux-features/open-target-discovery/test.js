@@ -8,16 +8,27 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { pathToFileURL } = require("node:url");
-const { applyMainBundlePatch } = require("./patch.js");
+const {
+  applyMainBundlePatch,
+  applyNativeOpenTargetSelectionPatch,
+  applyOpenInTargetCommandPatch,
+  applyOpenInTargetExecutePatch,
+  applyOpenInTargetRegistryCommandPatch,
+  applyOpenInTargetsBridgeDetectionPatch,
+  applyOpenInTargetsAvailabilityPatch,
+  applyOpenInTargetsDirectoryModePatch,
+} = require("./patch.js");
 const {
   enabledLinuxFeatureIds,
-  loadLinuxFeatureMainBundlePatches,
+  loadLinuxFeaturePatchDescriptors,
 } = require("../../scripts/lib/linux-features.js");
 const {
   createPatchReport,
+} = require("../../scripts/lib/patch-report.js");
+const {
   patchExtractedApp,
   patchMainBundleSource,
-} = require("../../scripts/patch-linux-window-ui.js");
+} = require("../../scripts/patches/runner.js");
 
 const mainBundlePrefix =
   "let n=require(`electron`),i=require(`node:path`),o=require(`node:fs`),u=require(`node:child_process`);";
@@ -28,8 +39,37 @@ const terminalOpenTargetBundle =
 const ideOpenTargetsBundle =
   "function ih({id:e,label:t,icon:n,darwinDetect:r,win32Detect:i,darwinEnv:a,darwinArgs:o,hidden:s}){return{id:e,platforms:{darwin:r?{label:t,icon:n,kind:`editor`,hidden:s,detect:r,env:a,args:o??ah,supportsSsh:!0}:void 0,win32:i?{label:t,icon:n,kind:`editor`,hidden:s,detect:i,args:ah,supportsSsh:!0}:void 0}}}var ah=(e,t)=>t?[`${e}:${t.line}:${t.column}`]:[e];var Og=ih({id:`vscode`,label:`VS Code`,icon:`apps/vscode.png`,darwinDetect:()=>`open`,win32Detect:()=>`Code.exe`});var jh=ih({id:`cursor`,label:`Cursor`,icon:`apps/cursor.png`,darwinDetect:()=>`open`,win32Detect:()=>`Cursor.exe`});function sg({id:e,label:t,icon:n,toolboxTarget:r,macExecutable:i,windowsPathCommands:a,windowsInstallDirPrefixes:o,windowsInstallExecutables:s}){return{id:e,platforms:{darwin:{label:t,icon:n,kind:`editor`,detect:()=>`open`,args:mg},win32:a&&o&&s?{label:t,icon:n,kind:`editor`,detect:()=>`idea.exe`,args:mg}:void 0}}}function mg(e,t){return t?[`--line`,t.line.toString(),`--column`,t.column.toString(),e]:[e]}var $h=sg({id:`intellij`,label:`IntelliJ IDEA`,icon:`apps/intellij.png`,toolboxTarget:`intellij`,macExecutable:`idea`,windowsPathCommands:[`idea`],windowsInstallDirPrefixes:[`idea`],windowsInstallExecutables:[`idea`]});var Wg={id:`zed`,platforms:{darwin:{label:`Zed`,icon:`apps/zed.png`,kind:`editor`,detect:Gg,args:hg},win32:{label:`Zed`,icon:`apps/zed.png`,kind:`editor`,detect:Kg,args:hg}}};function Gg(){}function Kg(){}function hg(e,t){return t?[`${e}:${t.line}:${t.column}`]:[e]}var Xg=[Og,jh,Wg,$h];";
 const openTargetsBundle = `${mainBundlePrefix}${fileManagerBundle}${terminalOpenTargetBundle}${ideOpenTargetsBundle}`;
+const collidingPathAliasBundle =
+  "let n=require(`electron`),o=require(`node:path`),c=require(`node:fs`),u=require(`node:child_process`);" +
+  fileManagerBundle +
+  terminalOpenTargetBundle +
+  ideOpenTargetsBundle;
 const iconResolverBundle =
   "async function c_(e,t,a){return e===`win32`?Promise.all(t.map(async e=>{let t=a?.get(e.id)??null,r=e.iconPath?e.iconPath(t):t;return{id:e.id,label:e.label,icon:await d_(r,e.icon),kind:e.kind,hidden:e.hidden,supportsSsh:e.supportsSsh}})):l_(t)}function l_(e){return e.map(({id:e,label:t,icon:n,kind:r,hidden:i,supportsSsh:a})=>({id:e,label:t,icon:n,kind:r,hidden:i,supportsSsh:a}))}async function d_(e,t){if(!e)return t;try{let r=e.toLowerCase().endsWith(`.lnk`)?await f_(e):await n.app.getFileIcon(e,{size:`normal`});return!r||r.isEmpty()?t:r.toDataURL()}catch(e){return t}}async function f_(e){return n.nativeImage.createFromPath(e)}";
+const currentIconResolverBundle =
+  "async function VN(e,t,n){return e===`win32`?Promise.all(t.map(async e=>{let t=n?.get(e.id)??null,r=e.iconPath?e.iconPath(t):t;return{id:e.id,label:e.label,icon:await WN(r,e.icon),kind:e.kind,hidden:e.hidden,supportsSsh:e.supportsSsh}})):HN(t)}function HN(e){return e.map(({id:e,label:t,icon:n,kind:r,hidden:i,supportsSsh:a})=>({id:e,label:t,icon:n,kind:r,hidden:i,supportsSsh:a}))}async function WN(e,t){if(!e)return t;try{let r=e.toLowerCase().endsWith(`.lnk`)?await UN(e):await n.app.getFileIcon(e,{size:`normal`});return!r||r.isEmpty()?t:r.toDataURL()}catch(e){return t}}async function UN(e){return n.nativeImage.createFromPath(e)}";
+const openInCommandBundle =
+  "async function JN(){}function iP(e){return e.targets}var IN={};class App{constructor(){this.requestOpenInWorker=async()=>({command:`worker-command`});this.settingsStore={targets:[{id:`linux-desktop-agent`,detect:async()=>`main-command`},{id:`missing`,detect:async()=>null}]}}getSettingsStore(){return this.settingsStore}async getOpenInTargetCommand(e){if(this.requestOpenInWorker==null)return;let{command:t}=await this.requestOpenInWorker({method:`get-target-command`,params:JN(this.getSettingsStore(),e)});return t}}";
+const currentOpenInCommandBundle =
+  "async function JN(){}function iP(e){return e.targets}var IN={};class App{constructor(){this.requestOpenInWorker=async()=>({command:null});this.settingsStore={targets:[{id:`linux-desktop-agent`,detect:async()=>`main-command`},{id:`missing`,detect:async()=>null}]}}getSettingsStore(){return this.settingsStore}async getOpenInTargetCommand(e){if(this.requestOpenInWorker==null)return;let{command:t}=await this.requestOpenInWorker({method:`get-target-command`,params:JN(this.getSettingsStore(),e)});if(t==null)throw Error(`Open target \"${e}\" is not available`);return t}}";
+const latestOpenInCommandBundle =
+  "function pP(e){return e.targets}function iP(e,t){return{target:t}}class App{constructor(){this.getOpenInWorker=()=>async()=>({command:null});this.settingsStore={targets:[{id:`linux-desktop-agent`,detect:async()=>`main-command`},{id:`missing`,detect:async()=>null}]}}getSettingsStore(){return this.settingsStore}async getOpenInTargetCommand(e){let{command:t}=await this.getOpenInWorker()({method:`get-target-command`,params:iP(this.getSettingsStore(),e)});if(t==null)throw Error(`Open target \"${e}\" is not available`);return t}}";
+const openInAvailabilityBundle =
+  "function pP(e){return e.targets}function eP(e){return e.map(({id:e,label:t,icon:n,kind:r,hidden:i,supportsSsh:a})=>({id:e,label:t,icon:n,kind:r,hidden:i,supportsSsh:a}))}function rP(e){return eP(pP(e))}function iP(e,t){return{target:t}}function tP(){return{error(){},warning(){}}}async function aP(e,t){let n=await Promise.all(rP(e).map(async n=>{let r=iP(e,n.id),[i,a]=await Promise.all([t({method:`get-target-command`,params:r}).then(e=>e.command).catch(e=>(tP().error(`Failed to detect open target`,{safe:{},sensitive:{id:n.id,error:e}}),null)),process.platform===`win32`?t({method:`load-target-icon`,params:r}).then(e=>e.icon).catch(e=>(tP().warning(`Failed to resolve open target icon`,{safe:{},sensitive:{id:n.id,error:e}}),n.icon)):n.icon]);return{command:i,metadata:{...n,icon:a}}}));return{allAvailableTargets:n.flatMap(({command:e,metadata:t})=>e==null?[]:[t.id]),targetMetadata:n.map(({metadata:e})=>e)}}";
+const openInBridgeBundle =
+  "async function JN(){}function iP(e){return e.targets}var IN={};var bridge={options:{settingsStore:{targets:[{id:`linux-desktop-agent`,detect:async()=>`main-command`},{id:`missing`,detect:async()=>null}]},requestOpenInWorker:async()=>({command:`worker-command`})},openInTargets:{detectTarget:async({target:e})=>{if(this.options.requestOpenInWorker==null)throw Error(`Open in worker unavailable`);let{command:t}=await this.options.requestOpenInWorker({method:`get-target-command`,params:JN(this.options.settingsStore,e)});return{available:t!=null}},loadTargetIcon:()=>{}}}";
+const latestOpenInBridgeBundle =
+  "function pP(e){return e.targets}function iP(e,t){return{target:t}}var bridge={options:{settingsStore:{targets:[{id:`linux-desktop-agent`,detect:async()=>`main-command`},{id:`missing`,detect:async()=>null}]},requestOpenInWorker:async()=>({command:null})},openInTargets:{detectTarget:async({target:e})=>{if(this.options.requestOpenInWorker==null)throw Error(`Open in worker unavailable`);let{command:t}=await this.options.requestOpenInWorker({method:`get-target-command`,params:iP(this.options.settingsStore,e)});return{available:t!=null}},loadTargetIcon:()=>{}}}";
+const openInExecuteBundle =
+  "function iP(e){return e.targets}async function BN(e,t,n){return n}async function ZN(e,t,n,{appPath:r,detectedCommand:i,hostConfig:a,location:o,remotePath:s,remoteWorkspaceRoot:c}={}){await BN(t,n,{appPath:r,detectedCommand:i,hostConfig:a,location:o,remotePath:s,remoteWorkspaceRoot:c})}";
+const openInTargetsBundle =
+  '"open-in-targets":async({cwd:e,deferEnrichment:n=!1,hostId:r,nativeBrowserDiscovery:i=`scan`,path:a})=>{let o=this.getRequestAppServerClient(r??void 0),s=this.getSettingsStore();let[c,l]=await Promise.all([XN(s),YN(s)]),u=a?.replace(/^([ab])[\\\\/]/,``)??null,d=u!=null&&_F(u)&&!t.Ta(o.hostConfig),f=u==null||d||t.Ta(o.hostConfig)?null:this.resolveOpenFilePath(this.mapAgentPathToLocalPath(u,o.hostConfig)??u,this.mapAgentPathToLocalPath(e,o.hostConfig)??this.getWorkspaceRoot()),p=oj(o.hostConfig,c,l),m=new Set(p),h=tP(s,e,m),g=d||f!=null&&t.wo(f),_=f!=null&&UA(f),v=f!=null&&GA(f),y=g?await gF({nativeBrowserDiscovery:i}):_?await hF({filePath:f}):[];return{preferredTarget:h,availableTargets:Array.from(m),mode:g||v?`native`:`editor`,targets:[...l.map(({id:e,label:t,icon:n,kind:r,hidden:i})=>({id:e,target:e,label:t,icon:n,kind:r,hidden:i,available:m.has(e),default:h===e||void 0})),...y]}}';
+const latestOpenInTargetsBundle =
+  '"open-in-targets":async({cwd:e,deferEnrichment:n=!1,hostId:r,nativeBrowserDiscovery:i=`scan`,path:a})=>{let o=this.getRequestAppServerClient(r??void 0),s=this.getSettingsStore();if(n&&a==null){let t=dP(s,e);return{preferredTarget:t,availableTargets:[],mode:`editor`,targets:Ej(rP(s),o.hostConfig).map(({id:e,label:n,icon:r,kind:i,hidden:a})=>({id:e,target:e,label:n,icon:r,kind:i,hidden:a,default:t===e||void 0}))}}let{allAvailableTargets:c,targetMetadata:l}=await aP(s,this.getOpenInWorker()),u=a?.replace(/^([ab])[\\\\/]/,``)??null,d=u!=null&&PF(u)&&!t.Ha(o.hostConfig),f=u==null||d||t.Ha(o.hostConfig)?null:this.resolveOpenFilePath(this.mapAgentPathToLocalPath(u,o.hostConfig)??u,this.mapAgentPathToLocalPath(e,o.hostConfig)??this.getWorkspaceRoot()),p=Tj(o.hostConfig,c,l),m=new Set(p),h=uP(s,e,m),g=d||f!=null&&t.rs(f),_=f!=null&&cj(f),v=f!=null&&uj(f),y=g?await MF(i):_?await jF({filePath:f}):[];return{preferredTarget:h,availableTargets:Array.from(m),mode:g||v?`native`:`editor`,targets:[...l.map(({id:e,label:t,icon:n,kind:r,hidden:i})=>({id:e,target:e,label:t,icon:n,kind:r,hidden:i,available:m.has(e),default:h===e||void 0})),...y]}}';
+const openTargetSelectionBundle =
+  "function e({targets:e,availableTargets:t,includeHiddenTargets:n=!1,mode:r=`editor`}){let i=e.filter(e=>e.appPath!=null);if(i.length>0)return i;if(r===`native`)return e.filter(e=>e.target===`systemDefault`||e.target===`fileManager`);let a=new Set(t);return e.filter(e=>a.has(e.target)&&(n||!e.hidden))}function t({preferredTarget:t,targets:n,availableTargets:r,includeHiddenTargets:i=!0,mode:a=`editor`}){let o=e({targets:n,availableTargets:r,includeHiddenTargets:i,mode:a});return o.length===0?null:t?o.find(e=>e.target===t)??o[0]??null:o[0]??null}function n(e){return e.appPath==null&&e.kind===`editor`}export{e as n,t as r,n as t};";
+const latestOpenTargetSelectionBundle =
+  "function O9({targets:e,availableTargets:t,includeHiddenTargets:n=!1,mode:r=`editor`}){let i=e.filter(e=>e.appPath!=null);if(i.length>0)return i;if(r===`native`)return e.filter(e=>e.target===`systemDefault`||e.target===`fileManager`);let a=new Set(t);return e.filter(e=>a.has(e.target)&&(n||!e.hidden))}function mNe({preferredTarget:e,targets:t,availableTargets:n,includeHiddenTargets:r=!0,mode:i=`editor`}){let a=O9({targets:t,availableTargets:n,includeHiddenTargets:r,mode:i});return a.length===0?null:e?a.find(t=>t.target===e)??a[0]??null:a[0]??null}function hNe(e){return e.appPath==null&&e.kind===`editor`}";
 
 function applyPatchTwice(patchFn, source, ...args) {
   const patched = patchFn(source, ...args);
@@ -75,11 +115,15 @@ function withTempDir(fn) {
   }
 }
 
-function createSpawnRecorder({ failCommands = [], recordOptions = false } = {}) {
+function createSpawnRecorder({ failCommands = [], recordOptions = false, execFileSync } = {}) {
   const calls = [];
   const failures = new Set(failCommands);
   return {
     calls,
+    execFileSync(command, args, options) {
+      if (execFileSync) return execFileSync(command, args, options);
+      throw new Error(`unexpected execFileSync: ${command} ${args.join(" ")}`);
+    },
     spawn(command, args, options) {
       calls.push(recordOptions ? { command, args, options } : { command, args });
       const child = new EventEmitter();
@@ -238,6 +282,200 @@ test("open-target discovery finds IDEs from desktop entries", () => {
   });
 });
 
+test("open-target discovery finds Linuxbrew VS Code outside GUI PATH", () => {
+  withTempDir((tmp) => {
+    const dataHome = path.join(tmp, "share");
+    const appsDir = path.join(dataHome, "applications");
+    const emptyBin = path.join(tmp, "empty-bin");
+    const linuxbrewPrefix = path.join(tmp, "linuxbrew", ".linuxbrew");
+    const code = makeExecutable(path.join(linuxbrewPrefix, "bin"), "code");
+    fs.mkdirSync(appsDir, { recursive: true });
+    fs.mkdirSync(emptyBin, { recursive: true });
+    fs.writeFileSync(
+      path.join(appsDir, "code.desktop"),
+      [
+        "[Desktop Entry]",
+        "Type=Application",
+        "Name=Visual Studio Code",
+        "Exec=code --reuse-window %U",
+        "Categories=Development;IDE;",
+      ].join("\n"),
+    );
+
+    const targets = evaluatePatched(
+      openTargetsBundle,
+      {
+        HOME: tmp,
+        PATH: emptyBin,
+        HOMEBREW_PREFIX: linuxbrewPrefix,
+        XDG_DATA_HOME: dataHome,
+        XDG_DATA_DIRS: path.join(tmp, "empty"),
+      },
+      "Xg.flatMap((target)=>{let platform=target.platforms.linux;return platform?[{id:target.id,label:platform.label,command:platform.detect?.()}]:[]})",
+    );
+
+    const vscode = targets.find((target) => target.id === "vscode");
+    assert.ok(vscode);
+    assert.equal(vscode.command, code);
+    assert.equal(targets.some((target) => target.id === "linux-desktop-code"), false);
+  });
+});
+
+test("open-target discovery finds IDEs from symlinked desktop entries", () => {
+  withTempDir((tmp) => {
+    const dataHome = path.join(tmp, "share");
+    const appsDir = path.join(dataHome, "applications");
+    const linkedAppsDir = path.join(tmp, "linked-applications");
+    const editorCommand = makeExecutable(path.join(tmp, "toolbox", "bin"), "zed-appimage");
+    const desktopFile = path.join(linkedAppsDir, "dev.zed.Zed.desktop");
+    fs.mkdirSync(appsDir, { recursive: true });
+    fs.mkdirSync(linkedAppsDir, { recursive: true });
+    fs.writeFileSync(
+      desktopFile,
+      [
+        "[Desktop Entry]",
+        "Type=Application",
+        "Name=Zed",
+        `Exec=${editorCommand} %U`,
+        "Categories=Development;IDE;",
+      ].join("\n"),
+    );
+    fs.symlinkSync(desktopFile, path.join(appsDir, "dev.zed.Zed.desktop"));
+
+    const targets = evaluatePatched(
+      openTargetsBundle,
+      { HOME: tmp, PATH: path.join(tmp, "bin"), XDG_DATA_HOME: dataHome, XDG_DATA_DIRS: path.join(tmp, "empty") },
+      "Xg.flatMap((target)=>{let platform=target.platforms.linux;return platform?[{id:target.id,label:platform.label,command:platform.detect?.()}]:[]})",
+    );
+
+    assert.ok(targets.some((target) => target.id === "linux-desktop-dev-zed-zed" && target.command === editorCommand));
+  });
+});
+
+function writeDesktopEntry(appsDir, fileName, lines) {
+  fs.mkdirSync(appsDir, { recursive: true });
+  fs.writeFileSync(path.join(appsDir, fileName), ["[Desktop Entry]", "Type=Application", ...lines].join("\n"));
+}
+
+test("open-target discovery applies TryExec filters to desktop entries", () => {
+  withTempDir((tmp) => {
+    const dataHome = path.join(tmp, "share");
+    const appsDir = path.join(dataHome, "applications");
+    const binDir = path.join(tmp, "bin");
+    const cursor = makeExecutable(binDir, "cursor");
+    const terminal = makeExecutable(binDir, "workspace-terminal");
+    makeExecutable(binDir, "env");
+    makeExecutable(binDir, "flatpak");
+    makeExecutable(binDir, "sh");
+    fs.mkdirSync(path.join(tmp, ".local", "share", "flatpak", "app", "com.example.Terminal"), { recursive: true });
+    fs.mkdirSync(path.join(tmp, ".local", "share", "flatpak", "app", "it.mijorus.gearlever"), { recursive: true });
+    writeDesktopEntry(appsDir, "a-broken-terminal.desktop", [
+      "Name=Broken Terminal",
+      "TryExec=sh -c 'command -v missing-terminal >/dev/null 2>&1'",
+      `Exec=${path.join(tmp, "missing-terminal")} --cwd %D`,
+      "Categories=System;TerminalEmulator;",
+    ]);
+    writeDesktopEntry(appsDir, "b-workspace-terminal.desktop", [
+      "Name=Workspace Terminal",
+      "TryExec=sh -c 'flatpak info com.example.Terminal > /dev/null 2>&1'",
+      `Exec=${terminal} --cwd %D`,
+      "Categories=System;TerminalEmulator;",
+    ]);
+    writeDesktopEntry(appsDir, "broken-cursor.desktop", [
+      "Name=Broken Cursor",
+      "TryExec=sh -c 'command -v missing-cursor >/dev/null 2>&1'",
+      `Exec=${path.join(tmp, "missing-cursor")} %U`,
+      "Categories=Development;IDE;",
+    ]);
+    writeDesktopEntry(appsDir, "cursor.desktop", [
+      "Name=Cursor",
+      "TryExec=env -i flatpak info --show-location it.mijorus.gearlever",
+      `Exec=${cursor} %U`,
+      "Categories=Development;IDE;",
+    ]);
+
+    const result = evaluatePatched(
+      openTargetsBundle,
+      { HOME: tmp, PATH: binDir, XDG_DATA_HOME: dataHome, XDG_DATA_DIRS: path.join(tmp, "empty") },
+      "({terminal:uh.platforms.linux.detect(),ides:Xg.flatMap((target)=>{let platform=target.platforms.linux;return platform?[{label:platform.label,command:platform.detect?.()}]:[]})})",
+    );
+
+    assert.equal(result.terminal, terminal);
+    assert.ok(result.ides.some((target) => target.label === "Cursor" && target.command === cursor));
+    assert.ok(!result.ides.some((target) => target.label === "Broken Cursor"));
+  });
+});
+
+function tryExecEnv(tmp, { binNames = [], flatpakApps = [], setup } = {}) {
+  const binDir = path.join(tmp, "bin");
+  for (const executable of binNames) makeExecutable(binDir, executable);
+  for (const appId of flatpakApps) fs.mkdirSync(path.join(tmp, ".local", "share", "flatpak", "app", appId), { recursive: true });
+  setup?.({ tmp, binDir });
+  return { HOME: tmp, PATH: binDir, XDG_DATA_HOME: path.join(tmp, "share"), XDG_DATA_DIRS: path.join(tmp, "empty") };
+}
+
+const tryExecCases = [
+  [false, "env /missing/Cursor.AppImage", ["env"]],
+  [false, "sh -c '/missing/Cursor.AppImage'", ["sh"]],
+  [true, "env -u GTK_USE_PORTAL bash -lc 'command -v cursor >/dev/null 2>&1 && exec cursor'", ["env", "bash", "cursor"]],
+  [true, "bash --login -c 'command -v cursor >/dev/null 2>&1 && : >/dev/null'", ["bash", "cursor"]],
+  [true, "sh -c 'test -x \"$HOME/AppImages/Cursor.AppImage\" && exec \"$HOME/AppImages/Cursor.AppImage\"'", ["sh"], ({ tmp }) => makeExecutable(path.join(tmp, "AppImages"), "Cursor.AppImage")],
+  [true, "bash -lc 'test -x $HOME/Tools\\ Beta/Cursor\\ AppImage'", ["bash"], ({ tmp }) => makeExecutable(path.join(tmp, "Tools Beta"), "Cursor AppImage")],
+  [true, "bash -lc '[[ -x \"$HOME/AppImages/Cursor.AppImage\" ]]'", ["bash"], ({ tmp }) => makeExecutable(path.join(tmp, "AppImages"), "Cursor.AppImage")],
+  [false, "sh -c '[[ -x \"$HOME/AppImages/Cursor.AppImage\" ]]'", ["sh"], ({ tmp }) => makeExecutable(path.join(tmp, "AppImages"), "Cursor.AppImage")],
+  [false, "bash -lc 'test -x \"~/.local/bin/cursor\"'", ["bash"], ({ tmp }) => makeExecutable(path.join(tmp, ".local", "bin"), "cursor")],
+  [true, "sh -c 'command -v cursor >/dev/null 2>&1 || command -v codium >/dev/null 2>&1'", ["sh", "codium"]],
+  [false, "sh -c 'command -v workspace-terminal >/dev/null 2>&1 || command -v fallback-terminal >/dev/null 2>&1 && test -x /missing/workspace-terminal'", ["sh", "workspace-terminal", "fallback-terminal"]],
+  [false, "sh -c 'command -v cursor >/dev/null 2>&1 && test -x /missing/Cursor.AppImage'", ["sh", "cursor"]],
+  [true, "sh -c 'test -x \"$HOME/Terminal && Tools/Workspace Terminal\"'", ["sh"], ({ tmp }) => makeExecutable(path.join(tmp, "Terminal && Tools"), "Workspace Terminal")],
+  [false, "sh -c 'false # comment'", ["sh", "false"]],
+  [false, "sh -c 'command -v cursor >/dev/null 2>&1; exit 1'", ["sh", "cursor"]],
+  [false, "sh -c '! command -v cursor >/dev/null 2>&1'", ["sh", "cursor"]],
+  [false, "sh -c 'which /bin/ls >/dev/null 2>&1'", ["sh"]],
+  [false, "bash", []],
+  [true, "sh -c 'exec /bin/true && false'", ["sh"]],
+  [false, "sh -c 'exec /missing/cursor || true'", ["sh"]],
+  [false, "missing-wrapper bash -lc 'command -v cursor >/dev/null 2>&1'", ["bash", "cursor"]],
+  [false, "fish -C 'hash cursor >/dev/null 2>&1'", ["fish", "cursor"]],
+  [true, "env -i flatpak info --show-location it.mijorus.gearlever", ["env", "flatpak"], null, ["it.mijorus.gearlever"]],
+  [true, "sh -c 'flatpak info com.example.Terminal > /dev/null 2>&1'", ["sh", "flatpak"], null, ["com.example.Terminal"]],
+  [false, "sh -c 'flatpak info it.mijorus.gearlever > /dev/null 2>&1'", ["sh"], null, ["it.mijorus.gearlever"]],
+  [false, "flatpak --verbose info com.example.MissingIde", ["flatpak"], null, ["it.mijorus.gearlever"]],
+  [false, "flatpak --installation=extra info it.mijorus.gearlever", ["flatpak"], null, ["it.mijorus.gearlever"]],
+  [true, "flatpak run com.visualstudio.code", ["flatpak"], null, ["com.visualstudio.code"]],
+  [true, "flatpak", ["flatpak"]],
+  [false, "flatpak --installation=extra run com.visualstudio.code", ["flatpak"], null, ["com.visualstudio.code"]],
+  [false, "flatpak run --command=missing-helper com.visualstudio.code", ["flatpak"], null, ["com.visualstudio.code"]],
+  [false, "flatpak run --command=sh com.visualstudio.code -c 'command -v missing-helper >/dev/null 2>&1'", ["flatpak"], null, ["com.visualstudio.code"]],
+  [false, "flatpak run --command=bash com.visualstudio.code -c true", ["flatpak"], null, ["com.visualstudio.code"]],
+  [false, "env -i --unset=GTK_USE_PORTAL GTK_USE_PORTAL=0 flatpak run --command=sh com.visualstudio.code -c 'command -v cursor >/dev/null 2>&1'", ["env", "flatpak", "cursor"]],
+];
+
+test("open-target discovery evaluates TryExec parser", () => {
+  for (const [expected, command, binNames, setup, flatpakApps] of tryExecCases) withTempDir((tmp) => {
+    const quoted = JSON.stringify(command);
+    const result = evaluatePatched(
+      openTargetsBundle,
+      tryExecEnv(tmp, { binNames, flatpakApps, setup }),
+      "[codexLinuxDesktopTryExecAvailable(" + quoted + "),codexLinuxTerminalTryExecAvailable(" + quoted + ")]",
+    );
+    assert.deepEqual(result, [expected, expected], command);
+  });
+});
+
+test("open-target discovery tolerates path and fs aliases used by helper locals", () => {
+  withTempDir((tmp) => {
+    const command = "env /missing/Cursor.AppImage";
+    const result = evaluatePatched(
+      collidingPathAliasBundle,
+      tryExecEnv(tmp, { binNames: ["env"] }),
+      "[codexLinuxDesktopTryExecAvailable(" + JSON.stringify(command) + "),codexLinuxTerminalTryExecAvailable(" + JSON.stringify(command) + ")]",
+    );
+
+    assert.deepEqual(result, [false, false]);
+  });
+});
+
 test("open-target discovery launches desktop entries through gio when available", async () => {
   await withTempDir(async (tmp) => {
     const dataHome = path.join(tmp, "share");
@@ -335,7 +573,14 @@ test("open-target discovery falls back to the Exec command", async () => {
     const editorCommand = makeExecutable(path.join(tmp, "toolbox", "bin"), "workspace-agent");
     const desktopFile = path.join(appsDir, "workspace-agent.desktop");
     const projectDir = path.join(tmp, "project");
-    const spawnRecorder = createSpawnRecorder();
+    const spawnRecorder = createSpawnRecorder({
+      failCommands: [
+        "/home/linuxbrew/.linuxbrew/bin/gio",
+        "/home/linuxbrew/.linuxbrew/bin/gtk-launch",
+        "/var/home/linuxbrew/.linuxbrew/bin/gio",
+        "/var/home/linuxbrew/.linuxbrew/bin/gtk-launch",
+      ],
+    });
     fs.mkdirSync(appsDir, { recursive: true });
     fs.mkdirSync(projectDir, { recursive: true });
     fs.writeFileSync(
@@ -364,9 +609,7 @@ test("open-target discovery falls back to the Exec command", async () => {
 
     await platform.open({ command: editorCommand, path: projectDir });
 
-    assert.deepEqual(spawnRecorder.calls, [
-      { command: editorCommand, args: ["--goto", projectDir] },
-    ]);
+    assert.deepEqual(spawnRecorder.calls.at(-1), { command: editorCommand, args: ["--goto", projectDir] });
   });
 });
 
@@ -510,23 +753,56 @@ test("open-target discovery uses desktop entry icons when available", () => {
   });
 });
 
+test("open-target discovery follows symlinked desktop entry icons", () => {
+  withTempDir((tmp) => {
+    const dataHome = path.join(tmp, "share");
+    const appsDir = path.join(dataHome, "applications");
+    const iconDir = path.join(dataHome, "icons", "hicolor", "128x128", "apps");
+    const targetIconPath = path.join(tmp, "flatpak-app", "export", "icons", "hicolor", "128x128", "apps", "com.example.Agent.png");
+    const symlinkIconPath = path.join(iconDir, "com.example.Agent.png");
+    const editorCommand = makeExecutable(path.join(tmp, "flatpak", "exports", "bin"), "com.example.Agent");
+    fs.mkdirSync(appsDir, { recursive: true });
+    fs.mkdirSync(iconDir, { recursive: true });
+    fs.mkdirSync(path.dirname(targetIconPath), { recursive: true });
+    fs.writeFileSync(targetIconPath, "png");
+    fs.symlinkSync(targetIconPath, symlinkIconPath);
+    fs.writeFileSync(
+      path.join(appsDir, "com.example.Agent.desktop"),
+      [
+        "[Desktop Entry]",
+        "Type=Application",
+        "Name=Flatpak Agent",
+        `Exec=${editorCommand} %U`,
+        "Icon=com.example.Agent",
+        "Categories=Development;",
+      ].join("\n"),
+    );
+
+    const targets = evaluatePatched(
+      openTargetsBundle,
+      { HOME: tmp, PATH: path.join(tmp, "bin"), XDG_DATA_HOME: dataHome, XDG_DATA_DIRS: path.join(tmp, "empty") },
+      "Xg.flatMap((target)=>{let platform=target.platforms.linux;return platform?[{label:platform.label,iconPath:platform.iconPath?.()}]:[]})",
+    );
+    const agent = targets.find((target) => target.label === "Flatpak Agent");
+
+    assert.ok(agent);
+    assert.equal(agent.iconPath, symlinkIconPath);
+  });
+});
+
 test("open-target discovery resolves iconPath on Linux", async () => {
   const patched = applyPatchTwice(applyMainBundlePatch, `${mainBundlePrefix}${iconResolverBundle}`);
-  const iconPath = "/tmp/codex-icon.png";
-  const image = {
-    isEmpty: () => false,
-    toDataURL: () => "data:image/png;base64,codex",
-  };
+  const iconPath = path.join(os.tmpdir(), "codex-open-target-icon.png");
+  fs.writeFileSync(iconPath, "codex");
   const electron = {
     app: {
       getFileIcon: async () => {
-        throw new Error("should prefer nativeImage for image files");
+        throw new Error("should prefer direct data URL for image files");
       },
     },
     nativeImage: {
-      createFromPath: (target) => {
-        assert.equal(target, iconPath);
-        return image;
+      createFromPath: () => {
+        throw new Error("should not need nativeImage for image files");
       },
     },
   };
@@ -546,7 +822,498 @@ test("open-target discovery resolves iconPath on Linux", async () => {
     targets,
   );
 
-  assert.equal(result[0].icon, "data:image/png;base64,codex");
+  assert.equal(result[0].icon, `data:image/png;base64,${Buffer.from("codex").toString("base64")}`);
+  fs.rmSync(iconPath, { force: true });
+});
+
+test("open-target discovery resolves iconPath on current upstream bundle shape", async () => {
+  const patched = applyPatchTwice(applyMainBundlePatch, `${mainBundlePrefix}${currentIconResolverBundle}`);
+  const iconPath = path.join(os.tmpdir(), "codex-current-open-target-icon.svg");
+  fs.writeFileSync(iconPath, "<svg/>");
+  let nativeImageUsed = false;
+  const electron = {
+    app: {
+      getFileIcon: async () => {
+        throw new Error("should not need getFileIcon for image files");
+      },
+    },
+    nativeImage: {
+      createFromPath: (target) => {
+        nativeImageUsed = true;
+        assert.equal(target, iconPath);
+        return {
+          isEmpty: () => false,
+          toDataURL: () => "data:image/png;base64,converted-svg",
+        };
+      },
+    },
+  };
+  const targets = [
+    {
+      id: "linux-desktop-agent",
+      label: "Agent",
+      icon: "apps/terminal.png",
+      kind: "editor",
+      iconPath: () => iconPath,
+    },
+  ];
+
+  assert.match(patched, /return\(e===`win32`\|\|e===`linux`\)\?Promise\.all/);
+  assert.match(patched, /function codexLinuxOpenTargetIconImage/);
+  const result = await new Function("require", "process", `${patched};return VN('linux', arguments[2], new Map());`)(
+    (name) => (name === "electron" ? electron : require(name)),
+    { platform: "linux", env: {} },
+    targets,
+  );
+
+  assert.equal(nativeImageUsed, true);
+  assert.equal(result[0].icon, "data:image/png;base64,converted-svg");
+  fs.rmSync(iconPath, { force: true });
+});
+
+test("open-target discovery rasterizes undecodable SVG iconPath", async () => {
+  const patched = applyPatchTwice(applyMainBundlePatch, `${mainBundlePrefix}${currentIconResolverBundle}`);
+  const iconPath = path.join(os.tmpdir(), "codex-current-open-target-empty-svg.svg");
+  const svg = "<svg><rect width=\"16\" height=\"16\" /></svg>";
+  fs.writeFileSync(iconPath, svg);
+  const electron = {
+    app: {
+      getFileIcon: async () => {
+        throw new Error("should not fall back to file type icons for SVG iconPath");
+      },
+    },
+    nativeImage: {
+      createFromPath: (target) => {
+        assert.equal(target, iconPath);
+        return { isEmpty: () => true };
+      },
+    },
+    BrowserWindow: class {
+      webContents = {
+        capturePage: async () => ({
+          isEmpty: () => false,
+          toDataURL: () => "data:image/png;base64,rasterized-svg",
+          getSize: () => ({ width: 64, height: 64 }),
+        }),
+      };
+      async loadURL(url) {
+        assert.match(url, /^data:text\/html;charset=utf-8,/);
+      }
+      destroy() {}
+    },
+  };
+  const targets = [
+    {
+      id: "linux-desktop-agent",
+      label: "Agent",
+      icon: "apps/terminal.png",
+      kind: "editor",
+      iconPath: () => iconPath,
+    },
+  ];
+
+  const result = await new Function("require", "process", `${patched};return VN('linux', arguments[2], new Map());`)(
+    (name) => (name === "electron" ? electron : require(name)),
+    { platform: "linux", env: {} },
+    targets,
+  );
+
+  assert.equal(result[0].icon, "data:image/png;base64,rasterized-svg");
+  fs.rmSync(iconPath, { force: true });
+});
+
+test("open-target discovery keeps built-in icons for Linux targets without iconPath", async () => {
+  const patched = applyPatchTwice(applyMainBundlePatch, `${mainBundlePrefix}${currentIconResolverBundle}`);
+  const commandPath = path.join(os.tmpdir(), "codex-current-open-target-command");
+  fs.writeFileSync(commandPath, "binary");
+  const electron = {
+    app: {
+      getFileIcon: async () => {
+        throw new Error("should not inspect command paths for Linux targets without iconPath");
+      },
+    },
+    nativeImage: {
+      createFromPath: () => {
+        throw new Error("should not inspect command paths for Linux targets without iconPath");
+      },
+    },
+  };
+  const targets = [
+    {
+      id: "webstorm",
+      label: "WebStorm",
+      icon: "apps/webstorm.svg",
+      kind: "editor",
+    },
+  ];
+
+  const result = await new Function("require", "process", `${patched};return VN('linux', arguments[2], arguments[3]);`)(
+    (name) => (name === "electron" ? electron : require(name)),
+    { platform: "linux", env: {} },
+    targets,
+    new Map([["webstorm", commandPath]]),
+  );
+
+  assert.equal(result[0].icon, "apps/webstorm.svg");
+  fs.rmSync(commandPath, { force: true });
+});
+
+test("open-target discovery preserves bundled SVG fallback icons in Linux open menus", async () => {
+  withTempDir(async (tmp) => {
+    const patched = applyPatchTwice(applyMainBundlePatch, `${mainBundlePrefix}${currentIconResolverBundle}`);
+    const electron = {
+      app: {
+        getFileIcon: async () => {
+          throw new Error("should not inspect command paths for Linux targets without iconPath");
+        },
+      },
+      nativeImage: {
+        createFromPath: () => {
+          throw new Error("should not convert bundled fallback icons");
+        },
+      },
+    };
+    const targets = [
+      {
+        id: "webstorm",
+        label: "WebStorm",
+        icon: "apps/webstorm.svg",
+        kind: "editor",
+      },
+    ];
+
+    const result = await new Function("require", "process", `${patched};return VN('linux', arguments[2], new Map());`)(
+      (name) => (name === "electron" ? electron : require(name)),
+      { platform: "linux", env: {} },
+      targets,
+    );
+
+    assert.equal(result[0].icon, "apps/webstorm.svg");
+  });
+});
+
+test("open-target discovery rasterizes bundled SVG fallback icons when available", async () => {
+  withTempDir(async (tmp) => {
+    const patched = applyPatchTwice(applyMainBundlePatch, `${mainBundlePrefix}${currentIconResolverBundle}`);
+    const resourcesPath = path.join(tmp, "resources");
+    const bundledIconPath = path.join(resourcesPath, "app.asar", "webview", "apps", "webstorm.svg");
+    fs.mkdirSync(path.dirname(bundledIconPath), { recursive: true });
+    fs.writeFileSync(bundledIconPath, "<svg><rect width=\"16\" height=\"16\" /></svg>");
+    const electron = {
+      app: {
+        getFileIcon: async () => {
+          throw new Error("should not inspect command paths for bundled fallback icons");
+        },
+      },
+      nativeImage: {
+        createFromPath: (target) => {
+          assert.equal(target, bundledIconPath);
+          return { isEmpty: () => true };
+        },
+      },
+      BrowserWindow: class {
+        webContents = {
+          capturePage: async () => ({
+            isEmpty: () => false,
+            toDataURL: () => "data:image/png;base64,bundled-webstorm",
+            getSize: () => ({ width: 64, height: 64 }),
+          }),
+        };
+        async loadURL(url) {
+          assert.match(url, /^data:text\/html;charset=utf-8,/);
+        }
+        destroy() {}
+      },
+    };
+    const targets = [
+      {
+        id: "webstorm",
+        label: "WebStorm",
+        icon: "apps/webstorm.svg",
+        kind: "editor",
+      },
+    ];
+
+    const result = await new Function("require", "process", `${patched};return VN('linux', arguments[2], new Map());`)(
+      (name) => (name === "electron" ? electron : require(name)),
+      { platform: "linux", env: {}, resourcesPath },
+      targets,
+    );
+
+    assert.equal(result[0].icon, "data:image/png;base64,bundled-webstorm");
+  });
+});
+
+test("open-target discovery resolves iconPath in Linux target summaries", async () => {
+  const patched = applyPatchTwice(applyMainBundlePatch, `${mainBundlePrefix}${currentIconResolverBundle}`);
+  const iconPath = path.join(os.tmpdir(), "codex-current-open-target-summary-icon.png");
+  fs.writeFileSync(iconPath, "summary");
+  const electron = {
+    app: {
+      getFileIcon: async () => {
+        throw new Error("should prefer direct data URL for Linux summaries");
+      },
+    },
+    nativeImage: {
+      createFromPath: () => {
+        throw new Error("should not need nativeImage for PNG summaries");
+      },
+    },
+  };
+  const targets = [
+    {
+      id: "linux-desktop-agent",
+      label: "Agent",
+      icon: "apps/terminal.png",
+      kind: "editor",
+      iconPath: () => iconPath,
+    },
+  ];
+
+  assert.match(patched, /function codexLinuxOpenTargetSummaryIcon/);
+  const result = new Function("require", "process", `${patched};return HN(arguments[2]);`)(
+    (name) => (name === "electron" ? electron : require(name)),
+    { platform: "linux", env: {} },
+    targets,
+  );
+
+  assert.equal(Array.isArray(result), true);
+  assert.equal(result[0].icon, `data:image/png;base64,${Buffer.from("summary").toString("base64")}`);
+  fs.rmSync(iconPath, { force: true });
+});
+
+test("open-target discovery resolves SVG iconPath in Linux target summaries", async () => {
+  const patched = applyPatchTwice(applyMainBundlePatch, `${mainBundlePrefix}${currentIconResolverBundle}`);
+  const iconPath = path.join(os.tmpdir(), "codex-current-open-target-summary-icon.svg");
+  const svg = "<svg><rect width=\"16\" height=\"16\" /></svg>";
+  fs.writeFileSync(iconPath, svg);
+  const electron = {
+    app: {
+      getFileIcon: async () => {
+        throw new Error("should prefer direct SVG data URL for Linux summaries");
+      },
+    },
+    nativeImage: {
+      createFromPath: () => {
+        throw new Error("summary mapping should stay synchronous");
+      },
+    },
+  };
+  const targets = [
+    {
+      id: "linux-desktop-agent",
+      label: "Agent",
+      icon: "apps/terminal.png",
+      kind: "editor",
+      iconPath: () => iconPath,
+    },
+  ];
+
+  const result = new Function("require", "process", `${patched};return HN(arguments[2]);`)(
+    (name) => (name === "electron" ? electron : require(name)),
+    { platform: "linux", env: {} },
+    targets,
+  );
+
+  assert.equal(Array.isArray(result), true);
+  assert.equal(result[0].icon, `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`);
+  fs.rmSync(iconPath, { force: true });
+});
+
+test("open-target discovery uses main registry for Linux command lookup", async () => {
+  const patched = applyPatchTwice(applyOpenInTargetCommandPatch, openInCommandBundle);
+  const app = new Function(`${patched};return new App();`)();
+
+  assert.equal(await app.getOpenInTargetCommand("linux-desktop-agent"), "main-command");
+  await assert.rejects(() => app.getOpenInTargetCommand("vscode"), /not available/);
+  await assert.rejects(() => app.getOpenInTargetCommand("missing"), /not available/);
+});
+
+test("open-target discovery patches current command lookup shape", async () => {
+  const patched = applyPatchTwice(applyOpenInTargetCommandPatch, currentOpenInCommandBundle);
+  const app = new Function(`${patched};return new App();`)();
+
+  assert.equal(await app.getOpenInTargetCommand("linux-desktop-agent"), "main-command");
+  await assert.rejects(() => app.getOpenInTargetCommand("vscode"), /not available/);
+});
+
+test("open-target discovery patches latest command lookup shape", async () => {
+  const patched = applyPatchTwice(applyOpenInTargetCommandPatch, latestOpenInCommandBundle);
+  const app = new Function(`${patched};return new App();`)();
+
+  assert.equal(await app.getOpenInTargetCommand("linux-desktop-agent"), "main-command");
+  await assert.rejects(() => app.getOpenInTargetCommand("vscode"), /not available/);
+});
+
+test("open-target discovery command lookup tolerates param-builder target helper", async () => {
+  const source =
+    "function JN(e,t){return{target:t}}function iP(e,t){return{target:t}}var IN={};class App{constructor(){this.requestOpenInWorker=async({params:e})=>({command:e.target===`vscode`?`worker-command`:null});this.settingsStore={targets:[{id:`linux-desktop-agent`,detect:async()=>`main-command`},{id:`missing`,detect:async()=>null}]}}getSettingsStore(){return this.settingsStore}async getOpenInTargetCommand(e){if(this.requestOpenInWorker==null)return;let{command:t}=await this.requestOpenInWorker({method:`get-target-command`,params:JN(this.getSettingsStore(),e)});if(t==null)throw Error(`Open target \"${e}\" is not available`);return t}}";
+  const patched = applyPatchTwice(applyOpenInTargetCommandPatch, source);
+  const app = new Function(`${patched};return new App();`)();
+
+  assert.equal(await app.getOpenInTargetCommand("linux-desktop-agent"), "main-command");
+  await assert.rejects(() => app.getOpenInTargetCommand("vscode"), /not available/);
+});
+
+test("open-target discovery uses main registry for target availability", async () => {
+  const patched = applyPatchTwice(applyOpenInTargetsAvailabilityPatch, openInAvailabilityBundle);
+  const worker = async () => ({ command: null });
+  const result = await new Function(
+    `${patched};return aP({targets:[{id:'linux-desktop-agent',label:'Agent',icon:'apps/terminal.png',kind:'editor',detect:async()=>'/usr/bin/agent'},{id:'missing',label:'Missing',icon:'apps/terminal.png',kind:'editor',detect:async()=>null}]}, arguments[0]);`,
+  )(worker);
+
+  assert.deepEqual(result.allAvailableTargets, ["linux-desktop-agent"]);
+  assert.deepEqual(result.targetMetadata.map((target) => target.id), ["linux-desktop-agent", "missing"]);
+});
+
+test("open-target discovery bridge detection uses main registry on Linux", async () => {
+  const patched = applyPatchTwice(applyOpenInTargetsBridgeDetectionPatch, openInBridgeBundle);
+  const options = {
+    settingsStore: {
+      targets: [
+        { id: "linux-desktop-agent", detect: async () => "main-command" },
+        { id: "missing", detect: async () => null },
+      ],
+    },
+    requestOpenInWorker: async () => ({ command: "worker-command" }),
+  };
+  const bridge = new Function(`${patched};return bridge;`).call({ options });
+
+  assert.deepEqual(await bridge.openInTargets.detectTarget.call(bridge, { target: "linux-desktop-agent" }), {
+    available: true,
+  });
+  assert.deepEqual(await bridge.openInTargets.detectTarget.call(bridge, { target: "missing" }), {
+    available: false,
+  });
+  assert.deepEqual(await bridge.openInTargets.detectTarget.call(bridge, { target: "vscode" }), {
+    available: false,
+  });
+});
+
+test("open-target discovery patches latest bridge detection shape", async () => {
+  const patched = applyPatchTwice(applyOpenInTargetsBridgeDetectionPatch, latestOpenInBridgeBundle);
+  const options = {
+    settingsStore: {
+      targets: [
+        { id: "linux-desktop-agent", detect: async () => "main-command" },
+        { id: "missing", detect: async () => null },
+      ],
+    },
+    requestOpenInWorker: async () => ({ command: null }),
+  };
+  const bridge = new Function(`${patched};return bridge;`).call({ options });
+
+  assert.deepEqual(await bridge.openInTargets.detectTarget.call(bridge, { target: "linux-desktop-agent" }), {
+    available: true,
+  });
+  assert.deepEqual(await bridge.openInTargets.detectTarget.call(bridge, { target: "missing" }), {
+    available: false,
+  });
+});
+
+test("open-target discovery bridge detection tolerates param-builder target helper", async () => {
+  const source =
+    "function iP(e,t){return{target:t}}var IN={};var bridge={openInTargets:{detectTarget:async({target:e})=>{if(this.options.requestOpenInWorker==null)throw Error(`Open in worker unavailable`);let{command:t}=await this.options.requestOpenInWorker({method:`get-target-command`,params:iP(this.options.settingsStore,e)});return{available:t!=null}},loadTargetIcon:()=>{}}}";
+  const patched = applyPatchTwice(applyOpenInTargetsBridgeDetectionPatch, source);
+  const options = {
+    settingsStore: {
+      targets: [
+        { id: "linux-desktop-agent", detect: async () => "main-command" },
+        { id: "missing", detect: async () => null },
+      ],
+    },
+    requestOpenInWorker: async () => ({ command: "worker-command" }),
+  };
+  const bridge = new Function(`${patched};return bridge;`).call({ options });
+
+  assert.deepEqual(await bridge.openInTargets.detectTarget.call(bridge, { target: "linux-desktop-agent" }), {
+    available: true,
+  });
+  assert.deepEqual(await bridge.openInTargets.detectTarget.call(bridge, { target: "missing" }), {
+    available: false,
+  });
+  assert.deepEqual(await bridge.openInTargets.detectTarget.call(bridge, { target: "vscode" }), {
+    available: false,
+  });
+});
+
+test("open-target discovery inserts shared Linux registry command helper", async () => {
+  const patched = applyPatchTwice(applyOpenInTargetRegistryCommandPatch, openInCommandBundle);
+  const command = await new Function(`${patched};return codexLinuxOpenTargetRegistryCommand({targets:[{id:'kate',detect:async()=>'/usr/bin/kate'}]}, 'kate');`)();
+
+  assert.match(patched, /async function codexLinuxOpenTargetRegistryCommand/);
+  assert.equal(command, "/usr/bin/kate");
+});
+
+test("open-target discovery registry helper uses pP before worker params helper", async () => {
+  const source = "function pP(e){return e.targets}function iP(e,t){return{target:t}}async function demo(){}";
+  const patched = applyPatchTwice(applyOpenInTargetRegistryCommandPatch, source);
+  const command = await new Function(`${patched};return codexLinuxOpenTargetRegistryCommand({targets:[{id:'kate',detect:async()=>'/usr/bin/kate'}]}, 'kate');`)();
+
+  assert.equal(command, "/usr/bin/kate");
+});
+
+test("open-target discovery passes main registry into open execution", () => {
+  const patched = applyPatchTwice(applyOpenInTargetExecutePatch, openInExecuteBundle);
+
+  assert.match(patched, /targets:iP\(e\)/);
+});
+
+test("open-target discovery treats directories as native open targets", () => {
+  const patched = applyPatchTwice(applyOpenInTargetsDirectoryModePatch, openInTargetsBundle);
+
+  assert.match(patched, /codexLinuxOpenTargetIsDirectory/);
+  assert.match(patched, /w=f!=null&&codexLinuxOpenTargetIsDirectory\(f\)/);
+});
+
+test("open-target discovery patches latest directory mode expression", () => {
+  const patched = applyPatchTwice(applyOpenInTargetsDirectoryModePatch, latestOpenInTargetsBundle);
+
+  assert.match(patched, /codexLinuxOpenTargetIsDirectory/);
+  assert.match(patched, /w=f!=null&&codexLinuxOpenTargetIsDirectory\(f\)/);
+});
+
+test("open-target discovery native selector includes available directory-capable targets", () => {
+  const patched = applyPatchTwice(applyNativeOpenTargetSelectionPatch, openTargetSelectionBundle)
+    .replace(/export\{[^}]+\};/u, "return {selectTargets:e,selectTarget:t,isEditor:n};");
+  const { selectTargets } = new Function(patched)();
+  const targets = [
+    { target: "fileManager", appPath: "/usr/bin/dolphin" },
+    { target: "systemDefault", appPath: "/usr/share/applications/kate.desktop" },
+    { target: "terminal", available: true, kind: "terminal" },
+    { target: "vscode", available: true, kind: "editor" },
+    { target: "linux-desktop-kate", available: true, kind: "editor" },
+    { target: "linux-desktop-hidden", available: false, kind: "editor" },
+  ];
+
+  assert.deepEqual(
+    selectTargets({
+      targets,
+      availableTargets: targets.map((target) => target.target),
+      mode: "native",
+    }).map((target) => target.target),
+    ["fileManager", "systemDefault", "terminal", "vscode", "linux-desktop-kate"],
+  );
+});
+
+test("open-target discovery patches latest native selector chunk shape", () => {
+  const patched = applyPatchTwice(applyNativeOpenTargetSelectionPatch, latestOpenTargetSelectionBundle);
+  const { selectTargets } = new Function(`${patched};return {selectTargets:O9};`)();
+  const targets = [
+    { target: "fileManager", appPath: "/usr/bin/dolphin" },
+    { target: "systemDefault", appPath: "/usr/share/applications/kate.desktop" },
+    { target: "terminal", available: true, kind: "terminal" },
+    { target: "vscode", available: true, kind: "editor" },
+  ];
+
+  assert.deepEqual(
+    selectTargets({
+      targets,
+      availableTargets: targets.map((target) => target.target),
+      mode: "native",
+    }).map((target) => target.target),
+    ["fileManager", "systemDefault", "terminal", "vscode"],
+  );
 });
 
 test("open-target discovery respects hidden desktop entry overrides", () => {
@@ -652,7 +1419,7 @@ test("open-target discovery upgrades the baseline file manager target", async ()
 test("open-target discovery stays disabled until listed in features.json", () => {
   withTempFeatureConfig([], (root) => {
     assert.deepEqual(enabledLinuxFeatureIds({ featuresRoot: root }), []);
-    assert.deepEqual(loadLinuxFeatureMainBundlePatches({ featuresRoot: root }), []);
+    assert.deepEqual(loadLinuxFeaturePatchDescriptors({ featuresRoot: root }), []);
 
     withLinuxFeatureRootEnv(root, () => {
       const patched = captureWarns(() => patchMainBundleSource(openTargetsBundle, null)).value;
@@ -666,7 +1433,11 @@ test("open-target discovery stays disabled until listed in features.json", () =>
 test("open-target discovery participates in feature loading and patch reports", () => {
   withTempFeatureConfig(["open-target-discovery"], (root) => {
     assert.deepEqual(enabledLinuxFeatureIds({ featuresRoot: root }), ["open-target-discovery"]);
-    assert.equal(loadLinuxFeatureMainBundlePatches({ featuresRoot: root }).length, 1);
+    assert.equal(
+      loadLinuxFeaturePatchDescriptors({ featuresRoot: root })
+        .filter((patch) => patch.phase === "main-bundle").length,
+      1,
+    );
 
     withLinuxFeatureRootEnv(root, () => {
       const tempApp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-open-target-app-"));
@@ -685,7 +1456,10 @@ test("open-target discovery participates in feature loading and patch reports", 
         assert.match(patched, /linux:\{label:`Terminal`/);
         assert.match(patched, /\.\.\.codexLinuxDiscoveredIdeTargets\(\)/);
         assert.ok(
-          report.patches.some((patch) => patch.name === "feature:open-target-discovery" && patch.status === "applied"),
+          report.patches.some((patch) =>
+            patch.name === "feature:open-target-discovery:main-bundle-open-target-discovery" &&
+            patch.status === "applied",
+          ),
         );
       } finally {
         fs.rmSync(tempApp, { recursive: true, force: true });

@@ -1,0 +1,5 @@
+{"index":0,"recorded_at":"2026-06-28T12:00:00Z","kind":"navigation","payload":{"url":"https://example.com/"}}
+{"index":1,"recorded_at":"2026-06-28T12:00:01Z","kind":"screenshot","payload":{"file":"screenshots/0001.png"}}
+{"index":2,"recorded_at":"2026-06-28T12:00:02Z","kind":"accessibility_snapshot","payload":{"file":"accessibility/0001.json","count":3}}
+{"index":3,"recorded_at":"2026-06-28T12:00:03Z","kind":"diagnostic","payload":{"level":"warn","message":"sample warning"}}
+{"index":4,"recorded_at":"2026-06-28T12:00:04Z","kind":"speech_context","payload":{"transcript":"Use the spreadsheet column names from what I say, not from the first paste attempt.","source":"microphone-transcript"}}

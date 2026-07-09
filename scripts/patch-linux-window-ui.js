@@ -3,103 +3,23 @@
 
 const {
   createPatchReport,
+  criticalFailuresFromReport,
   writePatchReport,
 } = require("./lib/patch-report.js");
 const {
-  enabledLinuxFeatureIds,
-  enabledLinuxFeatureStageHooks,
-  loadEnabledLinuxFeatures,
-  loadLinuxFeaturePatchDescriptors,
-  loadLinuxFeatureMainBundlePatches,
-} = require("./lib/linux-features.js");
-const {
-  detectLinuxTargetContext,
-  linuxTargetSummary,
-  parseOsRelease,
-} = require("./lib/linux-target-context.js");
-const {
-  applyLinuxAppUpdaterBridgePatch,
-  applyLinuxAppUpdaterMenuPatch,
-  patchLinuxAppUpdaterBridge,
-} = require("./lib/linux-update-bridge-patch.js");
-const {
-  applyLinuxMultiInstanceBootstrapPatch,
-  patchLinuxMultiInstanceBootstrap,
-} = require("./patches/bootstrap.js");
-const {
-  applyLinuxChromePluginAutoInstallPatch,
-} = require("./patches/chrome-plugin.js");
-const {
-  COMPUTER_USE_UI_ENV_VAR,
-  COMPUTER_USE_UI_SETTINGS_KEY,
-  applyLinuxComputerUseFeaturePatch,
-  applyLinuxComputerUseInstallFlowPatch,
-  applyLinuxComputerUsePluginGatePatch,
-  applyLinuxComputerUseRendererAvailabilityPatch,
-  isComputerUseUiEnabled,
-} = require("./patches/computer-use.js");
-const {
-  applyKeybindsSettingsIndexPatch,
-  applyKeybindsSettingsSectionsPatch,
-  applyKeybindsSettingsSharedPatch,
-  applyLinuxKeybindOverridesRuntimePatch,
-  patchKeybindsSettingsAssets,
-  resolveKeybindsSettingsAsset,
-} = require("./patches/keybinds-settings.js");
-const {
-  applyLinuxHotkeyWindowPrewarmPatch,
-  applyLinuxLaunchActionArgsPatch,
-  applyLinuxSettingsPersistencePatch,
-  applyLinuxTrayCloseSettingPatch,
-} = require("./patches/launch-actions.js");
-const {
-  applyBrowserUseNodeReplApprovalPatch,
-  applyLinuxChromeExtensionStatusPatch,
-  applyLinuxExplicitIpcQuitPatch,
-  applyLinuxExplicitQuitPromptBypassPatch,
-  applyLinuxExplicitTrayQuitPatch,
-  applyLinuxFileManagerPatch,
-  applyLinuxGitOriginsSourceFallbackPatch,
-  applyLinuxMenuPatch,
-  applyLinuxOpaqueBackgroundPatch,
-  applyLinuxQuitGuardPatch,
-  applyLinuxReadyToShowWindowStatePatch,
-  applyLinuxRemoteControlConfigPreservationPatch,
-  applyLinuxSetIconPatch,
-  applyLinuxSingleInstancePatch,
-  applyLinuxTrayPatch,
-  applyLinuxWillQuitDrainTimeoutPatch,
-  applyLinuxWindowOptionsPatch,
-} = require("./patches/main-process.js");
-const {
-  applyLinuxAvatarOverlayMousePassthroughPatch,
-} = require("./patches/avatar-overlay.js");
-const {
-  patchPackageJson,
-  resolveDesktopName,
-} = require("./patches/package-json.js");
-const {
-  discoverCorePatchDescriptors,
-  normalizePatchDescriptors,
-} = require("./patches/engine.js");
-const {
-  corePatchDescriptors,
-  createMainBundleContext,
-  legacyCorePatchDescriptors,
   patchExtractedApp,
-  patchMainBundleSource,
-} = require("./patches/registry.js");
+} = require("./patches/runner.js");
 const {
-  applyBrowserAnnotationScreenshotPatch,
-  applyLinuxAppSunsetPatch,
-  applyLinuxOpaqueWindowsDefaultPatch,
-  applySubagentNicknameMetadataPatch,
-  patchCommentPreloadBundle,
-} = require("./patches/webview-assets.js");
+  createInventory,
+  findPostPatchIntegrityFindings,
+} = require("./lib/upstream-dmg-intel.js");
+
+const USAGE = "Usage: patch-linux-window-ui.js [--report-json path] [--enforce-critical] <extracted-app-asar-dir>";
 
 function main() {
   const args = process.argv.slice(2);
   let reportJson = null;
+  let enforceCritical = false;
   const positional = [];
 
   for (let index = 0; index < args.length; index += 1) {
@@ -107,12 +27,14 @@ function main() {
     if (arg === "--report-json") {
       reportJson = args[index + 1];
       if (!reportJson) {
-        console.error("Usage: patch-linux-window-ui.js [--report-json path] <extracted-app-asar-dir>");
+        console.error(USAGE);
         process.exit(1);
       }
       index += 1;
+    } else if (arg === "--enforce-critical") {
+      enforceCritical = true;
     } else if (arg === "--help" || arg === "-h") {
-      console.log("Usage: patch-linux-window-ui.js [--report-json path] <extracted-app-asar-dir>");
+      console.log(USAGE);
       process.exit(0);
     } else {
       positional.push(arg);
@@ -122,88 +44,41 @@ function main() {
   const extractedDir = positional[0];
 
   if (!extractedDir || positional.length > 1) {
-    console.error("Usage: patch-linux-window-ui.js [--report-json path] <extracted-app-asar-dir>");
+    console.error(USAGE);
     process.exit(1);
   }
 
-  const report = reportJson == null ? null : createPatchReport();
+  // Enforcement needs the report data even when no --report-json was requested.
+  const report = reportJson == null && !enforceCritical ? null : createPatchReport();
   patchExtractedApp(extractedDir, { report });
+  if (report != null) {
+    const inventory = createInventory({ sourcePath: extractedDir });
+    const findings = findPostPatchIntegrityFindings(inventory);
+    report.postPatchIntegrity = {
+      sourcePath: extractedDir,
+      findingCount: findings.length,
+      findings,
+    };
+  }
+  // Write the report before gating so CI artifact upload sees it even on failure.
   writePatchReport(reportJson, report);
+
+  if (enforceCritical) {
+    const failures = criticalFailuresFromReport(report);
+    if (failures.length > 0) {
+      console.error(`Critical patch failures (${failures.length}):`);
+      for (const failure of failures) {
+        console.error(`  - ${failure.name} (${failure.status})${failure.reason ? `: ${failure.reason}` : ""}`);
+      }
+      console.error(
+        "Aborting: these patches are required for a working Linux app. " +
+          "Set CODEX_ENFORCE_CRITICAL_PATCHES=0 to bypass (emergency builds only).",
+      );
+      process.exit(1);
+    }
+  }
 }
 
 if (require.main === module) {
   main();
 }
-
-function applyLinuxBrowserUseIabVisibleOnCreatePatch(currentSource) {
-  // Compatibility shim for old callers after the runtime patch was removed.
-  return currentSource;
-}
-
-module.exports = {
-  COMPUTER_USE_UI_ENV_VAR,
-  COMPUTER_USE_UI_SETTINGS_KEY,
-  applyBrowserAnnotationScreenshotPatch,
-  applyBrowserUseNodeReplApprovalPatch,
-  applyKeybindsSettingsIndexPatch,
-  applyKeybindsSettingsSectionsPatch,
-  applyKeybindsSettingsSharedPatch,
-  applyLinuxAppSunsetPatch,
-  applyLinuxAppUpdaterBridgePatch,
-  applyLinuxAppUpdaterMenuPatch,
-  applyLinuxAvatarOverlayMousePassthroughPatch,
-  applyLinuxBrowserUseIabVisibleOnCreatePatch,
-  applyLinuxChromeExtensionStatusPatch,
-  applyLinuxChromePluginAutoInstallPatch,
-  applyLinuxComputerUseFeaturePatch,
-  applyLinuxComputerUseInstallFlowPatch,
-  applyLinuxComputerUsePluginGatePatch,
-  applyLinuxComputerUseRendererAvailabilityPatch,
-  applyLinuxExplicitIpcQuitPatch,
-  applyLinuxExplicitQuitPromptBypassPatch,
-  applyLinuxExplicitTrayQuitPatch,
-  applyLinuxFileManagerPatch,
-  applyLinuxGitOriginsSourceFallbackPatch,
-  applyLinuxHotkeyWindowPrewarmPatch,
-  applyLinuxKeybindOverridesRuntimePatch,
-  applyLinuxLaunchActionArgsPatch,
-  applyLinuxMenuPatch,
-  applyLinuxMultiInstanceBootstrapPatch,
-  applyLinuxOpaqueBackgroundPatch,
-  applyLinuxOpaqueWindowsDefaultPatch,
-  applyLinuxQuitGuardPatch,
-  applyLinuxReadyToShowWindowStatePatch,
-  applyLinuxRemoteControlConfigPreservationPatch,
-  applyLinuxSetIconPatch,
-  applyLinuxSettingsPersistencePatch,
-  applyLinuxSingleInstancePatch,
-  applyLinuxTrayCloseSettingPatch,
-  applyLinuxTrayPatch,
-  applyLinuxWillQuitDrainTimeoutPatch,
-  applyLinuxWindowOptionsPatch,
-  applySubagentNicknameMetadataPatch,
-  createPatchReport,
-  corePatchDescriptors,
-  createMainBundleContext,
-  detectLinuxTargetContext,
-  discoverCorePatchDescriptors,
-  enabledLinuxFeatureIds,
-  enabledLinuxFeatureStageHooks,
-  isComputerUseUiEnabled,
-  legacyCorePatchDescriptors,
-  linuxTargetSummary,
-  loadEnabledLinuxFeatures,
-  loadLinuxFeaturePatchDescriptors,
-  loadLinuxFeatureMainBundlePatches,
-  normalizePatchDescriptors,
-  parseOsRelease,
-  patchCommentPreloadBundle,
-  patchExtractedApp,
-  patchKeybindsSettingsAssets,
-  patchLinuxMultiInstanceBootstrap,
-  patchLinuxAppUpdaterBridge,
-  patchMainBundleSource,
-  patchPackageJson,
-  resolveDesktopName,
-  resolveKeybindsSettingsAsset,
-};

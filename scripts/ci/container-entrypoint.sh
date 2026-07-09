@@ -244,20 +244,14 @@ run_core_job() {
     cargo check --workspace --all-targets
     cargo test --workspace --all-targets
 
-    node --check scripts/patch-linux-window-ui.js
-    node --check scripts/patch-linux-window-ui.test.js
-    for file in scripts/patches/*.js; do
-        node --check "$file"
-    done
-    node --check scripts/ci/validate-patch-report.js
-    node --test scripts/patch-linux-window-ui.test.js
+    bash scripts/ci/run-node-checks.sh
 
     bash tests/scripts_smoke.sh
 
     append_summary "Rust and Smoke Tests" \
         "Shell syntax checks passed." \
         "Rust formatting, clippy, check, and tests passed." \
-        "Node patcher checks and script smoke tests passed."
+        "Node syntax checks, Node tests, and script smoke tests passed."
 }
 
 run_deb_job() {
@@ -452,9 +446,11 @@ capture_upstream_metadata() {
     local etag="no-etag"
     local content_length="unknown"
     if curl -fsSLI "$UPSTREAM_DMG_URL" > "$headers_file"; then
-        last_modified="$(awk 'BEGIN{IGNORECASE=1} /^last-modified:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); print; exit}' "$headers_file")"
-        etag="$(awk 'BEGIN{IGNORECASE=1} /^etag:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); gsub(/"/,""); print; exit}' "$headers_file")"
-        content_length="$(awk 'BEGIN{IGNORECASE=1} /^content-length:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); print; exit}' "$headers_file")"
+        # Match header names case-insensitively without gawk's IGNORECASE,
+        # which is a no-op under mawk (the default awk in the CI containers).
+        last_modified="$(awk 'tolower($0) ~ /^last-modified:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); print; exit}' "$headers_file")"
+        etag="$(awk 'tolower($0) ~ /^etag:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); gsub(/"/,""); print; exit}' "$headers_file")"
+        content_length="$(awk 'tolower($0) ~ /^content-length:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); print; exit}' "$headers_file")"
     fi
     rm -f "$headers_file"
 

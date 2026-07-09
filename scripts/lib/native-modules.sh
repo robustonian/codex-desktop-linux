@@ -132,8 +132,74 @@ prune_native_module_build_artifacts() {
     find "$module_dir" -type f -name "*.target.mk" -delete 2>/dev/null || true
 }
 
+apply_v8_nullptr_t_workaround_if_needed() {
+    local build_dir="$1"
+    local probe_source="$build_dir/.v8-nullptr-probe.cc"
+    local nullptr_fix="$build_dir/.v8-nullptr-fix.h"
+    local cxx_wrapper="$build_dir/.cxx-v8-nullptr"
+    local -a cxx_command
+
+    mkdir -p "$build_dir"
+
+    # CXX is conventionally a command plus optional leading arguments, e.g.
+    # "ccache g++". Preserve that common form when wrapping the compiler.
+    # shellcheck disable=SC2206
+    cxx_command=( ${CXX:-c++} )
+    if [ "${#cxx_command[@]}" -eq 0 ]; then
+        cxx_command=(c++)
+    fi
+
+    command -v "${cxx_command[0]}" >/dev/null 2>&1 || error "C++ compiler not found: ${cxx_command[0]}"
+
+    cat > "$probe_source" <<'CPP'
+#include <cstddef>
+nullptr_t x = nullptr;
+CPP
+
+    if "${cxx_command[@]}" -x c++ -std=c++20 -fsyntax-only "$probe_source" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    printf '#include <cstddef>\nusing std::nullptr_t;\n' > "$nullptr_fix"
+    {
+        printf '#!/usr/bin/env bash\n'
+        printf 'exec'
+        local arg
+        for arg in "${cxx_command[@]}"; do
+            printf ' %q' "$arg"
+        done
+        printf ' -include %q "$@"\n' "$nullptr_fix"
+    } > "$cxx_wrapper"
+    chmod +x "$cxx_wrapper"
+
+    export CXX="$cxx_wrapper"
+    info "Applied GCC 16+ nullptr_t compatibility workaround"
+}
+
 build_native_modules() {
     local app_extracted="$1"
+    local max_build_threads="${MAX_BUILD_THREADS:-0}"
+    local -a electron_rebuild_mode_args=()
+    local -a native_build_env=()
+
+    case "$max_build_threads" in
+        ""|*[!0-9]*)
+            error "MAX_BUILD_THREADS must be 0 or a positive integer"
+            ;;
+    esac
+
+    if [ "$max_build_threads" != "0" ]; then
+        electron_rebuild_mode_args+=(--sequential)
+    fi
+
+    if [ "$max_build_threads" != "0" ]; then
+        native_build_env+=(
+            "npm_config_jobs=$max_build_threads"
+            "NPM_CONFIG_JOBS=$max_build_threads"
+            "MAKEFLAGS=-j$max_build_threads"
+        )
+        info "Max build threads: $max_build_threads"
+    fi
 
     # Read versions from extracted app
     local bs3_ver bs3_build_ver npty_ver
@@ -167,16 +233,19 @@ build_native_modules() {
         "$ELECTRON_REBUILD_PACKAGE" \
         "$ELECTRON_REBUILD_NODE_ABI_PACKAGE" \
         --save-dev \
-        --ignore-scripts 2>&1 >&2
-    npm install "better-sqlite3@$bs3_build_ver" "node-pty@$npty_ver" --ignore-scripts 2>&1 >&2
+        --ignore-scripts >&2
+    npm install "better-sqlite3@$bs3_build_ver" "node-pty@$npty_ver" --ignore-scripts >&2
     patch_better_sqlite3_for_v8_external_pointer_api "$build_dir/node_modules/better-sqlite3"
 
     info "Compiling for Electron v$ELECTRON_VERSION (this takes ~1 min)..."
     info "Using Electron headers: $ELECTRON_HEADERS_URL"
     [ -f "$build_dir/node_modules/@electron/rebuild/lib/cli.js" ] || error "electron-rebuild CLI not found in native build toolchain"
-    npm_config_disturl="$ELECTRON_HEADERS_URL" \
-    NPM_CONFIG_DISTURL="$ELECTRON_HEADERS_URL" \
-    node "$build_dir/node_modules/@electron/rebuild/lib/cli.js" -v "$ELECTRON_VERSION" --force --dist-url "$ELECTRON_HEADERS_URL" 2>&1 >&2
+    apply_v8_nullptr_t_workaround_if_needed "$build_dir"
+    env \
+        npm_config_disturl="$ELECTRON_HEADERS_URL" \
+        NPM_CONFIG_DISTURL="$ELECTRON_HEADERS_URL" \
+        "${native_build_env[@]}" \
+        node "$build_dir/node_modules/@electron/rebuild/lib/cli.js" -v "$ELECTRON_VERSION" --force --dist-url "$ELECTRON_HEADERS_URL" "${electron_rebuild_mode_args[@]}" >&2
 
     info "Native modules built successfully"
 

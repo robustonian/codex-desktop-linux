@@ -29,6 +29,7 @@ permissions:
   contents: read
 
 env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   UPSTREAM_DMG_URL: https://persistent.oaistatic.com/codex-app-prod/Codex.dmg
   UPSTREAM_DMG_PATH: /tmp/codex-upstream-ci/Codex.dmg
   DMG_CACHE_SCHEMA_VERSION: v1
@@ -63,9 +64,11 @@ jobs:
 
           curl -fsSLI "$UPSTREAM_DMG_URL" > "$headers_file"
 
-          last_modified="$(awk 'BEGIN{IGNORECASE=1} /^last-modified:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); print; exit}' "$headers_file")"
-          etag="$(awk 'BEGIN{IGNORECASE=1} /^etag:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); gsub(/"/,""); print; exit}' "$headers_file")"
-          content_length="$(awk 'BEGIN{IGNORECASE=1} /^content-length:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); print; exit}' "$headers_file")"
+          # Match header names case-insensitively without gawk's IGNORECASE,
+          # which is a no-op under mawk (the default awk on ubuntu runners).
+          last_modified="$(awk 'tolower($0) ~ /^last-modified:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); print; exit}' "$headers_file")"
+          etag="$(awk 'tolower($0) ~ /^etag:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); gsub(/"/,""); print; exit}' "$headers_file")"
+          content_length="$(awk 'tolower($0) ~ /^content-length:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); print; exit}' "$headers_file")"
 
           if [ -z "$last_modified" ]; then
             last_modified="unknown"
@@ -138,12 +141,16 @@ jobs:
         run: node scripts/ci/validate-patch-report.js patch-report.json --profile upstream-build
 
       - name: Upload upstream DMG metadata artifact
+        # The build step now aborts on critical patch failures; keep uploading
+        # the patch report so the failure is diagnosable from the artifact.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: upstream-dmg-metadata
           path: |
             upstream-dmg-metadata.json
             patch-report.json
+          if-no-files-found: ignore
 
       - name: Write build summary
         run: |

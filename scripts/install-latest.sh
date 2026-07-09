@@ -6,6 +6,8 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PACKAGE_NAME="codex-desktop"
 SYSTEM_APP_ASAR="/opt/$PACKAGE_NAME/resources/app.asar"
 LOCAL_APP_ASAR="$REPO_DIR/codex-app/resources/app.asar"
+SYSTEM_BUILD_INFO="/opt/$PACKAGE_NAME/.codex-linux/build-info.json"
+LOCAL_BUILD_INFO="$REPO_DIR/codex-app/.codex-linux/build-info.json"
 
 info() {
     echo "[INFO] $*" >&2
@@ -30,7 +32,8 @@ Installs or updates Codex Desktop on Linux in one command:
   3. Rebuilds codex-app/ from that DMG
   4. Builds the native package for this distro
   5. Installs that package
-  6. Prints the current, built, and final installed versions
+  6. Verifies the installed package version and Linux build metadata
+  7. Prints the current, built, and final installed versions
 
 Notes:
   - This command may prompt for sudo during dependency installation and package install.
@@ -236,6 +239,39 @@ local_built_app_version() {
     printf '%s\n' "$version"
 }
 
+package_file_version() {
+    local package_path="$1"
+    local version=""
+
+    case "$package_path" in
+        *.deb)
+            command -v dpkg-deb >/dev/null 2>&1 || error "dpkg-deb is required to inspect $package_path"
+            version="$(dpkg-deb -f "$package_path" Version 2>/dev/null || true)"
+            ;;
+        *.rpm)
+            command -v rpm >/dev/null 2>&1 || error "rpm is required to inspect $package_path"
+            version="$(rpm -qp --queryformat '%{VERSION}-%{RELEASE}\n' "$package_path" 2>/dev/null || true)"
+            ;;
+        *.pkg.tar.*)
+            command -v tar >/dev/null 2>&1 || error "tar is required to inspect $package_path"
+            version="$(tar -xOf "$package_path" .PKGINFO 2>/dev/null | awk -F' = ' '$1 == "pkgver" { print $2; exit }' || true)"
+            ;;
+        *)
+            error "Unsupported package file: $package_path"
+            ;;
+    esac
+
+    [ -n "$version" ] || error "Could not determine package version from $package_path"
+    printf '%s\n' "$version"
+}
+
+build_info_sha256() {
+    local build_info_path="$1"
+
+    [ -f "$build_info_path" ] || error "Missing Linux build metadata: $build_info_path"
+    sha256sum "$build_info_path" | awk '{ print $1 }'
+}
+
 latest_built_package_file() {
     local package_path
 
@@ -310,27 +346,33 @@ main() {
     info "Rebuilding codex-app from the latest upstream DMG"
     ./install.sh --fresh
 
-    local built_app_version
+    local built_app_version built_build_info_sha256
     built_app_version="$(local_built_app_version)"
+    built_build_info_sha256="$(build_info_sha256 "$LOCAL_BUILD_INFO")"
     info "Building native package"
     make package
 
-    local package_file
+    local package_file built_package_version
     package_file="$(latest_built_package_file)"
+    built_package_version="$(package_file_version "$package_file")"
 
     echo "Built latest version:"
     print_kv "Codex App" "$built_app_version"
+    print_kv "Linux package" "$built_package_version"
     print_kv "Package file" "$package_file"
     echo
 
     info "Installing built package"
     install_package_file "$package_file"
 
-    local final_package_version final_app_version
+    local final_package_version final_app_version final_build_info_sha256
     final_package_version="$(installed_package_version)"
     final_app_version="$(installed_app_version)"
+    final_build_info_sha256="$(build_info_sha256 "$SYSTEM_BUILD_INFO")"
 
+    [ "$final_package_version" = "$built_package_version" ] || error "Installed Linux package version ($final_package_version) does not match the built package version ($built_package_version from $package_file)"
     [ "$final_app_version" = "$built_app_version" ] || error "Installed Codex App version ($final_app_version) does not match the rebuilt version ($built_app_version)"
+    [ "$final_build_info_sha256" = "$built_build_info_sha256" ] || error "Installed Linux build metadata does not match the rebuilt app metadata (installed $final_build_info_sha256, expected $built_build_info_sha256)"
 
     echo "Final installed versions:"
     print_kv "Codex App" "$final_app_version"

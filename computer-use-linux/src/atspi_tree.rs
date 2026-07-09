@@ -1,10 +1,15 @@
 use crate::diagnostics::hydrate_session_bus_env;
 use anyhow::{anyhow, Context, Result};
 use atspi::{
-    connection::P2P,
-    proxy::{accessible::AccessibleProxy, proxy_ext::ProxyExt},
-    AccessibilityConnection, CoordType, ObjectRef, ObjectRefOwned, StateSet,
+    proxy::{
+        accessible::{AccessibleProxy, ObjectRefExt},
+        proxy_ext::ProxyExt,
+    },
+    CoordType, ObjectRef, ObjectRefOwned, StateSet,
 };
+// Direct dependency (p2p feature off) — see Cargo.toml for why we bypass
+// atspi's "connection" re-export.
+use atspi_connection::AccessibilityConnection;
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -105,7 +110,7 @@ pub async fn list_accessible_apps(limit: usize) -> Result<Vec<AccessibleAppSumma
     let mut apps = Vec::new();
 
     for object_ref in roots.into_iter().take(limit) {
-        if let Ok(proxy) = conn.object_as_accessible(&object_ref).await {
+        if let Ok(proxy) = open_accessible(&conn, &object_ref).await {
             apps.push(read_app_summary(&proxy, &object_ref, dbus.as_ref()).await);
         }
     }
@@ -135,7 +140,7 @@ pub async fn snapshot_tree(
             break;
         }
 
-        let Ok(proxy) = conn.object_as_accessible(&object_ref).await else {
+        let Ok(proxy) = open_accessible(&conn, &object_ref).await else {
             continue;
         };
         let index = nodes.len() as u32;
@@ -155,14 +160,74 @@ pub async fn snapshot_tree(
     Ok(nodes)
 }
 
+/// Compact description of the AT-SPI element that currently holds keyboard
+/// focus, used as post-input feedback for type_text/press_key.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FocusedElementSummary {
+    pub role: String,
+    pub name: Option<String>,
+    pub editable: bool,
+    pub states: Vec<String>,
+}
+
+const FOCUS_PROBE_MAX_NODES: usize = 400;
+const FOCUS_PROBE_MAX_DEPTH: u32 = 16;
+
+/// Find the element with the `focused` state inside the target app (by pid) or
+/// across all apps. Best-effort and bounded: returns Ok(None) when no focused
+/// element is reachable through AT-SPI (common for apps without accessibility
+/// support, e.g. Electron without --force-renderer-accessibility).
+pub async fn focused_element_summary(
+    target_pid: Option<u32>,
+) -> Result<Option<FocusedElementSummary>> {
+    let conn = connect().await?;
+    let roots = registry_children(&conn).await?;
+    let selected_roots = select_roots(&conn, roots, None, target_pid).await;
+    let mut visited = 0_usize;
+    let mut queue = VecDeque::new();
+
+    for object_ref in selected_roots {
+        queue.push_back((object_ref, 0_u32));
+    }
+
+    while let Some((object_ref, depth)) = queue.pop_front() {
+        if visited >= FOCUS_PROBE_MAX_NODES {
+            break;
+        }
+        visited += 1;
+
+        let Ok(proxy) = open_accessible(&conn, &object_ref).await else {
+            continue;
+        };
+        let Ok(state) = proxy.get_state().await else {
+            continue;
+        };
+        if state.contains(atspi::State::Focused) {
+            let proxies = proxy.proxies().await.ok();
+            return Ok(Some(FocusedElementSummary {
+                role: role_name(&proxy).await,
+                name: optional_string(proxy.name().await.ok()),
+                editable: supports_editable_text(proxies.as_ref()).await,
+                states: state_labels(state),
+            }));
+        }
+        if depth < FOCUS_PROBE_MAX_DEPTH {
+            for child in proxy.get_children().await.unwrap_or_default() {
+                queue.push_back((child, depth + 1));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 pub async fn perform_action(
     object_ref_id: &str,
     requested_action: Option<&str>,
 ) -> Result<ActionInvocation> {
     let conn = connect().await?;
     let object_ref = object_ref_from_id(object_ref_id)?;
-    let proxy = conn
-        .object_as_accessible(&object_ref)
+    let proxy = open_accessible(&conn, &object_ref)
         .await
         .with_context(|| format!("failed to open AT-SPI object {object_ref_id}"))?;
     let action = proxy
@@ -191,8 +256,7 @@ pub async fn perform_action(
 pub async fn set_element_value(object_ref_id: &str, value: &str) -> Result<ValueSetInvocation> {
     let conn = connect().await?;
     let object_ref = object_ref_from_id(object_ref_id)?;
-    let proxy = conn
-        .object_as_accessible(&object_ref)
+    let proxy = open_accessible(&conn, &object_ref)
         .await
         .with_context(|| format!("failed to open AT-SPI object {object_ref_id}"))?;
     let proxies = proxy.proxies().await?;
@@ -238,6 +302,25 @@ async fn connect() -> Result<AccessibilityConnection> {
     AccessibilityConnection::new()
         .await
         .context("failed to connect to AT-SPI bus")
+}
+
+/// Open an `AccessibleProxy` for an object on the a11y bus.
+///
+/// We deliberately avoid `AccessibilityConnection::object_as_accessible` (the
+/// `P2P` trait). For apps that advertise a peer-to-peer bus address it routes
+/// reads over that socket, but for apps that don't (notably GTK4 apps such as
+/// Nautilus / Text Editor / baobab, which don't implement the legacy
+/// `GetApplicationBusAddress`) it falls back to a proxy built with only a path
+/// and *no destination*. On the shared a11y bus that proxy can't address the
+/// app and every call fails with `ServiceUnknown`, which surfaces as an empty
+/// tree (`role: "unknown"`, `child_count: 0`). `as_accessible_proxy` always
+/// pins the destination to the object's bus name, so it works for every app
+/// regardless of P2P support. See issue #31.
+async fn open_accessible<'r>(
+    conn: &AccessibilityConnection,
+    object_ref: &'r ObjectRefOwned,
+) -> Result<AccessibleProxy<'r>, atspi::AtspiError> {
+    object_ref.as_accessible_proxy(conn.connection()).await
 }
 
 async fn registry_children(conn: &AccessibilityConnection) -> Result<Vec<ObjectRefOwned>> {
@@ -313,7 +396,7 @@ async fn root_matches(
     object_ref: &ObjectRefOwned,
     needle: &str,
 ) -> bool {
-    let Ok(proxy) = conn.object_as_accessible(object_ref).await else {
+    let Ok(proxy) = open_accessible(conn, object_ref).await else {
         return object_ref_id(object_ref)
             .to_ascii_lowercase()
             .contains(needle);
@@ -325,7 +408,7 @@ async fn root_matches(
 
     let children = proxy.get_children().await.unwrap_or_default();
     for child_ref in children.into_iter().take(8) {
-        let Ok(child_proxy) = conn.object_as_accessible(&child_ref).await else {
+        let Ok(child_proxy) = open_accessible(conn, &child_ref).await else {
             continue;
         };
         if proxy_matches(&child_proxy, &child_ref, needle).await {

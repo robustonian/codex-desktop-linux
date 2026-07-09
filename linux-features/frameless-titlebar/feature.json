@@ -1,0 +1,9 @@
+{
+  "id": "frameless-titlebar",
+  "title": "Frameless Titlebar",
+  "description": "Hide Linux titlebar overlay controls and native menu chrome for compositor-managed window decorations.",
+  "defaultEnabled": false,
+  "entrypoints": {
+    "patchDescriptors": "./patch.js"
+  }
+}

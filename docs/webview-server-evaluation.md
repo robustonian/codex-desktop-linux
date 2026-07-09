@@ -2,31 +2,38 @@
 
 ## Context
 
-The current launcher starts a local `python3 -m http.server "$CODEX_LINUX_WEBVIEW_PORT"` process for the extracted webview bundle. It waits for the configured port to become reachable before launching Electron, and exports `ELECTRON_RENDERER_URL` so side-by-side app IDs can use an isolated local origin.
+The current launcher starts the bundled `launcher/webview-server.py` helper
+with `python3 "$SCRIPT_DIR/.codex-linux/webview-server.py"
+"$CODEX_LINUX_WEBVIEW_PORT" --bind 127.0.0.1` for the extracted webview
+bundle. It waits for the configured port to become reachable before launching
+Electron, validates the served origin, and exports `ELECTRON_RENDERER_URL` so
+side-by-side app IDs can use an isolated local origin.
 
 The extracted webview payload is a static bundle under `codex-app/content/webview` and is relatively large: about 35 MB across 693 files. The generated `index.html` references hashed assets through relative paths, so the app still expects a stable local origin.
 
 ## Options
 
-### 1. Keep Python and harden lifecycle handling
+### 1. Keep the bundled Python server
 
 What changes:
 
-- Keep `python3 -m http.server "$CODEX_LINUX_WEBVIEW_PORT"`
-- Keep improving the current process lifecycle and readiness behavior
-- Improve port-collision handling and logging
+- Keep `launcher/webview-server.py` as the webview static-file server
+- Keep lifecycle, readiness, adoption, and port-collision handling in the
+  launcher
+- Keep explicit no-store/no-cache response headers in the helper
 
 Benefits:
 
 - Lowest implementation risk
-- No packaging or runtime-binary changes
+- No new runtime-binary build or packaging step
 - Preserves the existing static-asset serving model
 
 Risks:
 
 - Python remains an external runtime dependency for the launcher path
 - Startup reliability still depends on a separate process being spawned correctly
-- Performance improvements are limited, because the server is still a generic Python HTTP server
+- Performance improvements are limited, because the helper still uses Python's
+  standard HTTP server stack
 
 ### 2. Ship a tiny Rust static-file server
 
@@ -69,22 +76,27 @@ Risks:
 
 ## Recommendation
 
-Keep Python for now, but harden the launcher lifecycle and readiness handling.
+Keep the bundled Python helper for now. Revisit a Rust helper only if startup
+or lifecycle evidence shows Python remains a bottleneck after the current
+readiness, ownership, and cache-header handling.
 
 Why this wins:
 
-- The current problem looks more like process orchestration than raw server throughput.
+- The historical problem looked more like process orchestration than raw server
+  throughput, and that now lives in launcher-side ownership/readiness logic.
 - The webview payload is static, so the launcher only needs a reliable local origin, not a high-performance application server.
 - This path preserves compatibility while leaving the door open for a Rust server later if evidence shows Python is still a bottleneck.
 
 ## Integration Points
 
-If we later implement the recommended hardening or a Rust server, the change points are:
+If we later replace the bundled Python helper with a Rust server, the change
+points are:
 
-- `install.sh` launcher generation
-- the local webview startup block around the configured webview port
+- `install.sh` staging for the webview helper
+- the launcher startup block around the configured webview port
 - packaging if a Rust server binary is added
-- launcher logging and cleanup logic around the PID file and `http.server` shutdown
+- launcher logging, ownership, adoption, and cleanup logic around the PID file
+  and helper shutdown
 
 ## Risks To Watch
 

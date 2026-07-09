@@ -1,3 +1,5 @@
+**IMPORTANT: THIS PROJECT SUPPORTS ONLY THE LATEST UPSTREAM `CODEX.DMG`. WHEN FIXING UPSTREAM DRIFT, REMOVE OLD DRIFT WORKAROUNDS IN THE SAME PULL REQUEST. DO NOT KEEP LEGACY DMG SHAPES, FALLBACK PATCH PATHS, OR VERSION-SPECIFIC COMPATIBILITY ZOOS AROUND. THE CODE SHOULD TARGET THE CURRENT DMG SO REVIEW, VALIDATION, AND DIAGNOSTICS DO NOT HAVE TO GUESS WHICH UPSTREAM VERSION FAILED.**
+
 # Contributing to Codex Desktop for Linux
 
 Thanks for your interest in contributing to Codex Desktop for Linux. This project adapts the official macOS Codex Desktop DMG into a runnable Linux app, packages it for multiple Linux distributions, and maintains a local Rust update manager for future rebuilds.
@@ -22,7 +24,9 @@ Please take a moment to understand how this repository is structured before maki
 - `scripts/build-deb.sh`, `scripts/build-rpm.sh`, and `scripts/build-pacman.sh` package an already-generated `codex-app/`.
 - `scripts/install-deps.sh` bootstraps local development dependencies.
 - `updater/` contains the Rust update manager.
-- `scripts/patch-linux-window-ui.js` contains fail-soft ASAR patches for Linux behavior.
+- `scripts/patch-linux-window-ui.js` is the build-facing ASAR patcher CLI. Core
+  patch descriptors live under `scripts/patches/core/`, with implementation
+  helpers under `scripts/patches/impl/`.
 - `codex-app/` and `dist/` are generated artifacts and should not be treated as primary source unless you are intentionally validating generated output.
 
 For repository-specific implementation details, read [`AGENTS.md`](./AGENTS.md) and the relevant sections in [`README.md`](./README.md) before starting work.

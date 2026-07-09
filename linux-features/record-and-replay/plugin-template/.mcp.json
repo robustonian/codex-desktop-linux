@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "event-stream": {
+      "command": "./bin/SkyLinuxComputerUseClient",
+      "args": ["event-stream", "mcp"],
+      "cwd": "."
+    }
+  }
+}

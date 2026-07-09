@@ -7,6 +7,105 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Linux launcher accepts `--profile NAME` / `--profile=NAME` / `-p NAME` and
+  starts a separate Codex Desktop instance whose app server runs through
+  `codex --profile NAME`, matching CLI profile config overlays such as
+  `~/.codex/desktop_fugu.config.toml`.
+
+### Fixed
+
+- Cold launches no longer stall for a full second between acquiring the
+  launcher lock and spawning Electron. The CLI version log line reads the
+  probe result through command substitution, and the probe's watchdog
+  subshell inherited that pipe: its `sleep 1` child survived the watchdog
+  kill and held the pipe open until the sleep expired, so even a CLI that
+  answers `--version` in ~50 ms blocked the launch path for ~1 s. The
+  watchdog now runs detached from the caller's stdout/stderr, cutting that
+  launch phase from ~1010 ms to ~74 ms and making the window (and GNOME's
+  startup feedback) appear about a second sooner on every cold start.
+
+### Changed
+
+- Cold starts overlap the webview server boot with the rest of launcher
+  startup and run the five bundled plugin cache syncs concurrently. The
+  launcher now spawns the Python webview server, does CLI lookup and cache
+  syncs while it boots, and only then waits for readiness and verifies the
+  origin — still strictly before Electron launches. The shared bundled
+  marketplace metadata is staged exactly once before the concurrent syncs
+  instead of being rewritten inside each sync. Measured on a warm-cache cold
+  start, the sync block drops from ~285 ms to ~110 ms and the webview wait
+  from ~150 ms to ~35 ms, putting Electron spawn ~330 ms earlier.
+- The launcher now passes `--disable-dev-shm-usage` to Electron only when
+  `/dev/shm` is missing, not writable, or smaller than 1 GiB (the container
+  case the flag exists for). On regular desktops Chromium's renderer/GPU
+  shared-memory buffers stay in RAM-backed `/dev/shm` instead of disk-backed
+  temp storage, which improves rendering performance. Override with
+  `CODEX_ELECTRON_DISABLE_DEV_SHM_USAGE=auto|0|1`.
+- The launcher now adds `--force-renderer-accessibility` only when an
+  assistive technology is detected (Orca or brltty running, the GNOME
+  screen-reader setting, the AT-SPI accessibility state that
+  `codex-computer-use-linux setup` enables — `org.a11y.Status IsEnabled` or
+  `toolkit-accessibility` — or the `GNOME_ACCESSIBILITY` /
+  `QT_LINUX_ACCESSIBILITY_ALWAYS_ON` / `ACCESSIBILITY_ENABLED` env markers).
+  Keeping the Chromium accessibility engine on in every renderer measurably
+  slows the webview UI, and the WSLg and wayland-gpu profiles already
+  skipped it for that reason. Session-bus probes are watchdog-capped at
+  0.5 s so a broken bus cannot delay launch.
+  `CODEX_FORCE_RENDERER_ACCESSIBILITY=1|0` still overrides the detection in
+  both directions.
+- Refactored ASAR patching internals so `scripts/patch-linux-window-ui.js` is a
+  CLI-only entrypoint and patch descriptors/implementations live under
+  `scripts/patches/`.
+
+### Removed
+
+- Removed legacy external Linux feature patch contracts:
+  `entrypoints.patches`, `entrypoints.mainBundlePatch`, `.patches`/`.default`
+  descriptor exports, the unsuffixed `extracted-app` phase, and
+  `patch-linux-window-ui.js` module exports.
+
+## [0.8.4] - 2026-06-20
+
+### Added
+
+- The `make setup-native` Linux feature picker can now present a GUI checklist
+  (zenity or kdialog) instead of the terminal-only numbered prompt, pre-checked
+  with the currently-enabled features. It falls back to the terminal picker when
+  no dialog tool or display is available (headless/SSH/CI) or when
+  `CODEX_BOOTSTRAP_NO_GUI=1` is set. The existing Python discovery/validation/
+  write path is reused unchanged.
+- An "Install updates when you close Codex" toggle in the Keybinds settings page
+  (new "Updates" section). When on (the default, matching prior behavior), a
+  ready update waits for Codex to close and then installs; when off, updates
+  wait until you explicitly click Update. The toggle persists to
+  `~/.config/<appId>/settings.json` as `codex-linux-auto-update-on-exit`, and
+  `codex-update-manager` rereads it during reconciliation as an overlay over
+  `config.toml` so the in-app preference wins without restarting the service.
+- `codex-update-manager` can now track newer *wrapper* releases (this repo's own
+  Linux features and fixes) in addition to the upstream Codex DMG. Opt in with
+  `enable_wrapper_updates = true` in `config.toml`; a new `check-wrapper`
+  subcommand and the `status --json` output report the detected wrapper commit
+  and a changelog of what changed. Detection is git-based, requires the remote
+  candidate to descend from the installed checkout, clears stale candidates
+  when no update is currently valid, uses timeout-bound non-interactive git
+  commands, prefers curated `CHANGELOG.md` sections newer than the installed
+  version, and falls back to git commit subjects. Packaged frozen bundles
+  without a git checkout degrade gracefully (no wrapper tracking; updates arrive
+  via a normal package upgrade).
+- The opt-in `codex-wrapper-updater` update action can ask which optional Linux
+  features to enable before rebuilding. The picker reads the recorded candidate
+  wrapper source, preserves unknown/private feature ids from the existing
+  config, saves selections to `~/.config/<appId>/linux-features.json`, and
+  skips without blocking the update when there is no display, no dialog tool, a
+  dialog launch failure, or a cancellation.
+- The opt-in `codex-wrapper-updater` toolbar now shows the installed short
+  wrapper commit as a SHA chip when build metadata is available, and shows a
+  disabled "dev mode" action when the installed commit is ahead of the tracked
+  remote.
+- Launcher rendering mode `CODEX_LINUX_RENDERING_MODE=wayland-gpu`, which
+  forces native Wayland with GPU compositing enabled and skips forced renderer
+  accessibility by default for Wayland desktops where XWayland or software
+  rendering is unstable.
 - New opt-in Linux feature `read-aloud-mcp` that stages a standalone Rust Read
   Aloud MCP plugin with `doctor`, `read_aloud`, and `stop` tools. The MCP server
   reuses the Kokoro runner/model configuration from the Read Aloud UI feature
@@ -15,9 +114,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   bundled plugin registry so the app keeps `read-aloud` installed, and the
   launcher syncs the plugin cache so new Codex windows expose the MCP tools
   through the same auto-install path as Computer Use.
+- The Home Manager and NixOS modules gained a
+  `programs.codexDesktopLinux.cliPackage` option that wraps the installed Codex
+  Desktop launcher (and its `.desktop` entry) so it always starts with
+  `CODEX_CLI_PATH` pointing at the chosen CLI. Because the path is baked into the
+  launcher instead of exported as a session variable, Codex Desktop reliably
+  finds the Codex CLI regardless of how it is launched (graphical autostart,
+  application launcher, terminal, or warm-start handoff), even when the Nix
+  profile is not on the graphical session `PATH`, and the change takes effect on
+  the next app launch with no re-login. When unset it falls back to
+  `remoteControl.package` if the remote-control service is enabled. This avoids
+  the `Unable to locate the Codex CLI binary. Set CODEX_CLI_PATH ...` startup
+  failure.
 
 ### Fixed
 
+- `codex-update-manager` no longer depends on the `fs4` crate for updater check
+  serialization. The updater now uses `std::fs::File::try_lock`, preserves the
+  existing non-blocking `check.lock` behavior when another check is active, and
+  adds regression coverage for `WouldBlock` lock contention semantics.
+- The avatar overlay is focusable on Linux so inline pet reply inputs can accept
+  keyboard input after being clicked, while still staying above the main Codex
+  window as an overlay.
+- Plugin marketplace browsing now preserves upstream's `remote_plugin`
+  feature sync on Linux, so current app servers can load the remote OpenAI
+  curated catalog instead of falling back to only locally installed plugins.
+- The opt-in `remote-mobile-control` cold-start hook no longer removes
+  `~/.local/bin/codex` when the launcher is actively using that symlink as
+  `CODEX_CLI_PATH`.
+- The in-app updater no longer quits into a broken `pkexec` install path when a
+  minimal window-manager session has no graphical polkit authentication agent;
+  it keeps the rebuilt package ready and reports a terminal `sudo
+  /usr/bin/codex-update-manager ... --path ...` command instead.
+- The opt-in Linux AppShots bare-modifier shortcuts now require left and right
+  modifier keycodes, preventing a fast double-tap on one physical Alt or Shift
+  key from opening AppShots.
+- The wrapper updater no longer offers a "downgrade as update" when the
+  installed build is ahead of the tracked remote. Detection records dev mode
+  when the candidate does not descend from the installed commit, clears stale
+  wrapper candidates when detection is not valid, and the apply path refuses to
+  run while dev mode is recorded.
+- Nix builds now rewrite crates.io API crate download URLs to the static
+  crates.io CDN path, avoiding PR-only CI failures from crates.io API 403s
+  while preserving the same lockfile checksums.
+- Bundled Browser plugin staging now preserves local `file://` target support
+  advertised by the Browser plugin while keeping remote file hosts and `data:`
+  URLs blocked by the URL policy.
 - `codex-update-manager` now prunes unreferenced updater workspaces under `~/.cache/codex-update-manager/workspaces`, removing heavy build artifacts (`builder/`, `codex-app/`, `dist/`) while preserving lightweight diagnostics such as `logs/` and rebuild reports.
 - The Chrome native-messaging host now evicts stale browser clients when a newer Codex browser client connects, preventing old Node REPL sessions from repeatedly reattaching CDP and driving extension service-worker CPU.
 - The bundled Chrome plugin is now auto-installed during app startup, matching Browser Use, so the plugin page no longer falls back to an install button after restart when the Linux native host is already staged.
@@ -25,6 +167,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Codex Desktop no longer removes user-enabled `remote_control = true` from the local Linux config before starting the app server.
 - Linux webview bundles no longer ask current Codex CLI app servers to enable unsupported feature flags, avoiding connector authentication sync errors.
 - Native Linux launches now keep GPU compositing enabled by default, avoiding sustained Electron GPU-process CPU usage on some X11/NVIDIA desktops. Users who still need the old flicker workaround can opt in with `CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=1`.
+- Linux Keybinds settings now show current upstream shortcut defaults for Quick Chat, alternate New Chat, search, terminal, browser, and thread actions, and no longer lists non-dispatchable runtime rows.
 
 ## [0.8.0] - 2026-05-16
 
