@@ -5,8 +5,11 @@ use atspi::{
         accessible::{AccessibleProxy, ObjectRefExt},
         proxy_ext::ProxyExt,
     },
-    AccessibilityConnection, CoordType, ObjectRef, ObjectRefOwned, StateSet,
+    CoordType, ObjectRef, ObjectRefOwned, StateSet,
 };
+// Direct dependency (p2p feature off) — see Cargo.toml for why we bypass
+// atspi's "connection" re-export.
+use atspi_connection::AccessibilityConnection;
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -155,6 +158,67 @@ pub async fn snapshot_tree(
     }
 
     Ok(nodes)
+}
+
+/// Compact description of the AT-SPI element that currently holds keyboard
+/// focus, used as post-input feedback for type_text/press_key.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FocusedElementSummary {
+    pub role: String,
+    pub name: Option<String>,
+    pub editable: bool,
+    pub states: Vec<String>,
+}
+
+const FOCUS_PROBE_MAX_NODES: usize = 400;
+const FOCUS_PROBE_MAX_DEPTH: u32 = 16;
+
+/// Find the element with the `focused` state inside the target app (by pid) or
+/// across all apps. Best-effort and bounded: returns Ok(None) when no focused
+/// element is reachable through AT-SPI (common for apps without accessibility
+/// support, e.g. Electron without --force-renderer-accessibility).
+pub async fn focused_element_summary(
+    target_pid: Option<u32>,
+) -> Result<Option<FocusedElementSummary>> {
+    let conn = connect().await?;
+    let roots = registry_children(&conn).await?;
+    let selected_roots = select_roots(&conn, roots, None, target_pid).await;
+    let mut visited = 0_usize;
+    let mut queue = VecDeque::new();
+
+    for object_ref in selected_roots {
+        queue.push_back((object_ref, 0_u32));
+    }
+
+    while let Some((object_ref, depth)) = queue.pop_front() {
+        if visited >= FOCUS_PROBE_MAX_NODES {
+            break;
+        }
+        visited += 1;
+
+        let Ok(proxy) = open_accessible(&conn, &object_ref).await else {
+            continue;
+        };
+        let Ok(state) = proxy.get_state().await else {
+            continue;
+        };
+        if state.contains(atspi::State::Focused) {
+            let proxies = proxy.proxies().await.ok();
+            return Ok(Some(FocusedElementSummary {
+                role: role_name(&proxy).await,
+                name: optional_string(proxy.name().await.ok()),
+                editable: supports_editable_text(proxies.as_ref()).await,
+                states: state_labels(state),
+            }));
+        }
+        if depth < FOCUS_PROBE_MAX_DEPTH {
+            for child in proxy.get_children().await.unwrap_or_default() {
+                queue.push_back((child, depth + 1));
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 pub async fn perform_action(

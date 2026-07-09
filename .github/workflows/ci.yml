@@ -38,15 +38,10 @@ jobs:
           bash -n scripts/ci/update-nix-hashes.sh
           bash -n scripts/ci/validate-nix-pins.sh
 
-      - name: Check Node patcher syntax
+      - name: Check Node syntax and tests
         run: |
           set -euo pipefail
-          node --check scripts/patch-linux-window-ui.js
-          node --check scripts/patch-linux-window-ui.test.js
-          for file in scripts/patches/*.js; do
-            node --check "$file"
-          done
-          node --check scripts/ci/validate-patch-report.js
+          bash scripts/ci/run-node-checks.sh
 
       - name: Check Rust formatting
         run: cargo fmt --check
@@ -68,6 +63,7 @@ jobs:
             echo "## Rust and Smoke Tests"
             echo ""
             echo "- Shell syntax checks passed."
+            echo "- Node syntax and tests passed."
             echo "- Rust formatting, clippy, check, and tests passed."
             echo "- Script smoke tests passed."
           } >> "$GITHUB_STEP_SUMMARY"

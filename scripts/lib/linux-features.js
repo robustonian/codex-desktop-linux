@@ -11,11 +11,16 @@ const RESERVED_TOP_LEVEL_NAMES = new Set([
   "features.example.json",
   "features.json",
 ]);
+// Keep removed feature ids loadable so preserved update-builder configs still rebuild.
+const LEGACY_FEATURE_ID_ALIASES = new Map([
+  ["zed-opener", "open-target-discovery"],
+]);
 
 const RUNTIME_HOOK_DIRS = {
   env: { dir: "env.d", executable: false },
   prelaunch: { dir: "prelaunch.d", executable: true },
   electronArgs: { dir: "electron-args.d", executable: false },
+  launcher: { dir: "launcher.d", executable: true },
   coldStart: { dir: "cold-start.d", executable: true },
   afterExit: { dir: "after-exit.d", executable: true },
 };
@@ -58,6 +63,24 @@ function readJsonFile(filePath, label) {
   }
 }
 
+function readLinuxFeaturesConfig(options = {}) {
+  const featuresRoot = linuxFeaturesRoot(options);
+  const configPath = linuxFeaturesConfigPath(featuresRoot, options);
+  if (!fs.existsSync(configPath)) {
+    return { config: null, configPath };
+  }
+
+  const config = readJsonFile(configPath, "Linux features config");
+  if (config == null) {
+    return { config: null, configPath };
+  }
+  if (typeof config !== "object" || Array.isArray(config)) {
+    console.warn(`WARN: Linux features config ${configPath} must be a JSON object`);
+    return { config: null, configPath };
+  }
+  return { config, configPath };
+}
+
 function assertFeatureId(value, label) {
   if (typeof value !== "string" || !FEATURE_ID_PATTERN.test(value)) {
     throw new Error(`${label} must match ${FEATURE_ID_PATTERN}`);
@@ -97,27 +120,69 @@ function normalizeEnabledFeatureIds(value, sourcePath) {
       console.warn(`WARN: Invalid Linux feature id in ${sourcePath}: ${String(item)}`);
       continue;
     }
-    if (seen.has(item)) {
+    const id = LEGACY_FEATURE_ID_ALIASES.get(item) ?? item;
+    if (seen.has(id)) {
       continue;
     }
-    seen.add(item);
-    ids.push(item);
+    seen.add(id);
+    ids.push(id);
   }
   return ids;
 }
 
-function enabledLinuxFeatureIds(options = {}) {
-  const featuresRoot = linuxFeaturesRoot(options);
-  const configPath = linuxFeaturesConfigPath(featuresRoot, options);
-  if (!fs.existsSync(configPath)) {
-    return [];
+function normalizeLinuxFeatureSettings(value, sourcePath) {
+  if (value == null) {
+    return {};
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    console.warn(`WARN: Linux features config ${sourcePath} settings must be an object`);
+    return {};
   }
 
-  const config = readJsonFile(configPath, "Linux features config");
-  if (config == null) {
-    return [];
+  const settings = {};
+  for (const [rawId, rawSettings] of Object.entries(value)) {
+    if (typeof rawId !== "string" || !FEATURE_ID_PATTERN.test(rawId)) {
+      console.warn(`WARN: Invalid Linux feature settings id in ${sourcePath}: ${String(rawId)}`);
+      continue;
+    }
+    const id = LEGACY_FEATURE_ID_ALIASES.get(rawId) ?? rawId;
+    if (rawSettings == null || typeof rawSettings !== "object" || Array.isArray(rawSettings)) {
+      console.warn(`WARN: Linux feature '${rawId}' settings in ${sourcePath} must be an object`);
+      continue;
+    }
+    settings[id] = rawSettings;
   }
-  return normalizeEnabledFeatureIds(config.enabled, configPath);
+  return settings;
+}
+
+function linuxFeaturesConfig(options = {}) {
+  const { config, configPath } = readLinuxFeaturesConfig(options);
+  if (config == null) {
+    return { enabled: [], settings: {}, configPath };
+  }
+  return {
+    enabled: normalizeEnabledFeatureIds(config.enabled, configPath),
+    settings: normalizeLinuxFeatureSettings(config.settings, configPath),
+    configPath,
+  };
+}
+
+function enabledLinuxFeatureIds(options = {}) {
+  return linuxFeaturesConfig(options).enabled;
+}
+
+function enabledLinuxFeaturesConfig(options = {}) {
+  const { enabled, settings } = linuxFeaturesConfig(options);
+  const filteredSettings = {};
+  for (const id of enabled) {
+    if (Object.prototype.hasOwnProperty.call(settings, id)) {
+      filteredSettings[id] = settings[id];
+    }
+  }
+  if (Object.keys(filteredSettings).length === 0) {
+    return { enabled };
+  }
+  return { enabled, settings: filteredSettings };
 }
 
 function isDirectory(filePath) {
@@ -243,14 +308,15 @@ function validateEnabledFeatureDependencies(features) {
 function loadEnabledLinuxFeatures(options = {}) {
   const featuresRoot = linuxFeaturesRoot(options);
   const available = linuxFeatureManifestMap({ ...options, featuresRoot });
+  const config = linuxFeaturesConfig({ ...options, featuresRoot });
   const features = [];
   const missing = [];
-  for (const id of enabledLinuxFeatureIds({ ...options, featuresRoot })) {
+  for (const id of config.enabled) {
     const feature = available.get(id);
     if (feature == null) {
       missing.push(id);
     } else {
-      features.push(feature);
+      features.push({ ...feature, settings: config.settings[id] ?? {} });
     }
   }
   if (missing.length > 0) {
@@ -394,8 +460,6 @@ function wrapFeaturePatchDescriptor(feature, descriptor, sourcePath, index, feat
 
 function featurePatchDescriptorListFromExports(feature, moduleExports, sourcePath, featureIndex) {
   const exported = moduleExports?.descriptors ??
-    moduleExports?.patches ??
-    moduleExports?.default ??
     moduleExports;
   if (exported == null) {
     console.warn(`WARN: Linux feature '${feature.id}' patchDescriptors entrypoint must export descriptors`);
@@ -413,28 +477,8 @@ function featurePatchDescriptorListFromExports(feature, moduleExports, sourcePat
 function loadLinuxFeaturePatchDescriptors(options = {}) {
   const descriptors = [];
   for (const [featureIndex, feature] of loadEnabledLinuxFeatures(options).entries()) {
-    const loaded = loadFeatureEntrypointModule(feature, "patchDescriptors") ??
-      loadFeatureEntrypointModule(feature, "patches");
+    const loaded = loadFeatureEntrypointModule(feature, "patchDescriptors");
     if (loaded == null) {
-      const legacyLoaded = loadFeatureEntrypointModule(feature, "mainBundlePatch");
-      if (legacyLoaded == null) {
-        continue;
-      }
-
-      const moduleExports = legacyLoaded.moduleExports;
-      const apply = moduleExports.applyMainBundlePatch ?? moduleExports.apply ?? moduleExports;
-      if (typeof apply !== "function") {
-        console.warn(`WARN: Linux feature '${feature.id}' mainBundlePatch must export a function`);
-        continue;
-      }
-
-      descriptors.push({
-        id: `feature:${feature.id}`,
-        name: `feature:${feature.id}`,
-        phase: "main-bundle",
-        ciPolicy: "optional",
-        apply: (source, context) => apply(source, featureContext(context, feature)),
-      });
       continue;
     }
     descriptors.push(
@@ -449,17 +493,23 @@ function loadLinuxFeaturePatchDescriptors(options = {}) {
   return descriptors;
 }
 
-function loadLinuxFeatureMainBundlePatches(options = {}) {
-  return loadLinuxFeaturePatchDescriptors(options)
-    .filter((patch) => (patch.phase ?? "main-bundle") === "main-bundle")
-    .map(({ apply, ciPolicy, id, name }) => ({ apply, ciPolicy, id, name }));
-}
-
 function enabledLinuxFeatureStageHooks(options = {}) {
   return loadEnabledLinuxFeatures(options)
     .map((feature) => ({
       id: feature.id,
       path: resolveFeatureEntrypoint(feature, "stageHook"),
+    }))
+    .filter((hook) => hook.path != null);
+}
+
+function disabledLinuxFeatureCleanupHooks(options = {}) {
+  const featuresRoot = linuxFeaturesRoot(options);
+  const enabled = new Set(enabledLinuxFeatureIds({ ...options, featuresRoot }));
+  return discoverLinuxFeatureManifests({ ...options, featuresRoot })
+    .filter((feature) => !enabled.has(feature.id))
+    .map((feature) => ({
+      id: feature.id,
+      path: resolveFeatureEntrypoint(feature, "cleanupHook"),
     }))
     .filter((hook) => hook.path != null);
 }
@@ -744,6 +794,12 @@ function main() {
     }
     return;
   }
+  if (command === "--cleanup-hooks") {
+    for (const hook of disabledLinuxFeatureCleanupHooks()) {
+      process.stdout.write(`${hook.id}\t${hook.path}\n`);
+    }
+    return;
+  }
   if (command === "--package-hooks") {
     const packageFormat = process.argv[3] ?? "";
     for (const hook of enabledLinuxFeaturePackageHooks({ packageFormat })) {
@@ -783,7 +839,7 @@ function main() {
     process.stdout.write(`${linuxFeaturesRoot()}\n`);
     return;
   }
-  console.error("Usage: linux-features.js --enabled | --features-json | --features-root | --stage-install <install-dir> | --staged-files-json <install-dir> | --stage-hooks | --package-hooks <format>");
+  console.error("Usage: linux-features.js --enabled | --features-json | --features-root | --stage-install <install-dir> | --staged-files-json <install-dir> | --stage-hooks | --cleanup-hooks | --package-hooks <format>");
   process.exit(1);
 }
 
@@ -797,7 +853,9 @@ if (require.main === module) {
 }
 
 module.exports = {
+  disabledLinuxFeatureCleanupHooks,
   discoverLinuxFeatureManifests,
+  enabledLinuxFeaturesConfig,
   enabledLinuxFeatureIds,
   enabledLinuxFeatureInstallPlan,
   enabledLinuxFeaturePackageHooks,
@@ -805,7 +863,6 @@ module.exports = {
   featuresJsonSummary,
   loadEnabledLinuxFeatures,
   loadLinuxFeaturePatchDescriptors,
-  loadLinuxFeatureMainBundlePatches,
   linuxFeatureManifestMap,
   linuxFeaturesConfigPath,
   linuxFeaturesRoot,

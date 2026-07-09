@@ -23,7 +23,7 @@ launcher, or a warm-start handoff to an already-running instance may not have
 your Nix profile on `PATH`, in which case Codex Desktop fails with
 `Unable to locate the Codex CLI binary. Set CODEX_CLI_PATH ...`. Pinning the CLI
 explicitly avoids this. The Home Manager and NixOS modules can do this for you
-via [`programs.codexDesktopLinux.cliPackage`](#home-manager--nixos-module),
+via [`programs.codexDesktopLinux.cliPackage`](#home-manager-nixos-module),
 which wraps the launcher so `CODEX_CLI_PATH` is always set.
 
 One direct upstream install path is the npm package:

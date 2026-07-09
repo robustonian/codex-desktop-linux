@@ -36,10 +36,15 @@ pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
     hydrate_session_bus_env();
 
     let extension_dir = extension_dir();
+    let extension_was_enabled = gnome_extension_enabled();
     let mut wrote_files = false;
+    let mut changed_files = false;
     let mut write_error = None;
     match write_extension_files(&extension_dir) {
-        Ok(()) => wrote_files = true,
+        Ok(report) => {
+            wrote_files = report.wrote_files;
+            changed_files = report.changed_files;
+        }
         Err(error) => write_error = Some(error),
     }
 
@@ -61,11 +66,15 @@ pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
         }
     };
 
-    let requires_shell_reload = windows_error.is_some();
+    let requires_shell_reload =
+        setup_requires_shell_reload(windows_error.as_ref(), extension_was_enabled, changed_files);
     let message = if !wrote_files {
         "Could not install the Codex GNOME Shell extension files.".to_string()
     } else if !enable_command.ok {
         "Codex GNOME Shell extension files were installed, but enabling the extension failed. Enable it with gnome-extensions after GNOME Shell sees the new extension."
+            .to_string()
+    } else if windows_error.is_none() && requires_shell_reload {
+        "Codex GNOME Shell extension files changed while the extension was already active. Window targeting is available, but GNOME Shell must reload before newly installed DBus methods are served."
             .to_string()
     } else if windows_error.is_none() {
         "Codex GNOME Shell extension is active and window targeting is available.".to_string()
@@ -86,11 +95,18 @@ pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
     }
 }
 
-fn write_extension_files(extension_dir: &Path) -> Result<(), String> {
+struct ExtensionWriteReport {
+    wrote_files: bool,
+    changed_files: bool,
+}
+
+fn write_extension_files(extension_dir: &Path) -> Result<ExtensionWriteReport, String> {
     fs::create_dir_all(extension_dir)
         .map_err(|error| format!("failed to create {}: {error}", extension_dir.display()))?;
     let metadata_json = render_extension_asset(METADATA_JSON);
     let extension_js = render_extension_asset(EXTENSION_JS);
+    let changed_files = file_content_changed(&extension_dir.join("metadata.json"), &metadata_json)
+        || file_content_changed(&extension_dir.join("extension.js"), &extension_js);
 
     fs::write(extension_dir.join("metadata.json"), metadata_json).map_err(|error| {
         format!(
@@ -104,7 +120,25 @@ fn write_extension_files(extension_dir: &Path) -> Result<(), String> {
             extension_dir.join("extension.js").display()
         )
     })?;
-    Ok(())
+    Ok(ExtensionWriteReport {
+        wrote_files: true,
+        changed_files,
+    })
+}
+
+fn file_content_changed(path: &Path, expected: &str) -> bool {
+    match fs::read_to_string(path) {
+        Ok(current) => current != expected,
+        Err(_) => true,
+    }
+}
+
+fn setup_requires_shell_reload(
+    windows_error: Option<&String>,
+    extension_was_enabled: bool,
+    changed_files: bool,
+) -> bool {
+    windows_error.is_some() || extension_was_enabled && changed_files
 }
 
 fn render_extension_asset(asset: &str) -> String {
@@ -224,12 +258,31 @@ fn run_gsettings_enable_fallback() -> SetupCommandReport {
     }
 }
 
+fn gnome_extension_enabled() -> bool {
+    let mut command = Command::new("gsettings");
+    command.args(["get", "org.gnome.shell", "enabled-extensions"]);
+    add_session_env(&mut command);
+    let Ok(output) = command.output() else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let current = String::from_utf8_lossy(&output.stdout);
+    enabled_extensions_contains_uuid(&current)
+}
+
+fn enabled_extensions_contains_uuid(current: &str) -> bool {
+    let quoted = format!("'{UUID}'");
+    current.trim().contains(&quoted)
+}
+
 fn enabled_extensions_literal(current: &str) -> Option<String> {
     let trimmed = current.trim();
-    let quoted = format!("'{UUID}'");
-    if trimmed.contains(&quoted) {
+    if enabled_extensions_contains_uuid(trimmed) {
         return Some(trimmed.to_string());
     }
+    let quoted = format!("'{UUID}'");
 
     let list = if trimmed == "@as []" { "[]" } else { trimmed };
     if list == "[]" {
@@ -302,6 +355,50 @@ mod tests {
     }
 
     #[test]
+    fn enabled_extensions_contains_uuid_matches_quoted_entry() {
+        assert!(enabled_extensions_contains_uuid(&format!(
+            "['other@example.com', '{UUID}']"
+        )));
+        assert!(!enabled_extensions_contains_uuid(&format!(
+            "['{UUID}.suffix']"
+        )));
+    }
+
+    #[test]
+    fn write_extension_files_reports_changed_assets() {
+        let extension_dir =
+            env::temp_dir().join(format!("codex-gnome-extension-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&extension_dir);
+
+        let first = write_extension_files(&extension_dir).unwrap();
+        assert!(first.wrote_files);
+        assert!(first.changed_files);
+
+        let second = write_extension_files(&extension_dir).unwrap();
+        assert!(second.wrote_files);
+        assert!(!second.changed_files);
+
+        fs::write(extension_dir.join("extension.js"), "// stale extension").unwrap();
+        let third = write_extension_files(&extension_dir).unwrap();
+        assert!(third.wrote_files);
+        assert!(third.changed_files);
+
+        let _ = fs::remove_dir_all(&extension_dir);
+    }
+
+    #[test]
+    fn setup_requires_shell_reload_when_enabled_extension_files_change() {
+        assert!(setup_requires_shell_reload(None, true, true));
+        assert!(setup_requires_shell_reload(
+            Some(&"window API unavailable".to_string()),
+            false,
+            false
+        ));
+        assert!(!setup_requires_shell_reload(None, true, false));
+        assert!(!setup_requires_shell_reload(None, false, true));
+    }
+
+    #[test]
     fn rendered_metadata_uses_build_identity() {
         let rendered = render_extension_asset(METADATA_JSON);
 
@@ -320,5 +417,22 @@ mod tests {
             "const OBJECT_PATH = '{path}'",
             path = identity::DBUS_OBJECT_PATH
         )));
+    }
+
+    #[test]
+    fn rendered_extension_exposes_screenshot_capture() {
+        let rendered = render_extension_asset(EXTENSION_JS);
+
+        assert!(rendered.contains("<method name=\"CaptureScreenshot\">"));
+        assert!(rendered.contains("CaptureScreenshotAsync"));
+    }
+
+    #[test]
+    fn rendered_extension_canonicalizes_screenshot_paths() {
+        let rendered = render_extension_asset(EXTENSION_JS);
+
+        assert!(rendered.contains("GLib.canonicalize_filename(path, null)"));
+        assert!(rendered.contains("GLib.path_get_dirname(canonicalPath) !== tmpDir"));
+        assert!(rendered.contains("basename.startsWith('computer-use-linux-gnome-extension-')"));
     }
 }

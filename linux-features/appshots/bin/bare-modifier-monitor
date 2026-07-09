@@ -156,8 +156,8 @@ if [ -z "$keyboard_ids" ]; then
     exit 1
 fi
 
-event_fifo="$(mktemp -u "${TMPDIR:-/tmp}/codex-bare-modifier.XXXXXX")"
-mkfifo "$event_fifo"
+event_dir="$(mktemp -d "${TMPDIR:-/tmp}/codex-bare-modifier.XXXXXX")"
+event_fifo="$event_dir/events"
 monitor_pids=()
 
 cleanup() {
@@ -176,10 +176,12 @@ cleanup() {
     done
     wait "${monitor_pids[@]:-}" >/dev/null 2>&1 || true
     rm -f "$event_fifo"
+    rmdir "$event_dir" 2>/dev/null || true
 }
 trap cleanup EXIT
 trap 'cleanup; exit 143' INT TERM
 
+mkfifo "$event_fifo"
 exec 4<>"$event_fifo"
 
 for device_id in $keyboard_ids; do

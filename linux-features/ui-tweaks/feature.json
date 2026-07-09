@@ -1,0 +1,17 @@
+{
+  "id": "ui-tweaks",
+  "title": "UI Tweaks",
+  "description": "Optional UI customization patches for Codex Desktop Linux.",
+  "defaultEnabled": false,
+  "entrypoints": {
+    "patchDescriptors": "./patch.js"
+  },
+  "tweaks": {
+    "sidebar": {
+      "projectName": {
+        "enabled": true,
+        "style": "font-weight: 700 !important; padding-top: 0.25rem;"
+      }
+    }
+  }
+}

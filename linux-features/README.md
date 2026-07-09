@@ -2,7 +2,7 @@
 
 `linux-features/` contains opt-in Linux integration modules for this wrapper.
 These are not upstream Codex plugins; they are Linux-side extensions that can
-add ASAR patches, staged resources, runtime hooks, package hooks, or legacy
+add ASAR patches, staged resources, runtime hooks, package hooks, or custom
 build/install hooks. The full architecture contract is documented in
 [`docs/linux-features-architecture.md`](../docs/linux-features-architecture.md).
 
@@ -21,9 +21,33 @@ building packages, then list the feature ids you want:
 `features.json` is ignored by git so local choices do not leak into commits.
 Feature choices are read during the install/build pipeline; if you change this
 file after an app has already been generated, rerun the install/build step.
-Native packages preserve the enabled feature id list in the packaged
-update-builder bundle, so `codex-update-manager` rebuilds keep the same opt-in
-features across auto-updates.
+Native packages preserve the enabled feature id list and settings in the
+packaged update-builder bundle, so `codex-update-manager` rebuilds keep the
+same opt-in features across auto-updates.
+
+Feature-specific local settings can live in the same gitignored file under
+`settings.<feature-id>`. Keep tracked `feature.json` files as shipped defaults;
+do not edit them for personal preferences. Feature patch descriptors receive
+this object as `context.feature.settings`:
+
+```json
+{
+  "enabled": [
+    "ui-tweaks"
+  ],
+  "settings": {
+    "ui-tweaks": {
+      "tweaks": {
+        "sidebar": {
+          "projectName": {
+            "style": "font-weight: 700 !important; padding-top: 0.25rem;"
+          }
+        }
+      }
+    }
+  }
+}
+```
 
 Feature directories can be tracked repository features at `linux-features/<id>/`
 or private user-local features at `linux-features/local/<id>/`. The
@@ -62,8 +86,8 @@ Each feature directory must include:
 
 - `feature.json` — metadata and entrypoints
 - `README.md` — what it does, how to test it, and known risks
-- optional `patch.js` — exports `applyMainBundlePatch(source, context)`, or
-  descriptor patches when `feature.json` uses `entrypoints.patchDescriptors`
+- optional `patch.js` — descriptor patches when `feature.json` uses
+  `entrypoints.patchDescriptors`
 - optional declarative `resources`, `runtimeHooks`, and `packageHooks`
 - optional `stage.sh` — legacy install/build staging hook
 - optional `test.js` — self-contained tests for the feature
@@ -76,6 +100,9 @@ Declarative runtime hooks are staged under `codex-app/.codex-linux/`:
 - `runtimeHooks.env` writes literal `KEY=VALUE` files consumed by the launcher
 - `runtimeHooks.prelaunch` runs synchronously before webview setup
 - `runtimeHooks.electronArgs` appends one Electron argument per line
+- `runtimeHooks.launcher` runs before final Electron args are built; executable
+  hooks receive current Electron args as argv and can print `env KEY=VALUE` or
+  `electron-arg VALUE` lines
 - `runtimeHooks.coldStart` runs background hooks after bundled plugin cache sync
 - `runtimeHooks.afterExit` runs after Electron exits while preserving the
   original Electron exit status
@@ -102,10 +129,16 @@ rebuilds may run outside the real user's session.
 `packageHooks` run during native package staging and receive `PACKAGE_FORMAT`,
 `PACKAGE_ROOT`, `PACKAGE_NAME`, `PACKAGE_VERSION`, and `APP_DIR`.
 
+Feature patching uses only `entrypoints.patchDescriptors`. Descriptor modules
+may export an array directly or `{ descriptors: [...] }`; `.patches`,
+`.default`, and `mainBundlePatch` feature entrypoint aliases are intentionally
+not supported.
+
 Descriptor patches use the same shape as `scripts/patches/core/**/patch.js`.
-They can target `main-bundle`, `webview-asset`, or `extracted-app` phases.
-Feature descriptor ids are namespaced as `feature:<feature-id>:<descriptor-id>`
-in patch reports and are optional by default.
+They can target `main-bundle`, `extracted-app:pre-webview`, `webview-asset`, or
+`extracted-app:post-webview`. Feature descriptor ids are namespaced as
+`feature:<feature-id>:<descriptor-id>` in patch reports and are optional by
+default.
 
 Feature self-tests live inside each feature directory. Run them with:
 

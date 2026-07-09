@@ -12,6 +12,7 @@ depends=(
     'polkit'
     'curl'
     'unzip'
+    'xdg-utils'
     'gcc'
     'make'
     # Electron runtime libraries

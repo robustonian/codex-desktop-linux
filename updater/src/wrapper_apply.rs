@@ -577,6 +577,7 @@ mod tests {
             enable_wrapper_updates: true,
             wrapper_remote: String::new(),
             wrapper_branch: "main".to_string(),
+            generated_artifact_cleanup: Default::default(),
         }
     }
 

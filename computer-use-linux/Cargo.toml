@@ -1,6 +1,6 @@
 [package]
 name = "codex-computer-use-linux"
-version = "0.2.9-linux-alpha1"
+version = "0.3.1-linux-alpha1"
 edition = "2021"
 
 [[bin]]
@@ -18,7 +18,15 @@ path = "src/bin/codex-computer-use-cosmic.rs"
 [dependencies]
 mimalloc = { version = "0.1", default-features = false }
 anyhow = "1.0.102"
-atspi = { version = "0.29.0", features = ["tokio"] }
+# atspi without its "connection" feature: that feature pulls atspi-connection
+# with default features, which include "p2p" — and p2p peer enumeration during
+# connect() calls GetInterfaces on every a11y-bus peer, so a single
+# AppArmor-confined peer (e.g. snap-packaged Slack) aborts the whole
+# AccessibilityConnection. We deliberately never use P2P routing (upstream
+# computer-use-linux issue #31), so depend on atspi-connection directly with
+# p2p off.
+atspi = { version = "0.29.0", default-features = false, features = ["proxies", "wrappers", "tokio"] }
+atspi-connection = { version = "0.13.0", default-features = false, features = ["wrappers"] }
 base64 = "0.22.1"
 evdev = "0.13.2"
 cosmic-protocols = { version = "0.2.0", default-features = false, features = ["client"] }

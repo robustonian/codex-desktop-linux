@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Record and Replay">
+  <defs>
+    <linearGradient id="tile" x1="12" y1="5" x2="52" y2="60" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#111827"/>
+      <stop offset=".48" stop-color="#05070c"/>
+      <stop offset="1" stop-color="#0b111c"/>
+    </linearGradient>
+    <radialGradient id="lens" cx="25" cy="20" r="23" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f4f7fb"/>
+      <stop offset=".22" stop-color="#aeb6c4"/>
+      <stop offset=".54" stop-color="#3b4353"/>
+      <stop offset="1" stop-color="#101521"/>
+    </radialGradient>
+    <linearGradient id="cursor" x1="22" y1="18" x2="45" y2="38" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff6b45"/>
+      <stop offset=".4" stop-color="#f02d22"/>
+      <stop offset="1" stop-color="#9f1117"/>
+    </linearGradient>
+    <linearGradient id="cursorShade" x1="26" y1="20" x2="36" y2="35" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffb15d" stop-opacity=".9"/>
+      <stop offset="1" stop-color="#d71920" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#000" flood-opacity=".45"/>
+    </filter>
+  </defs>
+  <rect x="2.5" y="2.5" width="59" height="59" rx="14" fill="url(#tile)"/>
+  <rect x="3.25" y="3.25" width="57.5" height="57.5" rx="13.25" fill="none" stroke="#263044" stroke-opacity=".75" stroke-width="1.5"/>
+  <g filter="url(#softShadow)">
+    <circle cx="29" cy="30" r="19" fill="url(#lens)"/>
+    <circle cx="24" cy="23" r="8.5" fill="#ffffff" opacity=".28"/>
+    <path d="M13.5 26.5c6.5-8.5 19.2-11.4 30.2-4.1" fill="none" stroke="#ffffff" stroke-linecap="round" stroke-width="2.3" opacity=".2"/>
+    <path d="M21.9 17.7c-1.9-.9-3.9 1-3.1 2.9l7.2 19.2c.8 2.2 3.7 2.7 5.2.9l4.3-5.2 6.2-1.2c2.3-.4 3.1-3.4 1.3-4.8L21.9 17.7Z" fill="#080b12" opacity=".55"/>
+    <path d="M22 16.1c-2.1-.9-4.1 1.2-3.2 3.2l8.5 19.4c.9 2.1 3.8 2.4 5.1.5l3.8-5.4 6.3-1.5c2.2-.5 2.8-3.4.9-4.7L22 16.1Z" fill="url(#cursor)"/>
+    <path d="M22.8 19.6 31 37.7l3.4-6 6.6-1.2L22.8 19.6Z" fill="url(#cursorShade)"/>
+    <path d="M22.8 19.6 31 37.7l3.4-6 6.6-1.2L22.8 19.6Z" fill="none" stroke="#ff9b68" stroke-opacity=".55" stroke-width="1.2" stroke-linejoin="round"/>
+  </g>
+</svg>

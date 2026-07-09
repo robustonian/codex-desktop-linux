@@ -8,6 +8,43 @@ use std::{fs, path::PathBuf};
 const SERVICE_NAME: &str = "codex-update-manager";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Optional cleanup for generated wrapper checkout artifacts such as `dist/`
+/// and `target/`. Disabled by default; when enabled, cleanup only runs if the
+/// filesystem containing a configured root is below `min_free_bytes`.
+pub struct GeneratedArtifactCleanupConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_generated_artifact_cleanup_min_free_bytes")]
+    pub min_free_bytes: u64,
+    #[serde(default)]
+    pub roots: Vec<PathBuf>,
+    #[serde(default = "default_generated_artifact_cleanup_entries")]
+    pub entries: Vec<PathBuf>,
+}
+
+impl Default for GeneratedArtifactCleanupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_free_bytes: default_generated_artifact_cleanup_min_free_bytes(),
+            roots: Vec::new(),
+            entries: default_generated_artifact_cleanup_entries(),
+        }
+    }
+}
+
+fn default_generated_artifact_cleanup_min_free_bytes() -> u64 {
+    10 * 1024 * 1024 * 1024
+}
+
+fn default_generated_artifact_cleanup_entries() -> Vec<PathBuf> {
+    ["codex-app", "codex-app-next", "dist", "dist-next", "target"]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Runtime configuration values that control how the updater behaves on Linux.
 pub struct RuntimeConfig {
     pub dmg_url: String,
@@ -30,6 +67,11 @@ pub struct RuntimeConfig {
     /// Branch to track for wrapper updates.
     #[serde(default = "default_wrapper_branch")]
     pub wrapper_branch: String,
+    /// Optional cleanup for generated wrapper checkout artifacts. This is
+    /// intentionally opt-in so users keep manual build output unless they
+    /// configure cleanup.
+    #[serde(default)]
+    pub generated_artifact_cleanup: GeneratedArtifactCleanupConfig,
 }
 
 fn default_wrapper_branch() -> String {
@@ -110,6 +152,7 @@ impl RuntimeConfig {
             enable_wrapper_updates: false,
             wrapper_remote: String::new(),
             wrapper_branch: default_wrapper_branch(),
+            generated_artifact_cleanup: GeneratedArtifactCleanupConfig::default(),
         }
     }
 
@@ -128,7 +171,7 @@ impl RuntimeConfig {
 }
 
 const APP_SETTINGS_FILE: &str = "settings.json";
-const DEFAULT_APP_ID: &str = "codex-desktop";
+pub(crate) const DEFAULT_APP_ID: &str = "codex-desktop";
 const AUTO_INSTALL_SETTING_KEY: &str = "codex-linux-auto-update-on-exit";
 const WRAPPER_UPDATES_SETTING_KEY: &str = "codex-linux-wrapper-updates-enabled";
 
@@ -136,22 +179,40 @@ const WRAPPER_UPDATES_SETTING_KEY: &str = "codex-linux-wrapper-updates-enabled";
 /// bundle do: `CODEX_LINUX_APP_ID`, then `CODEX_APP_ID`, then `codex-desktop`.
 /// Invalid ids fall back to the default so a malformed env value can never point
 /// the lookup at an attacker-controlled path.
-fn resolve_app_id() -> String {
-    fn valid(id: &str) -> bool {
-        !id.is_empty()
-            && id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-    }
-
+pub(crate) fn resolve_app_id() -> String {
     for var in ["CODEX_LINUX_APP_ID", "CODEX_APP_ID"] {
         if let Ok(value) = std::env::var(var) {
-            if valid(&value) {
+            if valid_app_id(&value) {
                 return value;
             }
         }
     }
     DEFAULT_APP_ID.to_string()
+}
+
+pub(crate) fn valid_app_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+pub(crate) fn resolve_launch_instance_id() -> Option<String> {
+    std::env::var("CODEX_LINUX_INSTANCE_ID")
+        .ok()
+        .filter(|value| valid_app_id(value))
+}
+
+pub(crate) fn resolve_app_state_dir() -> Result<PathBuf> {
+    let base_dirs = BaseDirs::new().context("Could not resolve XDG base directories")?;
+    let state_root = base_dirs
+        .state_dir()
+        .unwrap_or_else(|| base_dirs.data_local_dir());
+    let app_state_dir = state_root.join(resolve_app_id());
+    Ok(match resolve_launch_instance_id() {
+        Some(instance) => app_state_dir.join("instances").join(instance),
+        None => app_state_dir,
+    })
 }
 
 /// Resolves the app `settings.json` path mirroring the launcher
@@ -443,6 +504,21 @@ mod tests {
         assert!(config.auto_install_on_app_exit);
         assert_eq!(config.workspace_root, paths.cache_dir);
         assert!(config.builder_bundle_root.is_absolute());
+        assert!(!config.generated_artifact_cleanup.enabled);
+        assert_eq!(
+            config.generated_artifact_cleanup.min_free_bytes,
+            10 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            config.generated_artifact_cleanup.entries,
+            vec![
+                PathBuf::from("codex-app"),
+                PathBuf::from("codex-app-next"),
+                PathBuf::from("dist"),
+                PathBuf::from("dist-next"),
+                PathBuf::from("target"),
+            ]
+        );
         Ok(())
     }
 
@@ -469,6 +545,12 @@ notifications = false
 workspace_root = "/tmp/codex-workspaces"
 builder_bundle_root = "/tmp/codex-builder"
 app_executable_path = "/opt/codex-desktop/electron"
+
+[generated_artifact_cleanup]
+enabled = true
+min_free_bytes = 2147483648
+roots = ["/home/mohit/Github/codex-desktop-linux"]
+entries = ["dist", "target", "Codex.dmg"]
 "#,
         )?;
 
@@ -489,6 +571,20 @@ app_executable_path = "/opt/codex-desktop/electron"
         assert_eq!(
             config.app_executable_path,
             PathBuf::from("/opt/codex-desktop/electron")
+        );
+        assert!(config.generated_artifact_cleanup.enabled);
+        assert_eq!(config.generated_artifact_cleanup.min_free_bytes, 2147483648);
+        assert_eq!(
+            config.generated_artifact_cleanup.roots,
+            vec![PathBuf::from("/home/mohit/Github/codex-desktop-linux")]
+        );
+        assert_eq!(
+            config.generated_artifact_cleanup.entries,
+            vec![
+                PathBuf::from("dist"),
+                PathBuf::from("target"),
+                PathBuf::from("Codex.dmg"),
+            ]
         );
         Ok(())
     }

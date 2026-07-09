@@ -236,7 +236,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c77886257be21c9cd89a4ae7e64860c6f0eefca799bb79127913052bd0eefb3d"
 dependencies = [
  "atspi-common",
- "atspi-connection",
  "atspi-proxies",
  "zbus",
 ]
@@ -482,10 +481,11 @@ dependencies = [
 
 [[package]]
 name = "codex-computer-use-linux"
-version = "0.2.9-linux-alpha1"
+version = "0.3.1-linux-alpha1"
 dependencies = [
  "anyhow",
  "atspi",
+ "atspi-connection",
  "base64",
  "cosmic-protocols",
  "evdev",
@@ -518,14 +518,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-record-replay-linux"
+version = "0.1.0-linux-alpha1"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "clap",
+ "codex-computer-use-linux",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "codex-update-manager"
-version = "0.8.4"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "chrono",
  "clap",
  "directories",
  "futures-util",
+ "libc",
  "notify-rust",
  "reqwest",
  "semver",

@@ -1,4 +1,4 @@
-use crate::diagnostics::hydrate_session_bus_env;
+use crate::{diagnostics::hydrate_session_bus_env, identity};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::StreamExt;
@@ -144,12 +144,14 @@ impl ScreenshotPayloadOptions {
 }
 
 /// Environment variable forcing a single capture backend, skipping the
-/// fallback chain. Accepts `gnome-shell`, `portal`, or `gnome-screenshot`.
+/// fallback chain. Accepts `gnome-shell`, `gnome-extension`, `portal`, or
+/// `gnome-screenshot`.
 const SCREENSHOT_BACKEND_ENV: &str = "CODEX_COMPUTER_USE_SCREENSHOT_BACKEND";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScreenshotBackend {
     GnomeShell,
+    GnomeExtension,
     Portal,
     GnomeScreenshot,
 }
@@ -158,6 +160,7 @@ impl ScreenshotBackend {
     fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "gnome-shell" | "gnome_shell" | "shell" => Some(Self::GnomeShell),
+            "gnome-extension" | "gnome_extension" | "extension" => Some(Self::GnomeExtension),
             "portal" | "xdg-portal" | "xdg_portal" => Some(Self::Portal),
             "gnome-screenshot" | "gnome_screenshot" => Some(Self::GnomeScreenshot),
             _ => None,
@@ -167,6 +170,7 @@ impl ScreenshotBackend {
     async fn capture(self) -> Result<RawScreenshotCapture> {
         match self {
             Self::GnomeShell => capture_with_gnome_shell().await,
+            Self::GnomeExtension => capture_with_gnome_extension().await,
             Self::Portal => capture_with_portal().await,
             Self::GnomeScreenshot => capture_with_gnome_screenshot().await,
         }
@@ -193,6 +197,10 @@ pub async fn capture_screenshot_raw() -> Result<RawScreenshotCapture> {
         Ok(capture) => return Ok(capture),
         Err(error) => error,
     };
+    let extension_error = match capture_with_gnome_extension().await {
+        Ok(capture) => return Ok(capture),
+        Err(error) => error,
+    };
     let portal_error = match capture_with_portal().await {
         Ok(capture) => return Ok(capture),
         Err(error) => error,
@@ -204,6 +212,7 @@ pub async fn capture_screenshot_raw() -> Result<RawScreenshotCapture> {
 
     Err(anyhow!(
         "GNOME Shell screenshot failed: {gnome_error}; \
+         GNOME Shell extension screenshot failed: {extension_error}; \
          XDG portal screenshot failed: {portal_error}; \
          gnome-screenshot fallback failed: {cli_error}"
     ))
@@ -215,7 +224,7 @@ fn forced_backend() -> Result<Option<ScreenshotBackend>> {
             ScreenshotBackend::parse(&value).map(Some).ok_or_else(|| {
                 anyhow!(
                     "{SCREENSHOT_BACKEND_ENV}={value:?} is not a recognized backend \
-                     (expected gnome-shell, portal, or gnome-screenshot)"
+                     (expected gnome-shell, gnome-extension, portal, or gnome-screenshot)"
                 )
             })
         }
@@ -316,6 +325,42 @@ async fn capture_with_gnome_shell() -> Result<RawScreenshotCapture> {
     read_png_as_capture(
         PathBuf::from(filename_used),
         "gnome-shell",
+        ScreenshotCleanup::DeletePath(path),
+    )
+    .await
+}
+
+async fn capture_with_gnome_extension() -> Result<RawScreenshotCapture> {
+    let path = temp_png_path("gnome-extension");
+    let filename = path
+        .to_str()
+        .context("temporary screenshot path is not valid UTF-8")?;
+    let connection = zbus::Connection::session()
+        .await
+        .context("failed to connect to session bus")?;
+    let proxy = Proxy::new(
+        &connection,
+        identity::DBUS_SERVICE,
+        identity::DBUS_OBJECT_PATH,
+        identity::DBUS_SERVICE,
+    )
+    .await
+    .context("failed to create Codex GNOME Shell extension proxy")?;
+    let (ok, message): (bool, String) = match proxy.call("CaptureScreenshot", &(filename)).await {
+        Ok(result) => result,
+        Err(error) => {
+            cleanup_gnome_requested_path(&path);
+            return Err(error).context("Codex GNOME Shell extension CaptureScreenshot call failed");
+        }
+    };
+    if !ok {
+        cleanup_gnome_requested_path(&path);
+        bail!("Codex GNOME Shell extension refused screenshot: {message}");
+    }
+
+    read_png_as_capture(
+        path.clone(),
+        "gnome-shell-extension",
         ScreenshotCleanup::DeletePath(path),
     )
     .await
@@ -735,6 +780,10 @@ mod tests {
         assert_eq!(
             ScreenshotBackend::parse("gnome-shell"),
             Some(ScreenshotBackend::GnomeShell)
+        );
+        assert_eq!(
+            ScreenshotBackend::parse("gnome-extension"),
+            Some(ScreenshotBackend::GnomeExtension)
         );
         assert_eq!(
             ScreenshotBackend::parse("  Portal "),

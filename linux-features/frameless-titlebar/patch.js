@@ -78,35 +78,32 @@ function applyFramelessTitlebarOverlaySyncPatch(currentSource) {
 
 function applyFramelessTitlebarMenuPatch(currentSource) {
   const menuRegex = /process\.platform===`win32`&&([A-Za-z_$][\w$]*)\.removeMenu\(\),/g;
-  let patchedAny = false;
-  const patchedSource = currentSource.replace(menuRegex, (match, windowVar, offset) => {
-    const linuxPatch = `process.platform===\`linux\`&&(${windowVar}.setMenuBarVisibility(!1),${windowVar}.removeMenu?.()),`;
-    const legacyLinuxPatch = `process.platform===\`linux\`&&${windowVar}.setMenuBarVisibility(!1),`;
-    if (currentSource.slice(Math.max(0, offset - linuxPatch.length), offset) === linuxPatch) {
-      return match;
-    }
-    if (currentSource.slice(Math.max(0, offset - legacyLinuxPatch.length), offset) === legacyLinuxPatch) {
-      patchedAny = true;
+  let patchedSource = currentSource
+    .replace(
+      /process\.platform===`linux`&&\(([A-Za-z_$][\w$]*)\.setMenuBarVisibility\(!1\),\1\.removeMenu\?\.\(\)\),process\.platform===`win32`&&\1\.removeMenu\(\),/g,
+      (_match, windowVar) => `process.platform===\`linux\`&&${windowVar}.removeMenu(),process.platform===\`win32\`&&${windowVar}.removeMenu(),`,
+    )
+    .replace(
+      /process\.platform===`linux`&&([A-Za-z_$][\w$]*)\.setMenuBarVisibility\(!1\),process\.platform===`win32`&&\1\.removeMenu\(\),/g,
+      (_match, windowVar) => `process.platform===\`linux\`&&${windowVar}.removeMenu(),process.platform===\`win32\`&&${windowVar}.removeMenu(),`,
+    );
+  let patchedAny = patchedSource !== currentSource;
+  patchedSource = patchedSource.replace(menuRegex, (match, windowVar, offset, source) => {
+    const linuxPatch = `process.platform===\`linux\`&&${windowVar}.removeMenu(),`;
+    if (source.slice(Math.max(0, offset - linuxPatch.length), offset) === linuxPatch) {
       return match;
     }
     patchedAny = true;
     return `${linuxPatch}${match}`;
   });
 
-  const upgradedSource = patchedSource.replace(
-    /process\.platform===`linux`&&([A-Za-z_$][\w$]*)\.setMenuBarVisibility\(!1\),process\.platform===`win32`&&\1\.removeMenu\(\),/g,
-    (_match, windowVar) =>
-      `process.platform===\`linux\`&&(${windowVar}.setMenuBarVisibility(!1),${windowVar}.removeMenu?.()),process.platform===\`win32\`&&${windowVar}.removeMenu(),`,
-  );
-
-  if (!patchedAny && !currentSource.includes("setMenuBarVisibility(!1)")) {
-    const hasWindowsRemoveMenu = /process\.platform===`win32`&&[A-Za-z_$][\w$]*\.removeMenu\(\),/.test(currentSource);
-    if (hasWindowsRemoveMenu) {
-      console.warn("WARN: Could not find window menu visibility snippet - skipping frameless titlebar menu patch");
-    }
+  const hasWindowsRemoveMenu = /process\.platform===`win32`&&[A-Za-z_$][\w$]*\.removeMenu\(\),/.test(patchedSource);
+  const hasLinuxRemoveMenu = /process\.platform===`linux`&&([A-Za-z_$][\w$]*)\.removeMenu\(\),process\.platform===`win32`&&\1\.removeMenu\(\),/.test(patchedSource);
+  if (!patchedAny && hasWindowsRemoveMenu && !hasLinuxRemoveMenu) {
+    console.warn("WARN: Could not find window menu visibility snippet - skipping frameless titlebar menu patch");
   }
 
-  return upgradedSource;
+  return patchedSource;
 }
 
 function applyFramelessTitlebarMainPatch(currentSource) {
@@ -171,7 +168,7 @@ const patches = [
 ];
 
 module.exports = {
-  patches,
+  descriptors: patches,
   applyFramelessTitlebarBranchPatch,
   applyFramelessTitlebarMainPatch,
   applyFramelessTitlebarMenuPatch,

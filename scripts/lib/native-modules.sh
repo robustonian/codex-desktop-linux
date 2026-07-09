@@ -162,7 +162,7 @@ CPP
 
     printf '#include <cstddef>\nusing std::nullptr_t;\n' > "$nullptr_fix"
     {
-        printf '#!/bin/bash\n'
+        printf '#!/usr/bin/env bash\n'
         printf 'exec'
         local arg
         for arg in "${cxx_command[@]}"; do

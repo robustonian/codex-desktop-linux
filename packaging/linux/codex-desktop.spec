@@ -12,9 +12,9 @@ ExclusiveArch:  __ARCH__
 %endif
 
 %if __PACKAGE_WITH_UPDATER__
-Requires:       python3, /usr/bin/7z, polkit, curl, unzip, gcc-c++, make
+Requires:       python3, /usr/bin/7z, polkit, curl, unzip, xdg-utils, gcc-c++, make
 %else
-Requires:       python3, /usr/bin/7z, curl, unzip, gcc-c++, make
+Requires:       python3, /usr/bin/7z, curl, unzip, xdg-utils, gcc-c++, make
 %endif
 Requires:       libasound.so.2%{codex_elf_suffix}, libatk-bridge-2.0.so.0%{codex_elf_suffix}
 Requires:       libatk-1.0.so.0%{codex_elf_suffix}, libglib-2.0.so.0%{codex_elf_suffix}, libgtk-3.so.0%{codex_elf_suffix}
@@ -68,7 +68,11 @@ fi
 SERVICE_HELPER=/opt/__PACKAGE_NAME__/update-builder/packaging/linux/codex-update-manager-user-service.sh
 if [ -f "$SERVICE_HELPER" ]; then
     . "$SERVICE_HELPER"
-    codex_ensure_user_service_running || true
+    if [ "${1:-0}" -eq 1 ]; then
+        codex_ensure_user_service_running || true
+    else
+        codex_start_enabled_user_service || true
+    fi
 fi
 %else
 CLEANUP_HELPER=/opt/__PACKAGE_NAME__/.codex-linux/codex-no-updater-transition-cleanup.sh

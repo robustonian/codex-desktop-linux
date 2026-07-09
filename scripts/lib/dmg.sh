@@ -173,6 +173,16 @@ get_dmg() {
     local download_fingerprint=""
     local tmp_dest="$dmg_dest.part"
 
+    if dmg_refresh_mode_is_pinned; then
+        if [ -s "$dmg_dest" ]; then
+            warn "CODEX_DMG_REFRESH_MODE=pinned; using cached DMG without checking upstream: $dmg_dest"
+            echo "$dmg_dest"
+            return
+        fi
+
+        error "CODEX_DMG_REFRESH_MODE=pinned requires an existing cached DMG at $dmg_dest or an explicit DMG path"
+    fi
+
     validate_dmg_url "$DMG_URL"
 
     # Reuse existing DMG only when it still matches upstream metadata.

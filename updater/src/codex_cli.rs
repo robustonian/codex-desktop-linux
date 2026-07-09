@@ -8,15 +8,17 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{Duration, Utc};
 use semver::Version;
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
+    io::Write,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 use tracing::{info, warn};
 
 const CLI_PACKAGE_NAME: &str = "@openai/codex";
+const STANDALONE_INSTALLER_URL: &str = "https://chatgpt.com/codex/install.sh";
 const CLI_NOT_INSTALLED_MESSAGE: &str =
     "Codex CLI is required but not currently installed. Open the app to retry the automatic install flow, or install it manually with npm.";
 const CLI_VERSION_CHECK_TTL: Duration = Duration::hours(1);
@@ -116,7 +118,7 @@ pub fn preflight(
 
     state.cli_status = CliStatus::Updating;
     persist_state(paths, state)?;
-    install_latest_cli(&latest_version)?;
+    update_existing_cli(&cli_path, &latest_version)?;
 
     let (refreshed_path, refreshed_version) = if let Some(updated_cli) =
         resolve_cli_path_with_version(requested_path, &latest_version)
@@ -498,6 +500,195 @@ fn read_latest_version() -> Result<String> {
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CliInstallKind {
+    Standalone(StandaloneCliInstall),
+    Npm,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StandaloneCliInstall {
+    codex_home: PathBuf,
+    install_dir: Option<PathBuf>,
+}
+
+fn update_existing_cli(cli_path: &Path, latest_version: &str) -> Result<()> {
+    match classify_cli_install(cli_path) {
+        CliInstallKind::Standalone(install) => update_standalone_cli(&install, latest_version),
+        CliInstallKind::Npm => install_latest_cli(latest_version),
+    }
+}
+
+fn classify_cli_install(cli_path: &Path) -> CliInstallKind {
+    standalone_cli_install(cli_path)
+        .map(CliInstallKind::Standalone)
+        .unwrap_or(CliInstallKind::Npm)
+}
+
+fn standalone_cli_install(cli_path: &Path) -> Option<StandaloneCliInstall> {
+    let canonical_path = fs::canonicalize(cli_path).ok();
+    let codex_home = canonical_path
+        .as_deref()
+        .and_then(standalone_home_from_path)
+        .or_else(|| standalone_home_from_path(cli_path))?;
+    let cli_path_is_standalone = standalone_home_from_path(cli_path).is_some();
+    let install_dir = if cli_path_is_standalone {
+        None
+    } else {
+        cli_path.parent().and_then(|parent| {
+            if parent.as_os_str().is_empty() {
+                None
+            } else {
+                Some(parent.to_path_buf())
+            }
+        })
+    };
+
+    Some(StandaloneCliInstall {
+        codex_home,
+        install_dir,
+    })
+}
+
+fn standalone_home_from_path(path: &Path) -> Option<PathBuf> {
+    let components = path.components().collect::<Vec<_>>();
+    for (index, window) in components.windows(3).enumerate() {
+        if window[0].as_os_str() != OsStr::new("packages")
+            || window[1].as_os_str() != OsStr::new("standalone")
+        {
+            continue;
+        }
+        if window[2].as_os_str() != OsStr::new("current")
+            && window[2].as_os_str() != OsStr::new("releases")
+        {
+            continue;
+        }
+
+        let mut codex_home = PathBuf::new();
+        for component in &components[..index] {
+            codex_home.push(component.as_os_str());
+        }
+        if codex_home.as_os_str().is_empty() {
+            return None;
+        }
+        return Some(codex_home);
+    }
+
+    None
+}
+
+fn update_standalone_cli(install: &StandaloneCliInstall, latest_version: &str) -> Result<()> {
+    let downloader = standalone_installer_downloader()?;
+    let installer_script = downloader.download_installer()?;
+    let mut command = Command::new("sh");
+    command
+        .arg("-s")
+        .env("PATH", command_path_env())
+        .env("CODEX_RELEASE", latest_version)
+        .env("CODEX_NON_INTERACTIVE", "1")
+        .env("CODEX_HOME", &install.codex_home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(install_dir) = &install.install_dir {
+        command.env("CODEX_INSTALL_DIR", install_dir);
+    }
+
+    let mut child = command
+        .spawn()
+        .with_context(|| "Failed to spawn standalone Codex CLI installer")?;
+
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .context("Failed to open standalone Codex CLI installer stdin")?;
+        stdin
+            .write_all(&installer_script)
+            .with_context(|| "Failed to write standalone Codex CLI installer script")?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .with_context(|| "Failed to wait for standalone Codex CLI installer")?;
+
+    anyhow::ensure!(
+        output.status.success(),
+        "standalone Codex CLI installer failed with {}{}",
+        output.status,
+        format_command_output(&output)
+    );
+
+    Ok(())
+}
+
+enum StandaloneInstallerDownloader {
+    Curl(PathBuf),
+    Wget(PathBuf),
+}
+
+impl StandaloneInstallerDownloader {
+    fn download_installer(&self) -> Result<Vec<u8>> {
+        let output = match self {
+            Self::Curl(program) => Command::new(program)
+                .env("PATH", command_path_env())
+                .args(["-fsSL", STANDALONE_INSTALLER_URL])
+                .output()
+                .with_context(|| {
+                    format!(
+                        "Failed to spawn standalone Codex CLI installer downloader {}",
+                        program.display()
+                    )
+                })?,
+            Self::Wget(program) => Command::new(program)
+                .env("PATH", command_path_env())
+                .args(["-q", "-O", "-", STANDALONE_INSTALLER_URL])
+                .output()
+                .with_context(|| {
+                    format!(
+                        "Failed to spawn standalone Codex CLI installer downloader {}",
+                        program.display()
+                    )
+                })?,
+        };
+
+        anyhow::ensure!(
+            output.status.success(),
+            "standalone Codex CLI installer download failed with {}{}",
+            output.status,
+            format_command_output(&output)
+        );
+        anyhow::ensure!(
+            !output.stdout.is_empty(),
+            "standalone Codex CLI installer download returned an empty script"
+        );
+
+        Ok(output.stdout)
+    }
+}
+
+fn standalone_installer_downloader() -> Result<StandaloneInstallerDownloader> {
+    let path_env = command_path_env();
+    if let Some(path) = find_in_path("curl", &path_env) {
+        return Ok(StandaloneInstallerDownloader::Curl(resolved_program_path(
+            path,
+        )));
+    }
+    if let Some(path) = find_in_path("wget", &path_env) {
+        return Ok(StandaloneInstallerDownloader::Wget(resolved_program_path(
+            path,
+        )));
+    }
+
+    anyhow::bail!(
+        "curl or wget is required to run the standalone Codex CLI installer from {STANDALONE_INSTALLER_URL}"
+    );
+}
+
+fn resolved_program_path(path: PathBuf) -> PathBuf {
+    fs::canonicalize(&path).unwrap_or(path)
+}
+
 fn install_latest_cli(latest_version: &str) -> Result<()> {
     let npm = npm_program();
     let package_spec = format!("{CLI_PACKAGE_NAME}@{latest_version}");
@@ -790,6 +981,119 @@ mod tests {
             state_dir: root.join("state"),
             config_dir: root.join("config"),
         }
+    }
+
+    fn write_standalone_codex_release(
+        codex_home: &Path,
+        version: &str,
+        target: &str,
+    ) -> Result<PathBuf> {
+        let release_dir = codex_home
+            .join("packages/standalone/releases")
+            .join(format!("{version}-{target}"));
+        let release_bin = release_dir.join("bin");
+        fs::create_dir_all(&release_bin)?;
+        write_executable_script(
+            &release_bin.join("codex"),
+            &format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ] || [ \"$1\" = \"version\" ]; then\n  echo 'codex-cli v{version}'\n  exit 0\nfi\nexit 1\n"
+            ),
+        )?;
+        Ok(release_dir)
+    }
+
+    fn link_standalone_cli(
+        codex_home: &Path,
+        install_dir: &Path,
+        release_dir: &Path,
+    ) -> Result<PathBuf> {
+        let standalone_root = codex_home.join("packages/standalone");
+        fs::create_dir_all(&standalone_root)?;
+        fs::create_dir_all(install_dir)?;
+
+        let current_link = standalone_root.join("current");
+        let _ = fs::remove_file(&current_link);
+        std::os::unix::fs::symlink(release_dir, &current_link)?;
+
+        let visible_codex = install_dir.join("codex");
+        let _ = fs::remove_file(&visible_codex);
+        std::os::unix::fs::symlink(current_link.join("bin/codex"), &visible_codex)?;
+
+        Ok(visible_codex)
+    }
+
+    fn set_test_path_with_tool_bin(tool_bin: &Path) -> Result<()> {
+        let path_entries = [
+            tool_bin.to_path_buf(),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+        ];
+        std::env::set_var("PATH", std::env::join_paths(path_entries)?);
+        Ok(())
+    }
+
+    fn write_fake_latest_npm(
+        tool_bin: &Path,
+        latest_version: &str,
+        install_log: &Path,
+    ) -> Result<()> {
+        let npm_path = tool_bin.join("npm");
+        write_executable_script(
+            &npm_path,
+            &format!(
+                "#!/bin/sh\nif [ \"$1\" = \"view\" ] && [ \"$2\" = \"@openai/codex\" ] && [ \"$3\" = \"version\" ]; then\n  echo '{latest_version}'\n  exit 0\nfi\nif [ \"$1\" = \"install\" ]; then\n  echo npm-install >> \"{}\"\n  exit 42\nfi\nexit 1\n",
+                install_log.display()
+            ),
+        )
+    }
+
+    fn write_fake_standalone_installer_curl(tool_bin: &Path) -> Result<()> {
+        write_executable_script(
+            &tool_bin.join("curl"),
+            r#"#!/bin/sh
+if [ "$1" = "-fsSL" ]; then
+  cat <<'SCRIPT'
+#!/bin/sh
+set -eu
+release_dir="$CODEX_HOME/packages/standalone/releases/$CODEX_RELEASE-test-target"
+mkdir -p "$release_dir/bin" "$CODEX_INSTALL_DIR"
+cat > "$release_dir/bin/codex" <<CODEX_BIN
+#!/bin/sh
+if [ "\$1" = "--version" ] || [ "\$1" = "version" ]; then
+  echo 'codex-cli v$CODEX_RELEASE'
+  exit 0
+fi
+exit 1
+CODEX_BIN
+chmod 0755 "$release_dir/bin/codex"
+ln -sfn "$release_dir" "$CODEX_HOME/packages/standalone/current"
+ln -sfn "$CODEX_HOME/packages/standalone/current/bin/codex" "$CODEX_INSTALL_DIR/codex"
+SCRIPT
+  exit 0
+fi
+exit 1
+"#,
+        )
+    }
+
+    fn write_failing_standalone_installer_curl(tool_bin: &Path, call_log: &Path) -> Result<()> {
+        write_executable_script(
+            &tool_bin.join("curl"),
+            &format!(
+                "#!/bin/sh\nif [ \"$1\" = \"-fsSL\" ]; then\n  echo curl-called >> \"{}\"\n  printf '%s\\n' '#!/bin/sh' 'exit 77'\n  exit 0\nfi\nexit 1\n",
+                call_log.display()
+            ),
+        )
+    }
+
+    fn write_broken_install_dir_curl(install_dir: &Path, call_log: &Path) -> Result<()> {
+        write_executable_script(
+            &install_dir.join("curl"),
+            &format!(
+                "#!/bin/sh\necho install-dir-curl-called >> \"{}\"\nexit 99\n",
+                call_log.display()
+            ),
+        )
     }
 
     #[test]
@@ -1122,6 +1426,160 @@ mod tests {
     }
 
     #[test]
+    fn standalone_cli_symlink_updates_with_standalone_installer() -> Result<()> {
+        let _env_guard = env_lock();
+        let temp = tempdir()?;
+        let paths = test_runtime_paths(temp.path());
+        paths.ensure_dirs()?;
+
+        let home = temp.path().join("home");
+        let tool_bin = temp.path().join("tool-bin");
+        let install_dir = home.join(".local/bin");
+        let codex_home = home.join(".codex");
+        fs::create_dir_all(&tool_bin)?;
+
+        let initial_release =
+            write_standalone_codex_release(&codex_home, "0.42.0", "x86_64-unknown-linux-musl")?;
+        let visible_codex = link_standalone_cli(&codex_home, &install_dir, &initial_release)?;
+        let npm_install_log = temp.path().join("npm-install.log");
+        let install_dir_curl_log = temp.path().join("install-dir-curl.log");
+        write_fake_latest_npm(&tool_bin, "0.42.1", &npm_install_log)?;
+        write_fake_standalone_installer_curl(&tool_bin)?;
+        write_broken_install_dir_curl(&install_dir, &install_dir_curl_log)?;
+
+        let _restore_env = EnvRestoreGuard::capture(&[
+            "HOME",
+            "PATH",
+            "NVM_DIR",
+            "CODEX_CLI_PATH",
+            "CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP",
+        ]);
+        std::env::set_var("HOME", &home);
+        set_test_path_with_tool_bin(&tool_bin)?;
+        std::env::remove_var("NVM_DIR");
+        std::env::remove_var("CODEX_CLI_PATH");
+        std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
+
+        assert_eq!(
+            classify_cli_install(&visible_codex),
+            CliInstallKind::Standalone(StandaloneCliInstall {
+                codex_home: codex_home.clone(),
+                install_dir: Some(install_dir.clone()),
+            })
+        );
+
+        let mut state = PersistedState::new(true);
+        state.cli_path = Some(visible_codex.clone());
+        let outcome = preflight(&mut state, &paths, Some(visible_codex.clone()), false)?;
+
+        assert!(outcome.updated);
+        assert_eq!(outcome.cli_path, visible_codex);
+        assert_eq!(outcome.installed_version, "0.42.1");
+        assert_eq!(state.cli_installed_version.as_deref(), Some("0.42.1"));
+        assert_eq!(state.cli_latest_version.as_deref(), Some("0.42.1"));
+        assert_eq!(state.cli_status, CliStatus::UpToDate);
+        assert_eq!(read_installed_version(&outcome.cli_path)?, "0.42.1");
+        assert!(!npm_install_log.exists());
+        assert!(!install_dir_curl_log.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn newer_standalone_cli_is_not_downgraded() -> Result<()> {
+        let _env_guard = env_lock();
+        let temp = tempdir()?;
+        let paths = test_runtime_paths(temp.path());
+        paths.ensure_dirs()?;
+
+        let home = temp.path().join("home");
+        let tool_bin = temp.path().join("tool-bin");
+        let install_dir = home.join(".local/bin");
+        let codex_home = home.join(".codex");
+        fs::create_dir_all(&tool_bin)?;
+
+        let initial_release =
+            write_standalone_codex_release(&codex_home, "0.43.0", "x86_64-unknown-linux-musl")?;
+        let visible_codex = link_standalone_cli(&codex_home, &install_dir, &initial_release)?;
+        let npm_install_log = temp.path().join("npm-install.log");
+        let curl_call_log = temp.path().join("curl-call.log");
+        write_fake_latest_npm(&tool_bin, "0.42.1", &npm_install_log)?;
+        write_failing_standalone_installer_curl(&tool_bin, &curl_call_log)?;
+
+        let _restore_env = EnvRestoreGuard::capture(&[
+            "HOME",
+            "PATH",
+            "NVM_DIR",
+            "CODEX_CLI_PATH",
+            "CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP",
+        ]);
+        std::env::set_var("HOME", &home);
+        set_test_path_with_tool_bin(&tool_bin)?;
+        std::env::remove_var("NVM_DIR");
+        std::env::remove_var("CODEX_CLI_PATH");
+        std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
+
+        let mut state = PersistedState::new(true);
+        state.cli_path = Some(visible_codex.clone());
+        let updated = reconcile_if_present(&mut state, &paths)?;
+
+        assert!(!updated);
+        assert_eq!(state.cli_path.as_deref(), Some(visible_codex.as_path()));
+        assert_eq!(state.cli_installed_version.as_deref(), Some("0.43.0"));
+        assert_eq!(state.cli_latest_version.as_deref(), Some("0.42.1"));
+        assert_eq!(state.cli_status, CliStatus::UpToDate);
+        assert!(!npm_install_log.exists());
+        assert!(!curl_call_log.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn failing_standalone_cli_update_reports_standalone_installer_error() -> Result<()> {
+        let _env_guard = env_lock();
+        let temp = tempdir()?;
+        let paths = test_runtime_paths(temp.path());
+        paths.ensure_dirs()?;
+
+        let home = temp.path().join("home");
+        let tool_bin = temp.path().join("tool-bin");
+        let install_dir = home.join(".local/bin");
+        let codex_home = home.join(".codex");
+        fs::create_dir_all(&tool_bin)?;
+
+        let initial_release =
+            write_standalone_codex_release(&codex_home, "0.42.0", "x86_64-unknown-linux-musl")?;
+        let visible_codex = link_standalone_cli(&codex_home, &install_dir, &initial_release)?;
+        let npm_install_log = temp.path().join("npm-install.log");
+        let curl_call_log = temp.path().join("curl-call.log");
+        write_fake_latest_npm(&tool_bin, "0.42.1", &npm_install_log)?;
+        write_failing_standalone_installer_curl(&tool_bin, &curl_call_log)?;
+
+        let _restore_env = EnvRestoreGuard::capture(&[
+            "HOME",
+            "PATH",
+            "NVM_DIR",
+            "CODEX_CLI_PATH",
+            "CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP",
+        ]);
+        std::env::set_var("HOME", &home);
+        set_test_path_with_tool_bin(&tool_bin)?;
+        std::env::remove_var("NVM_DIR");
+        std::env::remove_var("CODEX_CLI_PATH");
+        std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
+
+        let mut state = PersistedState::new(true);
+        state.cli_path = Some(visible_codex.clone());
+        let error = preflight(&mut state, &paths, Some(visible_codex), false)
+            .expect_err("standalone installer failure should bubble up");
+
+        assert!(error
+            .to_string()
+            .contains("standalone Codex CLI installer failed"));
+        assert!(curl_call_log.exists());
+        assert!(!npm_install_log.exists());
+        Ok(())
+    }
+
+    #[test]
     fn reconcile_if_present_upgrades_outdated_cli() -> Result<()> {
         let _env_guard = env_lock();
         let temp = tempdir()?;
@@ -1155,6 +1613,8 @@ mod tests {
 
         let mut state = PersistedState::new(true);
         state.cli_path = Some(codex_path.clone());
+
+        assert_eq!(classify_cli_install(&codex_path), CliInstallKind::Npm);
 
         let updated = reconcile_if_present(&mut state, &paths)?;
 

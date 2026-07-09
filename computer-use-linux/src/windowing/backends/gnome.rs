@@ -134,6 +134,96 @@ async fn call_extension_json(method: &str) -> Result<String> {
     Ok(json)
 }
 
+/// Logical monitor geometry reported by the GNOME Shell extension.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct MonitorInfo {
+    pub index: i32,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub primary: bool,
+    #[serde(default)]
+    pub scale: f64,
+}
+
+const EXTENSION_OUTDATED_HINT: &str = "the installed computer-use-linux GNOME Shell extension predates this method; rerun setup_window_targeting, then log out and back in to reload GNOME Shell";
+
+fn map_unknown_method(error: zbus::Error) -> anyhow::Error {
+    let text = error.to_string();
+    if text.contains("UnknownMethod") || text.contains("No such method") {
+        anyhow::anyhow!("{text} ({EXTENSION_OUTDATED_HINT})")
+    } else {
+        anyhow::anyhow!(text)
+    }
+}
+
+pub async fn extension_monitor_layout() -> Result<Vec<MonitorInfo>> {
+    hydrate_session_bus_env();
+
+    let connection = zbus::Connection::session()
+        .await
+        .context("failed to connect to session bus")?;
+    let proxy = Proxy::new(
+        &connection,
+        GNOME_SHELL_EXTENSION_SERVICE,
+        GNOME_SHELL_EXTENSION_OBJECT_PATH,
+        GNOME_SHELL_EXTENSION_SERVICE,
+    )
+    .await
+    .context("failed to create computer-use-linux GNOME Shell extension proxy")?;
+    let json: String = proxy
+        .call("GetMonitorLayout", &())
+        .await
+        .map_err(map_unknown_method)
+        .context("computer-use-linux GNOME Shell extension GetMonitorLayout call failed")?;
+    serde_json::from_str(&json)
+        .context("computer-use-linux GNOME Shell extension returned invalid monitor JSON")
+}
+
+pub(crate) async fn move_extension_window(window_id: u64, x: i32, y: i32) -> Result<String> {
+    extension_window_op("MoveWindow", &(window_id, x, y)).await
+}
+
+pub(crate) async fn resize_extension_window(
+    window_id: u64,
+    width: i32,
+    height: i32,
+) -> Result<String> {
+    extension_window_op("ResizeWindow", &(window_id, width, height)).await
+}
+
+async fn extension_window_op<B: serde::Serialize + zbus::zvariant::DynamicType>(
+    method: &str,
+    body: &B,
+) -> Result<String> {
+    hydrate_session_bus_env();
+
+    let connection = zbus::Connection::session()
+        .await
+        .context("failed to connect to session bus")?;
+    let proxy = Proxy::new(
+        &connection,
+        GNOME_SHELL_EXTENSION_SERVICE,
+        GNOME_SHELL_EXTENSION_OBJECT_PATH,
+        GNOME_SHELL_EXTENSION_SERVICE,
+    )
+    .await
+    .context("failed to create computer-use-linux GNOME Shell extension proxy")?;
+    let (ok, message): (bool, String) = proxy
+        .call(method, body)
+        .await
+        .map_err(map_unknown_method)
+        .with_context(|| {
+            format!("computer-use-linux GNOME Shell extension {method} call failed")
+        })?;
+    if ok {
+        Ok(message)
+    } else {
+        bail!("computer-use-linux GNOME Shell extension refused {method}: {message}");
+    }
+}
+
 pub(crate) async fn activate_extension_window(window_id: u64) -> Result<()> {
     hydrate_session_bus_env();
 

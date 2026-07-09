@@ -15,14 +15,32 @@ It:
   command when no auth agent is available
 - performs best-effort Codex CLI preflight from the launcher
 
+Codex CLI preflight preserves the detected CLI install type. npm-managed
+installs continue to update through npm, while official standalone installs
+under `~/.codex/packages/standalone` are updated with the official standalone
+installer instead of being replaced through npm.
+
+The launcher does not choose the newest installed CLI. It resolves an explicit
+`CODEX_CLI_PATH` first, then falls back to the usual `PATH`, nvm, and known
+user/system locations. Startup logs include the resolved path plus a
+best-effort CLI version probe; set `CODEX_CLI_PATH=/path/to/codex` when you
+need to pin a particular binary from a GUI-launched session.
+
 ## Inspect State
 
 ```bash
 systemctl --user status codex-update-manager.service
 codex-update-manager status --json
+codex-update-manager diagnose --json
 sed -n '1,160p' ~/.local/state/codex-update-manager/state.json
 sed -n '1,160p' ~/.local/state/codex-update-manager/service.log
 ```
+
+`diagnose` is read-only and intended for post-update support reports. It checks
+the persisted updater state, installed app executable, launcher `app.pid` and
+`webview.pid`, local webview HTTP endpoint, warm-start handoff socket, and
+Linux build metadata without starting, stopping, installing, or repairing
+anything.
 
 Runtime files:
 
@@ -34,6 +52,27 @@ Runtime files:
 ~/.cache/codex-desktop/launcher.log
 ~/.local/state/codex-desktop/app.pid
 ```
+
+## Generated Artifact Cleanup
+
+The updater always prunes unreferenced updater workspaces under
+`~/.cache/codex-update-manager/workspaces`. Local checkout build output such as
+`dist/`, `target/`, and `codex-app/` is cleaned only when explicitly enabled.
+
+Example:
+
+```toml
+[generated_artifact_cleanup]
+enabled = true
+min_free_bytes = 10737418240 # 10 GiB
+roots = ["/home/mohit/Github/codex-desktop-linux"]
+entries = ["dist", "target", "codex-app"]
+```
+
+If `roots` is omitted, the updater uses `builder_bundle_root`. Cleanup only runs
+when the filesystem containing a root has less than `min_free_bytes` available.
+Every entry must be a relative top-level name, and the updater only cleans roots
+that look like this wrapper repository or packaged update-builder.
 
 ## Rollback
 
@@ -83,6 +122,21 @@ codex-update-manager status --json
 
 `make service-enable` is meant for installed packages, not repo-only generated
 apps.
+
+To temporarily pause automatic package rebuilds and installs while keeping Codex
+Desktop usable, disable the user service:
+
+```bash
+systemctl --user disable --now codex-update-manager.service
+```
+
+Launching Codex Desktop and upgrading the package will not re-enable a disabled
+updater service. Re-enable updater behavior explicitly when you want automatic
+checks again:
+
+```bash
+systemctl --user enable --now codex-update-manager.service
+```
 
 ## Wrapper Updates
 

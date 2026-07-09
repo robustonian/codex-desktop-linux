@@ -106,6 +106,7 @@ pub struct AccessibilityReport {
 pub struct WindowingReport {
     pub gnome_shell_introspect: Check,
     pub codex_gnome_shell_extension: Check,
+    pub codex_gnome_shell_extension_screenshot: Check,
     pub cosmic_helper: Check,
     pub kwin: Check,
     pub hyprland: Check,
@@ -215,6 +216,9 @@ fn capability_map(
     let mut screenshot_backends = Vec::new();
     if platform.gnome_shell_version.ok {
         screenshot_backends.push("gnome_shell".to_string());
+    }
+    if windowing.codex_gnome_shell_extension_screenshot.ok {
+        screenshot_backends.push("gnome_shell_extension".to_string());
     }
     if portals.screenshot.ok {
         screenshot_backends.push("portal".to_string());
@@ -567,6 +571,11 @@ fn windowing_report(platform: &PlatformReport) -> WindowingReport {
     };
     let gnome_shell_introspect = backend_check(GNOME_SHELL_INTROSPECT_BACKEND);
     let codex_gnome_shell_extension = backend_check(GNOME_SHELL_EXTENSION_BACKEND);
+    let codex_gnome_shell_extension_screenshot = gdbus_introspect_contains(
+        crate::identity::DBUS_SERVICE,
+        crate::identity::DBUS_OBJECT_PATH,
+        "CaptureScreenshot",
+    );
     let cosmic_helper = backend_check(COSMIC_WAYLAND_BACKEND);
     let kwin = backend_check(KWIN_BACKEND);
     let hyprland = backend_check(HYPRLAND_BACKEND);
@@ -595,6 +604,7 @@ fn windowing_report(platform: &PlatformReport) -> WindowingReport {
     WindowingReport {
         gnome_shell_introspect,
         codex_gnome_shell_extension,
+        codex_gnome_shell_extension_screenshot,
         cosmic_helper,
         kwin,
         hyprland,
@@ -914,6 +924,27 @@ fn gdbus_call_check(destination: &str, object_path: &str, method: &str, args: &[
     command_check_with_session_bus("gdbus", &command_args)
 }
 
+fn gdbus_introspect_contains(destination: &str, object_path: &str, needle: &str) -> Check {
+    let check = command_check_with_session_bus(
+        "gdbus",
+        &[
+            "introspect",
+            "--session",
+            "--dest",
+            destination,
+            "--object-path",
+            object_path,
+        ],
+    );
+    if check.ok && check.detail.contains(needle) {
+        Check::ok(format!("DBus introspection includes {needle}"))
+    } else if check.ok {
+        Check::fail(format!("DBus introspection did not include {needle}"))
+    } else {
+        check
+    }
+}
+
 fn command_check(command: &str, args: &[&str]) -> Check {
     run_command(command, args, false)
 }
@@ -1011,6 +1042,11 @@ mod tests {
                 Check::fail("denied")
             },
             codex_gnome_shell_extension: if can_focus_windows {
+                Check::ok("ok")
+            } else {
+                Check::fail("missing")
+            },
+            codex_gnome_shell_extension_screenshot: if can_focus_windows {
                 Check::ok("ok")
             } else {
                 Check::fail("missing")

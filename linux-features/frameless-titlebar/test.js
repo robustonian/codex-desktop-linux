@@ -12,6 +12,7 @@ const {
 } = require("../../scripts/lib/linux-features.js");
 const {
   applyFramelessTitlebarMainPatch,
+  applyFramelessTitlebarMenuPatch,
   applyFramelessTitlebarWebviewPatch,
 } = require("./patch.js");
 
@@ -75,11 +76,23 @@ test("frameless-titlebar removes Linux overlay controls and menu chrome", () => 
   assert.match(patched, /if\(process\.platform!==`win32`\|\|t!==`primary`\)return/);
   assert.match(
     patched,
-    /process\.platform===`linux`&&\(k\.setMenuBarVisibility\(!1\),k\.removeMenu\?\.\(\)\),process\.platform===`win32`&&k\.removeMenu\(\),/,
+    /process\.platform===`linux`&&k\.removeMenu\(\),process\.platform===`win32`&&k\.removeMenu\(\),/,
   );
+  assert.doesNotMatch(patched, /setMenuBarVisibility/);
   assert.doesNotMatch(patched, /titleBarOverlay:codexLinuxTitleBarOverlay/);
   assert.doesNotMatch(patched, /process\.platform===`linux`[^;]*setTitleBarOverlay/);
   assert.doesNotMatch(patched, /process\.platform!==`linux`[^;]*setTitleBarOverlay/);
+});
+
+test("frameless-titlebar leaves core Linux removeMenu patch idempotent", () => {
+  const source =
+    "process.platform===`linux`&&k.removeMenu(),process.platform===`win32`&&k.removeMenu(),";
+
+  const patched = applyPatchTwice(applyFramelessTitlebarMenuPatch, source);
+
+  assert.equal(patched, source);
+  assert.equal((patched.match(/process\.platform===`linux`&&k\.removeMenu\(\),/g) ?? []).length, 1);
+  assert.doesNotMatch(patched, /setMenuBarVisibility/);
 });
 
 test("frameless-titlebar collapses the core-patched zoom overlay ternary", () => {

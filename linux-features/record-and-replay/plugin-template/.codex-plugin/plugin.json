@@ -1,0 +1,38 @@
+{
+  "name": "record-and-replay",
+  "version": "0.1.0-linux-alpha1",
+  "description": "Record Linux workflows and turn them into reusable Codex skills.",
+  "author": {
+    "name": "avifenesh"
+  },
+  "homepage": "https://github.com/ilysenko/codex-desktop-linux",
+  "license": "MIT",
+  "keywords": [
+    "record-and-replay",
+    "skills",
+    "linux",
+    "computer-use",
+    "demo-to-skill"
+  ],
+  "mcpServers": "./.mcp.json",
+  "skills": "./skills",
+  "interface": {
+    "displayName": "Record & Replay",
+    "shortDescription": "Record workflows into reusable skills",
+    "longDescription": "Record & Replay captures a Linux desktop or browser workflow as a semantic event stream, including explicit user markers and spoken transcript context, drafts a reusable Codex skill, and imports that skill after inspection. It uses Linux Computer Use diagnostics and avoids raw coordinate macro replay.",
+    "developerName": "avifenesh",
+    "category": "Productivity",
+    "websiteURL": "https://github.com/ilysenko/codex-desktop-linux",
+    "privacyPolicyURL": "https://openai.com/policies/row-privacy-policy/",
+    "termsOfServiceURL": "https://openai.com/policies/row-terms-of-use/",
+    "logo": "./assets/app-icon.svg",
+    "composerIcon": "./assets/app-icon.svg",
+    "defaultPrompt": [
+      "Record a skill for this workflow",
+      "Watch me do this task and turn it into a skill",
+      "Record my daily workflow and make it reusable"
+    ],
+    "brandColor": "#111827",
+    "screenshots": []
+  }
+}

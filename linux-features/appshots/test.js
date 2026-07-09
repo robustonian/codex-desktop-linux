@@ -151,6 +151,14 @@ test("stages the Linux bare modifier monitor helper and Wayland portal hook", ()
   assert.equal(electronArgsSource.trim(), "--enable-features=GlobalShortcutsPortal");
   assert.match(helperSource, /xinput test "\$device_id"/);
   assert.match(helperSource, /stdbuf -oL/);
+  assert.doesNotMatch(helperSource, /\bmktemp\s+-u\b/);
+  assert.match(
+    helperSource,
+    /event_dir="\$\(mktemp -d "\$\{TMPDIR:-\/tmp\}\/codex-bare-modifier\.XXXXXX"\)"/,
+  );
+  assert.match(helperSource, /event_fifo="\$event_dir\/events"/);
+  assert.match(helperSource, /mkfifo "\$event_fifo"/);
+  assert.match(helperSource, /rmdir "\$event_dir" 2>\/dev\/null \|\| true/);
   assert.match(helperSource, /exec 4<>"\$event_fifo"/);
   assert.match(helperSource, /pkill -TERM -P "\$pid"/);
   assert.match(helperSource, /while read -r pending code <&3; do/);

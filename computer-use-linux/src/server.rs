@@ -1,7 +1,7 @@
 use crate::atspi_tree::{
-    list_accessible_apps, perform_action as invoke_accessibility_action, set_element_value,
-    snapshot_tree, AccessibilityAction, AccessibilityNode, AccessibleAppSummary, Bounds,
-    ValueSetInvocation,
+    focused_element_summary, list_accessible_apps, perform_action as invoke_accessibility_action,
+    set_element_value, snapshot_tree, AccessibilityAction, AccessibilityNode, AccessibleAppSummary,
+    Bounds, FocusedElementSummary, ValueSetInvocation,
 };
 use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
@@ -61,6 +61,9 @@ pub struct ComputerUseLinux {
     abs_pointer: Arc<Mutex<Option<crate::abs_pointer::AbsPointer>>>,
     portal_keyboard_init_lock: Arc<tokio::sync::Mutex<()>>,
     kde_clipboard_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Cached logical desktop size (union of monitors) from the most recent
+    /// full-frame capture; used for off-screen window/coordinate warnings.
+    desktop_size: Arc<Mutex<Option<(u32, u32)>>>,
 }
 
 #[tool_router]
@@ -120,7 +123,7 @@ impl ComputerUseLinux {
     async fn list_apps(&self) -> Json<ListAppsOutput> {
         let (accessible_apps, accessibility_error) = match list_accessible_apps(50).await {
             Ok(apps) => (apps, None),
-            Err(error) => (Vec::new(), Some(error.to_string())),
+            Err(error) => (Vec::new(), Some(format!("{error:#}"))),
         };
 
         Json(ListAppsOutput {
@@ -240,6 +243,7 @@ impl ComputerUseLinux {
         &self,
         Parameters(params): Parameters<GetAppStateParams>,
     ) -> Json<GetAppStateOutput> {
+        let verbose = params.verbose.unwrap_or(false);
         let diagnostics = doctor_report();
         let (window_context, window_error, window_permissions_hint) =
             self.resolve_window_context(&params).await;
@@ -256,7 +260,7 @@ impl ComputerUseLinux {
                 .and_then(|raw| prepare_screenshot_payload(raw, screenshot_options))
             {
                 Ok(capture) => (Some(capture), None),
-                Err(error) => (None, Some(error.to_string())),
+                Err(error) => (None, Some(format!("{error:#}"))),
             }
         } else {
             (None, None)
@@ -269,7 +273,7 @@ impl ComputerUseLinux {
                         let raw_count = nodes.len();
                         (compact_accessibility_tree(nodes), raw_count, None)
                     }
-                    Err(error) => (Vec::new(), 0, Some(error.to_string())),
+                    Err(error) => (Vec::new(), 0, Some(format!("{error:#}"))),
                 }
             } else {
                 (
@@ -317,6 +321,18 @@ impl ComputerUseLinux {
             message.push_str(&format!(" Window target resolution failed: {error}"));
         }
 
+        // Full diagnostics are huge (portal/process dumps); emit them only on
+        // request. The compact readiness block always travels, and failures get
+        // a pointer to verbose=true instead of an automatic dump.
+        let readiness = diagnostics.readiness.clone();
+        let include_full = verbose;
+        if !include_full
+            && (accessibility_error.is_some()
+                || screenshot_error.is_some()
+                || window_error.is_some())
+        {
+            message.push_str(" Pass verbose=true for full diagnostics.");
+        }
         Json(GetAppStateOutput {
             app_name_or_bundle_identifier: params.app_name_or_bundle_identifier,
             window_context,
@@ -328,7 +344,8 @@ impl ComputerUseLinux {
             accessibility_tree,
             accessibility_tree_raw_count,
             accessibility_error,
-            diagnostics,
+            readiness,
+            diagnostics: include_full.then_some(diagnostics),
             message,
         })
     }
@@ -371,6 +388,15 @@ impl ComputerUseLinux {
         let raw_capture = capture_screenshot_raw()
             .await
             .map_err(|e| ErrorData::internal_error(format!("screenshot failed: {e}"), None))?;
+        self.cache_desktop_size(raw_capture.width, raw_capture.height);
+
+        // Warn when the target window extends past the visible desktop: the
+        // portal only captures on-screen pixels, so the crop silently loses the
+        // off-screen region while coordinate metadata still claims full size.
+        let off_screen_note = match crop.as_ref() {
+            Some(bounds) => self.off_screen_note_for_bounds(bounds).await,
+            None => None,
+        };
 
         let (capture, cropped) = match crop.as_ref().and_then(window_crop_rect) {
             Some((x, y, w, h)) => match crop_png(&raw_capture.bytes, x, y, w, h) {
@@ -394,7 +420,7 @@ impl ComputerUseLinux {
                 ErrorData::internal_error(format!("screenshot resize failed: {e}"), None)
             })?;
 
-        let caption = serde_json::json!({
+        let mut caption = serde_json::json!({
             "width": capture.width,
             "height": capture.height,
             "coordinate_width": capture.coordinate_width,
@@ -410,6 +436,10 @@ impl ComputerUseLinux {
             "cropped_to_window": cropped,
             "window_title": window_label,
         });
+        if let Some(note) = off_screen_note {
+            caption["window_off_screen"] = serde_json::json!(true);
+            caption["off_screen_note"] = serde_json::json!(note);
+        }
         Ok(CallToolResult::success(vec![
             Content::image(data_url_payload(&capture.data_url), capture.mime_type),
             Content::text(caption.to_string()),
@@ -438,6 +468,7 @@ impl ComputerUseLinux {
         let Ok(cap) = capture_screenshot_raw().await else {
             return false;
         };
+        self.cache_desktop_size(cap.width, cap.height);
         match tokio::task::spawn_blocking(move || {
             crate::abs_pointer::AbsPointer::create(cap.width as i32, cap.height as i32)
         })
@@ -604,6 +635,9 @@ impl ComputerUseLinux {
         // move, which acceleration + fractional scaling distort) and unlike the
         // portal (per-monitor coordinate scaling + an approval dialog), the
         // absolute pointer lands exactly at the screenshot pixel.
+        // Off-screen coordinates "succeed" at the uinput layer while landing on
+        // no visible pixel — surface that instead of a silent no-op.
+        let off_screen_note = self.off_screen_note_for_point(x, y).await;
         if self
             .try_abs_click(
                 x,
@@ -614,13 +648,16 @@ impl ComputerUseLinux {
             .await
             == Some(true)
         {
-            return Json(ActionOutput {
-                ok: true,
-                implemented: true,
-                action: "click".to_string(),
-                message: "Action sent through the uinput absolute pointer.".to_string(),
-                received,
-            });
+            return Json(with_notes(
+                ActionOutput {
+                    ok: true,
+                    implemented: true,
+                    action: "click".to_string(),
+                    message: "Action sent through the uinput absolute pointer.".to_string(),
+                    received,
+                },
+                off_screen_note.clone(),
+            ));
         }
         if let Some(session) = self.cached_portal_pointer_session() {
             match portal_click(
@@ -633,13 +670,16 @@ impl ComputerUseLinux {
             .await
             {
                 Ok(()) => {
-                    return Json(ActionOutput {
-                        ok: true,
-                        implemented: true,
-                        action: "click".to_string(),
-                        message: "Action sent through the remote desktop portal.".to_string(),
-                        received,
-                    });
+                    return Json(with_notes(
+                        ActionOutput {
+                            ok: true,
+                            implemented: true,
+                            action: "click".to_string(),
+                            message: "Action sent through the remote desktop portal.".to_string(),
+                            received,
+                        },
+                        off_screen_note.clone(),
+                    ));
                 }
                 Err(_) => self.clear_portal_pointer_session(),
             }
@@ -655,13 +695,17 @@ impl ComputerUseLinux {
                 .await
                 {
                     Ok(()) => {
-                        return Json(ActionOutput {
-                            ok: true,
-                            implemented: true,
-                            action: "click".to_string(),
-                            message: "Action sent through the remote desktop portal.".to_string(),
-                            received,
-                        });
+                        return Json(with_notes(
+                            ActionOutput {
+                                ok: true,
+                                implemented: true,
+                                action: "click".to_string(),
+                                message: "Action sent through the remote desktop portal."
+                                    .to_string(),
+                                received,
+                            },
+                            off_screen_note.clone(),
+                        ));
                     }
                     Err(_) => self.clear_portal_pointer_session(),
                 },
@@ -679,7 +723,10 @@ impl ComputerUseLinux {
             ],
         ])
         .await;
-        Json(action_result("click", result, received))
+        Json(with_notes(
+            action_result("click", result, received),
+            off_screen_note,
+        ))
     }
 
     #[tool(
@@ -761,7 +808,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "scroll",
-        description = "Scroll an element in a direction by a number of pages.",
+        description = "Scroll an element in a direction by a number of pages. With a window target and no x/y/element_index, scrolls at the centre of the targeted window.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -769,9 +816,82 @@ impl ComputerUseLinux {
             open_world_hint = true
         )
     )]
-    async fn scroll(&self, Parameters(params): Parameters<ScrollParams>) -> Json<ActionOutput> {
-        let received = Some(serde_json::json!(params));
+    async fn scroll(&self, Parameters(mut params): Parameters<ScrollParams>) -> Json<ActionOutput> {
+        let received = Some(serde_json::json!(params.clone()));
         let units = ((params.pages.unwrap_or(1.0).abs().max(0.1) * 5.0).round() as i32).max(1);
+        // Raise/focus the target window first (parity with click) so wheel
+        // events land on the intended app.
+        let window_target = params.window_target();
+        if params.relative == Some(true) && window_target.is_none() {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "scroll".to_string(),
+                message: "Relative scroll coordinates require a window target.".to_string(),
+                received,
+            });
+        }
+        if let Some(target) = window_target {
+            let focus = match self.focus_target_for_input(&target).await {
+                Ok(focus) => focus,
+                Err(message) => {
+                    return Json(ActionOutput {
+                        ok: false,
+                        implemented: true,
+                        action: "scroll".to_string(),
+                        message,
+                        received,
+                    });
+                }
+            };
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            if params.relative == Some(true) {
+                let Some(focus) = focus.as_ref() else {
+                    return Json(ActionOutput {
+                        ok: false,
+                        implemented: true,
+                        action: "scroll".to_string(),
+                        message:
+                            "Relative scroll coordinates require verified target-window focus."
+                                .to_string(),
+                        received,
+                    });
+                };
+                if let Err(message) = apply_window_relative_scroll_coordinates(&mut params, focus) {
+                    return Json(ActionOutput {
+                        ok: false,
+                        implemented: true,
+                        action: "scroll".to_string(),
+                        message,
+                        received,
+                    });
+                }
+            } else if params.x.is_none() && params.y.is_none() && params.element_index.is_none() {
+                // A window target without a point would otherwise scroll
+                // whatever happens to sit under the pointer: focusing does not
+                // move the cursor, and the wheel path never repositions it.
+                // Default to the centre of the resolved target window.
+                let Some(focus) = focus.as_ref() else {
+                    return Json(ActionOutput {
+                        ok: false,
+                        implemented: true,
+                        action: "scroll".to_string(),
+                        message: "Window-targeted scroll requires verified target-window focus."
+                            .to_string(),
+                        received,
+                    });
+                };
+                if let Err(message) = apply_window_center_scroll_point(&mut params, focus) {
+                    return Json(ActionOutput {
+                        ok: false,
+                        implemented: true,
+                        action: "scroll".to_string(),
+                        message,
+                        received,
+                    });
+                }
+            }
+        }
         let target_point =
             match self.resolve_optional_target_point(params.x, params.y, params.element_index) {
                 Ok(point) => point,
@@ -801,36 +921,47 @@ impl ComputerUseLinux {
                 });
             }
         };
+        let off_screen_note = match target_point {
+            Some((x, y)) => self.off_screen_note_for_point(x, y).await,
+            None => None,
+        };
 
         if let Some(session) = self.cached_portal_pointer_session() {
             match portal_scroll(&session, target_point, direction, units).await {
                 Ok(()) => {
-                    return Json(ActionOutput {
-                        ok: true,
-                        implemented: true,
-                        action: "scroll".to_string(),
-                        message: "Action sent through the remote desktop portal.".to_string(),
-                        received,
-                    });
-                }
-                Err(_) => self.clear_portal_pointer_session(),
-            }
-        } else if self.should_prefer_portal_pointer_backend() {
-            match self.ensure_portal_pointer_session().await {
-                Ok(Some(session)) => match portal_scroll(&session, target_point, direction, units)
-                    .await
-                {
-                    Ok(()) => {
-                        return Json(ActionOutput {
+                    return Json(with_notes(
+                        ActionOutput {
                             ok: true,
                             implemented: true,
                             action: "scroll".to_string(),
                             message: "Action sent through the remote desktop portal.".to_string(),
                             received,
-                        });
+                        },
+                        off_screen_note.clone(),
+                    ));
+                }
+                Err(_) => self.clear_portal_pointer_session(),
+            }
+        } else if self.should_prefer_portal_pointer_backend() {
+            match self.ensure_portal_pointer_session().await {
+                Ok(Some(session)) => {
+                    match portal_scroll(&session, target_point, direction, units).await {
+                        Ok(()) => {
+                            return Json(with_notes(
+                                ActionOutput {
+                                    ok: true,
+                                    implemented: true,
+                                    action: "scroll".to_string(),
+                                    message: "Action sent through the remote desktop portal."
+                                        .to_string(),
+                                    received,
+                                },
+                                off_screen_note.clone(),
+                            ));
+                        }
+                        Err(_) => self.clear_portal_pointer_session(),
                     }
-                    Err(_) => self.clear_portal_pointer_session(),
-                },
+                }
                 Ok(None) => {}
                 Err(_) => {}
             }
@@ -857,7 +988,10 @@ impl ComputerUseLinux {
         }
         sequence.push(wheel_mousemove_args(dx, dy));
         let result = run_ydotool_sequence(&sequence).await;
-        Json(action_result("scroll", result, received))
+        Json(with_notes(
+            action_result("scroll", result, received),
+            off_screen_note,
+        ))
     }
 
     #[tool(
@@ -961,7 +1095,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "press_key",
-        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector.",
+        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -998,12 +1132,12 @@ impl ComputerUseLinux {
         let mut args = vec!["key".to_string()];
         args.extend(key_events);
         let result = run_ydotool(&args).await.map(|output| vec![output]);
-        Json(action_result_with_focus(
-            "press_key",
-            result,
-            received,
-            focus,
-        ))
+        let mut output = action_result_with_focus("press_key", result, received, focus.clone());
+        if output.ok && focus.is_some() {
+            let notes = self.input_landing_notes(focus.as_ref(), false).await;
+            output = with_notes(output, notes);
+        }
+        Json(output)
     }
 
     #[tool(
@@ -1039,11 +1173,15 @@ impl ComputerUseLinux {
                     let _clipboard_guard = self.kde_clipboard_lock.lock().await;
                     match run_kde_clipboard_paste_text(&session, &params.text).await {
                         Ok(message) => {
-                            return Json(successful_action_with_focus(
-                                "type_text",
-                                &message,
-                                received,
-                                focus,
+                            let notes = self.input_landing_notes(focus.as_ref(), true).await;
+                            return Json(with_notes(
+                                successful_action_with_focus(
+                                    "type_text",
+                                    &message,
+                                    received,
+                                    focus,
+                                ),
+                                notes,
                             ));
                         }
                         Err(error) => {
@@ -1070,11 +1208,15 @@ impl ComputerUseLinux {
                 match self.ensure_portal_keyboard_session().await {
                     Ok(Some(session)) => match type_text_with_keysyms(&session, &keysyms).await {
                         Ok(()) => {
-                            return Json(successful_action_with_focus(
-                                "type_text",
-                                "Action sent through the remote desktop portal.",
-                                received,
-                                focus,
+                            let notes = self.input_landing_notes(focus.as_ref(), true).await;
+                            return Json(with_notes(
+                                successful_action_with_focus(
+                                    "type_text",
+                                    "Action sent through the remote desktop portal.",
+                                    received,
+                                    focus,
+                                ),
+                                notes,
                             ));
                         }
                         Err(error) => {
@@ -1095,12 +1237,62 @@ impl ComputerUseLinux {
         let result = run_ydotool_type_text(&params.text)
             .await
             .map(|output| vec![output]);
-        Json(action_result_with_focus(
-            "type_text",
-            result,
-            received,
-            focus,
-        ))
+        let mut output = action_result_with_focus("type_text", result, received, focus.clone());
+        if output.ok && focus.is_some() {
+            let notes = self.input_landing_notes(focus.as_ref(), true).await;
+            output = with_notes(output, notes);
+        }
+        Json(output)
+    }
+
+    #[tool(
+        name = "move_window",
+        description = "Move a window to a new desktop position (frame top-left in desktop coordinates). Useful to recover windows that are partially off-screen. Requires the computer-use-linux GNOME Shell extension.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn move_window(
+        &self,
+        Parameters(params): Parameters<MoveWindowParams>,
+    ) -> Json<WindowGeometryOutput> {
+        let received = Some(serde_json::json!(params.clone()));
+        let target = params.target.clone().into_target();
+        self.window_geometry_op(received, &target, |window_id| async move {
+            crate::windowing::backends::gnome::move_extension_window(window_id, params.x, params.y)
+                .await
+        })
+        .await
+    }
+
+    #[tool(
+        name = "resize_window",
+        description = "Resize a window to a new frame width/height in desktop pixels, unmaximizing it first if needed. Useful to fit a window fully on-screen. Requires the computer-use-linux GNOME Shell extension.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn resize_window(
+        &self,
+        Parameters(params): Parameters<ResizeWindowParams>,
+    ) -> Json<WindowGeometryOutput> {
+        let received = Some(serde_json::json!(params.clone()));
+        let target = params.target.clone().into_target();
+        self.window_geometry_op(received, &target, |window_id| async move {
+            crate::windowing::backends::gnome::resize_extension_window(
+                window_id,
+                params.width,
+                params.height,
+            )
+            .await
+        })
+        .await
     }
 }
 
@@ -1110,8 +1302,8 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.2.9-linux-alpha1",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified."
+    version = "0.3.1-linux-alpha1",
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell, the Codex GNOME Shell extension, or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
 )]
 impl ServerHandler for ComputerUseLinux {}
 
@@ -1204,6 +1396,39 @@ struct ActivateWindowOutput {
     received: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct MoveWindowParams {
+    #[serde(flatten)]
+    target: ActivateWindowParams,
+    /// New frame-left in desktop coordinates.
+    x: i32,
+    /// New frame-top in desktop coordinates.
+    y: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct ResizeWindowParams {
+    #[serde(flatten)]
+    target: ActivateWindowParams,
+    /// New frame width in desktop pixels.
+    width: i32,
+    /// New frame height in desktop pixels.
+    height: i32,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct WindowGeometryOutput {
+    ok: bool,
+    implemented: bool,
+    backend: String,
+    /// Post-operation window info (compositor-final geometry).
+    window: Option<WindowInfo>,
+    message: String,
+    permissions_hint: Option<String>,
+    #[schemars(skip)]
+    received: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 struct AppCandidate {
     name: String,
@@ -1258,6 +1483,10 @@ struct GetAppStateParams {
     #[serde(default)]
     #[schemars(range(min = 1, max = 95))]
     quality: Option<u8>,
+    /// Include the full diagnostics report (large). Default false: only the
+    /// compact readiness block is returned.
+    #[serde(default)]
+    verbose: Option<bool>,
 }
 
 impl GetAppStateParams {
@@ -1374,7 +1603,11 @@ struct GetAppStateOutput {
     accessibility_tree: Vec<AccessibilityNode>,
     accessibility_tree_raw_count: usize,
     accessibility_error: Option<String>,
-    diagnostics: DoctorReport,
+    /// Compact readiness summary (always present).
+    readiness: crate::diagnostics::ReadinessReport,
+    /// Full diagnostics; populated only when verbose=true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostics: Option<DoctorReport>,
     message: String,
 }
 
@@ -1520,6 +1753,48 @@ struct ScrollParams {
     direction: String,
     #[serde(default)]
     pages: Option<f64>,
+    // Optional window target (parity with click): the window is raised/focused
+    // before scrolling so the wheel events land on the intended app.
+    #[serde(default)]
+    window_id: Option<u64>,
+    #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
+    app_id: Option<String>,
+    #[serde(default)]
+    wm_class: Option<String>,
+    #[serde(default)]
+    window_title: Option<String>,
+    /// Interpret `x`/`y` as relative to the targeted window's top-left corner
+    /// (the same coordinate space as a window-cropped `screenshot`). Requires a
+    /// window target; ignored otherwise.
+    #[serde(default)]
+    relative: Option<bool>,
+}
+
+impl ScrollParams {
+    /// A window target if any window-identifying field was supplied.
+    fn window_target(&self) -> Option<WindowTarget> {
+        if self.window_id.is_none()
+            && self.pid.is_none()
+            && self.app_id.is_none()
+            && self.wm_class.is_none()
+            && self.window_title.is_none()
+        {
+            return None;
+        }
+        Some(WindowTarget {
+            window_id: self.window_id,
+            pid: self.pid,
+            tty: None,
+            terminal_pid: None,
+            terminal_command: None,
+            terminal_cwd: None,
+            app_id: self.app_id.clone(),
+            wm_class: self.wm_class.clone(),
+            title: self.window_title.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -1826,6 +2101,242 @@ impl ComputerUseLinux {
                 focus.focused_window.as_ref().map(|window| window.window_id)
             ))
         }
+    }
+
+    fn cache_desktop_size(&self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        if let Ok(mut guard) = self.desktop_size.lock() {
+            *guard = Some((width, height));
+        }
+    }
+
+    /// COORDINATE SPACES: window bounds (list_windows / extension frame rects)
+    /// and the extension monitor layout are in LOGICAL pixels, while click/
+    /// scroll coordinates and screenshot captures are in PHYSICAL capture
+    /// pixels. On fractionally-scaled displays the two differ, so each check
+    /// below only ever compares values from the same space.
+    ///
+    /// Logical monitor rectangles from the GNOME Shell extension, for checks
+    /// against logical window bounds. None when the extension is unavailable.
+    async fn logical_monitor_rects(&self) -> Option<Vec<(i32, i32, i32, i32)>> {
+        let monitors = crate::windowing::backends::gnome::extension_monitor_layout()
+            .await
+            .ok()?;
+        (!monitors.is_empty()).then(|| {
+            monitors
+                .iter()
+                .map(|m| (m.x, m.y, m.width, m.height))
+                .collect()
+        })
+    }
+
+    /// Physical capture-space desktop rectangle (union of monitors as captured
+    /// by the screenshot pipeline), for checks against click coordinates.
+    /// Best-effort; None disables the check.
+    async fn capture_space_rect(&self) -> Option<(i32, i32, i32, i32)> {
+        let cached = self.desktop_size.lock().ok().and_then(|guard| *guard);
+        if let Some((w, h)) = cached {
+            return Some((0, 0, w as i32, h as i32));
+        }
+        // One-time prime: a full-frame capture reveals the desktop size when
+        // no prior capture is available.
+        let raw = capture_screenshot_raw().await.ok()?;
+        self.cache_desktop_size(raw.width, raw.height);
+        (raw.width > 0 && raw.height > 0).then_some((0, 0, raw.width as i32, raw.height as i32))
+    }
+
+    /// Warn when a targeted window pokes outside every monitor: clicks and
+    /// screenshots silently truncate to visible pixels there, which reads as
+    /// "success" while landing nowhere.
+    async fn off_screen_note_for_bounds(
+        &self,
+        bounds: &crate::windowing::WindowBounds,
+    ) -> Option<String> {
+        let (x, y) = bounds.x.zip(bounds.y)?;
+        if bounds.width == 0 || bounds.height == 0 {
+            return None;
+        }
+        // Window bounds are logical pixels: prefer the extension's logical
+        // monitor layout (same space). The physical capture rect is a safe
+        // fallback — on scaled displays it is at least as large as the logical
+        // union, so it can only under-warn, never false-positive.
+        let rects = match self.logical_monitor_rects().await {
+            Some(rects) => rects,
+            None => vec![self.capture_space_rect().await?],
+        };
+        let (w, h) = (bounds.width as i64, bounds.height as i64);
+        let window_area = w * h;
+        let mut visible_area = 0_i64;
+        for (mx, my, mw, mh) in &rects {
+            let ix = (x as i64).max(*mx as i64);
+            let iy = (y as i64).max(*my as i64);
+            let ix2 = (x as i64 + w).min(*mx as i64 + *mw as i64);
+            let iy2 = (y as i64 + h).min(*my as i64 + *mh as i64);
+            if ix2 > ix && iy2 > iy {
+                // Overlapping monitors are rare; treating them as additive keeps
+                // this a cheap best-effort heuristic.
+                visible_area += (ix2 - ix) * (iy2 - iy);
+            }
+        }
+        let visible_pct = (visible_area.min(window_area) * 100) / window_area.max(1);
+        if visible_pct >= 100 {
+            return None;
+        }
+        Some(format!(
+            "WARNING: the target window (bounds {x},{y} {w}x{h}) is only ~{visible_pct}% on-screen; off-screen regions are missing from screenshots and unreachable by coordinate input. Use move_window/resize_window to bring it fully on-screen."
+        ))
+    }
+
+    /// Warn when a click/scroll coordinate is outside the captured desktop.
+    /// Click coordinates are physical capture-space pixels, so compare ONLY
+    /// against the capture rect — the extension's logical layout is a
+    /// different space on scaled displays and would false-positive.
+    async fn off_screen_note_for_point(&self, x: i32, y: i32) -> Option<String> {
+        let (mx, my, mw, mh) = self.capture_space_rect().await?;
+        let visible = x >= mx && y >= my && x < mx.saturating_add(mw) && y < my.saturating_add(mh);
+        if visible {
+            return None;
+        }
+        Some(format!(
+            "WARNING: coordinate {x},{y} is outside the captured desktop ({mw}x{mh}); the input landed on no visible pixel."
+        ))
+    }
+
+    /// Post-input feedback: which AT-SPI element holds keyboard focus in the
+    /// target app, and whether it is editable. Guards against the blind-typing
+    /// trap where verified *window* focus still sends keystrokes nowhere.
+    async fn focused_element_feedback(
+        &self,
+        focus: Option<&WindowFocusResult>,
+        expects_editable: bool,
+    ) -> Option<String> {
+        let focus = focus?;
+        let pid = focus
+            .focused_window
+            .as_ref()
+            .and_then(|window| window.pid)
+            .or(focus.requested_window.pid);
+        match timeout(Duration::from_millis(1500), focused_element_summary(pid)).await {
+            Ok(Ok(Some(element))) => Some(describe_focused_element(&element, expects_editable)),
+            Ok(Ok(None)) => Some(
+                "WARNING: AT-SPI reports no focused element in the target app — the input may have landed nowhere. If this is an Electron app, launch it with --force-renderer-accessibility to expose its UI tree."
+                    .to_string(),
+            ),
+            Ok(Err(error)) => Some(format!(
+                "Focused-element feedback unavailable ({}).",
+                first_line(&format!("{error:#}"))
+            )),
+            Err(_) => Some("Focused-element feedback unavailable (AT-SPI probe timed out).".to_string()),
+        }
+    }
+
+    /// Shared move/resize plumbing: resolve the window target, run the GNOME
+    /// Shell extension operation, then re-query bounds to report the result.
+    async fn window_geometry_op<F, Fut>(
+        &self,
+        received: Option<serde_json::Value>,
+        target: &WindowTarget,
+        op: F,
+    ) -> Json<WindowGeometryOutput>
+    where
+        F: FnOnce(u64) -> Fut,
+        Fut: Future<Output = Result<String>>,
+    {
+        let windows = match list_windows().await {
+            Ok(windows) => windows,
+            Err(error) => {
+                let error = format!("{error:#}");
+                return Json(WindowGeometryOutput {
+                    ok: false,
+                    implemented: true,
+                    backend: crate::windowing::GNOME_SHELL_EXTENSION_BACKEND.to_string(),
+                    window: None,
+                    message: format!("Window listing failed: {error}"),
+                    permissions_hint: window_permission_hint(&error),
+                    received,
+                });
+            }
+        };
+        let window_id = match resolve_window_target(&windows, target) {
+            Ok(window) => window.window_id,
+            Err(error) => {
+                return Json(WindowGeometryOutput {
+                    ok: false,
+                    implemented: true,
+                    backend: crate::windowing::GNOME_SHELL_EXTENSION_BACKEND.to_string(),
+                    window: None,
+                    message: format!("{error:#}"),
+                    permissions_hint: None,
+                    received,
+                });
+            }
+        };
+        match op(window_id).await {
+            Ok(message) => {
+                // Re-query so the caller sees the compositor-final geometry
+                // (tiling constraints, minimum sizes, etc. may adjust it).
+                let window = list_windows().await.ok().and_then(|windows| {
+                    windows
+                        .into_iter()
+                        .find(|window| window.window_id == window_id)
+                });
+                let mut message = message;
+                if let Some(bounds) = window.as_ref().and_then(|window| window.bounds.as_ref()) {
+                    if let Some(note) = self.off_screen_note_for_bounds(bounds).await {
+                        message = format!("{message} {note}");
+                    }
+                }
+                Json(WindowGeometryOutput {
+                    ok: true,
+                    implemented: true,
+                    backend: crate::windowing::GNOME_SHELL_EXTENSION_BACKEND.to_string(),
+                    window,
+                    message,
+                    permissions_hint: None,
+                    received,
+                })
+            }
+            Err(error) => {
+                let error = format!("{error:#}");
+                Json(WindowGeometryOutput {
+                    ok: false,
+                    implemented: true,
+                    backend: crate::windowing::GNOME_SHELL_EXTENSION_BACKEND.to_string(),
+                    window: None,
+                    permissions_hint: window_permission_hint(&error),
+                    message: error,
+                    received,
+                })
+            }
+        }
+    }
+
+    /// Notes appended after targeted keyboard input: off-screen window warning
+    /// plus focused-element feedback.
+    async fn input_landing_notes(
+        &self,
+        focus: Option<&WindowFocusResult>,
+        expects_editable: bool,
+    ) -> Vec<String> {
+        let mut notes = Vec::new();
+        if let Some(focus) = focus {
+            let bounds = focus
+                .focused_window
+                .as_ref()
+                .and_then(|window| window.bounds.as_ref())
+                .or(focus.requested_window.bounds.as_ref());
+            if let Some(bounds) = bounds {
+                if let Some(note) = self.off_screen_note_for_bounds(bounds).await {
+                    notes.push(note);
+                }
+            }
+        }
+        if let Some(note) = self.focused_element_feedback(focus, expects_editable).await {
+            notes.push(note);
+        }
+        notes
     }
 
     fn cache_nodes(&self, nodes: &[AccessibilityNode]) {
@@ -2501,6 +3012,73 @@ fn apply_window_relative_click_coordinates(
     Ok(())
 }
 
+/// Point a window-targeted scroll at the centre of the resolved window when
+/// the caller supplied no coordinates. Without this the wheel events land on
+/// whatever is under the current pointer position.
+fn apply_window_center_scroll_point(
+    params: &mut ScrollParams,
+    focus: &WindowFocusResult,
+) -> std::result::Result<(), String> {
+    let bounds = focus
+        .focused_window
+        .as_ref()
+        .and_then(|window| window.bounds.as_ref())
+        .or(focus.requested_window.bounds.as_ref())
+        .ok_or_else(|| {
+            "Window-targeted scroll requires resolved target-window bounds; pass x/y explicitly."
+                .to_string()
+        })?;
+    if bounds.width == 0 || bounds.height == 0 {
+        return Err(
+            "Window-targeted scroll requires non-empty target-window bounds; pass x/y explicitly."
+                .to_string(),
+        );
+    }
+    let (origin_x, origin_y) = bounds.x.zip(bounds.y).ok_or_else(|| {
+        "Window-targeted scroll requires target-window bounds with an origin; pass x/y explicitly."
+            .to_string()
+    })?;
+    params.x = Some(origin_x.saturating_add((bounds.width / 2) as i32));
+    params.y = Some(origin_y.saturating_add((bounds.height / 2) as i32));
+    Ok(())
+}
+
+fn apply_window_relative_scroll_coordinates(
+    params: &mut ScrollParams,
+    focus: &WindowFocusResult,
+) -> std::result::Result<(), String> {
+    let (relative_x, relative_y) = params
+        .x
+        .zip(params.y)
+        .ok_or_else(|| "Relative scroll coordinates require both x and y.".to_string())?;
+    let bounds = focus
+        .focused_window
+        .as_ref()
+        .and_then(|window| window.bounds.as_ref())
+        .or(focus.requested_window.bounds.as_ref())
+        .ok_or_else(|| {
+            "Relative scroll coordinates require resolved target-window bounds.".to_string()
+        })?;
+    if bounds.width == 0 || bounds.height == 0 {
+        return Err(
+            "Relative scroll coordinates require non-empty target-window bounds.".to_string(),
+        );
+    }
+    if relative_x < 0
+        || relative_y < 0
+        || relative_x as u32 >= bounds.width
+        || relative_y as u32 >= bounds.height
+    {
+        return Err("Relative scroll coordinates must be inside target-window bounds.".to_string());
+    }
+    let (origin_x, origin_y) = bounds.x.zip(bounds.y).ok_or_else(|| {
+        "Relative scroll coordinates require target-window bounds with an origin.".to_string()
+    })?;
+    params.x = Some(origin_x.saturating_add(relative_x));
+    params.y = Some(origin_y.saturating_add(relative_y));
+    Ok(())
+}
+
 /// Crop a PNG image to `(x, y, w, h)` (clamped to the image), returning the
 /// re-encoded PNG and the actual cropped dimensions.
 fn crop_png(
@@ -2591,6 +3169,38 @@ fn with_focus_context(mut output: ActionOutput, focus: Option<WindowFocusResult>
                 output.message, focus.requested_window.window_id,
             );
         }
+    }
+    output
+}
+
+fn describe_focused_element(element: &FocusedElementSummary, expects_editable: bool) -> String {
+    let name = element
+        .name
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .map(|name| format!(" \"{name}\""))
+        .unwrap_or_default();
+    if element.editable {
+        format!("Focused element: {}{name} (editable).", element.role)
+    } else if expects_editable {
+        format!(
+            "WARNING: focused element is {}{name}, which is not editable — the typed text likely went nowhere. Click the intended input first or use set_value.",
+            element.role
+        )
+    } else {
+        format!("Focused element: {}{name} (not editable).", element.role)
+    }
+}
+
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or(text)
+}
+
+/// Append supplemental notes (off-screen or focused-element feedback) to an
+/// action result message without changing ok/implemented semantics.
+fn with_notes(mut output: ActionOutput, notes: impl IntoIterator<Item = String>) -> ActionOutput {
+    for note in notes {
+        output.message = format!("{} {note}", output.message);
     }
     output
 }
@@ -4205,5 +4815,178 @@ mod tests {
             .unwrap();
 
         assert!(matches!(target, ClickTarget::Coordinates(60, 40)));
+    }
+
+    #[test]
+    fn describe_focused_element_editable() {
+        let element = FocusedElementSummary {
+            role: "text".to_string(),
+            name: Some("Message".to_string()),
+            editable: true,
+            states: vec!["focused".to_string()],
+        };
+        let described = describe_focused_element(&element, true);
+        assert!(described.contains("editable"));
+        assert!(!described.contains("WARNING"));
+    }
+
+    #[test]
+    fn describe_focused_element_warns_on_non_editable_when_typing() {
+        let element = FocusedElementSummary {
+            role: "push button".to_string(),
+            name: Some("OK".to_string()),
+            editable: false,
+            states: vec!["focused".to_string()],
+        };
+        let described = describe_focused_element(&element, true);
+        assert!(described.contains("WARNING"));
+        assert!(described.contains("not editable"));
+    }
+
+    #[test]
+    fn describe_focused_element_no_warning_for_press_key() {
+        let element = FocusedElementSummary {
+            role: "push button".to_string(),
+            name: None,
+            editable: false,
+            states: vec![],
+        };
+        let described = describe_focused_element(&element, false);
+        assert!(!described.contains("WARNING"));
+    }
+
+    #[test]
+    fn relative_scroll_translates_coordinates() {
+        let mut params = ScrollParams {
+            element_index: None,
+            x: Some(10),
+            y: Some(20),
+            direction: "down".to_string(),
+            pages: None,
+            window_id: Some(1),
+            pid: None,
+            app_id: None,
+            wm_class: None,
+            window_title: None,
+            relative: Some(true),
+        };
+        let focus = WindowFocusResult {
+            requested_window: window_with_bounds(1, 100, 200, 800, 600),
+            focused_window: None,
+            app_focused: true,
+            exact_window_focused: true,
+            backend: "test".to_string(),
+            note: String::new(),
+        };
+        apply_window_relative_scroll_coordinates(&mut params, &focus).unwrap();
+        assert_eq!(params.x, Some(110));
+        assert_eq!(params.y, Some(220));
+    }
+
+    #[test]
+    fn window_targeted_scroll_defaults_to_window_center() {
+        let mut params = ScrollParams {
+            element_index: None,
+            x: None,
+            y: None,
+            direction: "down".to_string(),
+            pages: None,
+            window_id: Some(1),
+            pid: None,
+            app_id: None,
+            wm_class: None,
+            window_title: None,
+            relative: None,
+        };
+        let focus = WindowFocusResult {
+            requested_window: window_with_bounds(1, 100, 200, 800, 600),
+            focused_window: None,
+            app_focused: true,
+            exact_window_focused: true,
+            backend: "test".to_string(),
+            note: String::new(),
+        };
+        apply_window_center_scroll_point(&mut params, &focus).unwrap();
+        assert_eq!(params.x, Some(500));
+        assert_eq!(params.y, Some(500));
+    }
+
+    #[test]
+    fn window_targeted_scroll_without_bounds_errors() {
+        let mut params = ScrollParams {
+            element_index: None,
+            x: None,
+            y: None,
+            direction: "down".to_string(),
+            pages: None,
+            window_id: Some(1),
+            pid: None,
+            app_id: None,
+            wm_class: None,
+            window_title: None,
+            relative: None,
+        };
+        let mut window = window_with_bounds(1, 0, 0, 1, 1);
+        window.bounds = None;
+        let focus = WindowFocusResult {
+            requested_window: window,
+            focused_window: None,
+            app_focused: true,
+            exact_window_focused: true,
+            backend: "test".to_string(),
+            note: String::new(),
+        };
+        let error = apply_window_center_scroll_point(&mut params, &focus).unwrap_err();
+        assert!(error.contains("pass x/y explicitly"));
+        assert_eq!(params.x, None);
+        assert_eq!(params.y, None);
+    }
+
+    #[test]
+    fn relative_scroll_rejects_out_of_bounds() {
+        let mut params = ScrollParams {
+            element_index: None,
+            x: Some(801),
+            y: Some(20),
+            direction: "down".to_string(),
+            pages: None,
+            window_id: Some(1),
+            pid: None,
+            app_id: None,
+            wm_class: None,
+            window_title: None,
+            relative: Some(true),
+        };
+        let focus = WindowFocusResult {
+            requested_window: window_with_bounds(1, 100, 200, 800, 600),
+            focused_window: None,
+            app_focused: true,
+            exact_window_focused: true,
+            backend: "test".to_string(),
+            note: String::new(),
+        };
+        assert!(apply_window_relative_scroll_coordinates(&mut params, &focus).is_err());
+    }
+
+    fn window_with_bounds(id: u64, x: i32, y: i32, width: u32, height: u32) -> WindowInfo {
+        WindowInfo {
+            window_id: id,
+            title: None,
+            app_id: None,
+            wm_class: None,
+            pid: None,
+            bounds: Some(crate::windowing::WindowBounds {
+                x: Some(x),
+                y: Some(y),
+                width,
+                height,
+            }),
+            workspace: None,
+            focused: true,
+            hidden: false,
+            client_type: None,
+            backend: "test".to_string(),
+            terminal: None,
+        }
     }
 }

@@ -2,7 +2,8 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { linuxSettingsKeys, requireName } = require("../../scripts/patches/shared.js");
+const { linuxSettingsKeys } = require("../../scripts/patches/lib/settings-keys.js");
+const { requireName } = require("../../scripts/patches/lib/minified-js.js");
 
 const HANDLER_NAME = "codex-linux-wrapper-updater";
 const RUNTIME_VERSION = "codex-wrapper-updater-v3";
@@ -210,6 +211,10 @@ function applyWrapperUpdateGeneralSettingsPatch(source) {
 function patchWrapperUpdateSettingsAssets(extractedDir) {
   try {
     const assetsDir = path.join(extractedDir, "webview", "assets");
+    if (!fs.existsSync(assetsDir)) {
+      return { matched: false, changed: 0, reason: `missing webview assets directory ${assetsDir}` };
+    }
+
     for (const settingsAsset of [LINUX_DESKTOP_SETTINGS_ASSET, KEYBINDS_ASSET]) {
       const settingsPath = path.join(assetsDir, settingsAsset);
       if (!fs.existsSync(settingsPath)) {
@@ -245,6 +250,20 @@ function patchWrapperUpdateSettingsAssets(extractedDir) {
       } catch (error) {
         lastError = error instanceof Error ? error.message : String(error);
       }
+    }
+
+    if (
+      lastError != null &&
+      (
+        lastError.includes("could not find general power settings function") ||
+        lastError.includes("could not find general power settings row")
+      )
+    ) {
+      return {
+        matched: true,
+        changed: 0,
+        reason: "upstream settings shape does not expose the legacy wrapper update toggle extension point",
+      };
     }
 
     return { matched: false, changed: 0, reason: lastError ?? "could not patch general settings asset" };
@@ -285,7 +304,7 @@ module.exports = {
     },
     {
       id: "settings-toggle",
-      phase: "extracted-app",
+      phase: "extracted-app:post-webview",
       order: 20_922,
       ciPolicy: "optional",
       apply: (extractedDir) => patchWrapperUpdateSettingsAssets(extractedDir),

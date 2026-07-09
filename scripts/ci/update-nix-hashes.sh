@@ -18,6 +18,12 @@ PACKAGE_OUTPUTS=(
     ".#installer"
 )
 
+NIX_PIN_DIFF_PATHS=(
+    "flake.nix"
+    "nix/native-modules/package.json"
+    "nix/native-modules/package-lock.json"
+)
+
 validate_sri_hash() {
     local hash="$1"
     [[ "$hash" =~ ^sha256-[A-Za-z0-9+/=]{44}$ ]]
@@ -140,6 +146,10 @@ run_nix_build() {
     return "$status"
 }
 
+nix_pin_files_changed() {
+    ! git -C "$REPO_DIR" diff --quiet -- "${NIX_PIN_DIFF_PATHS[@]}"
+}
+
 main() {
     mkdir -p "$(dirname "$UPSTREAM_DMG_PATH")"
     curl -fL --retry 3 -o "$UPSTREAM_DMG_PATH" "$UPSTREAM_DMG_URL"
@@ -190,6 +200,11 @@ main() {
     echo "Current Codex.dmg hash:  $current_dmg_hash"
     echo "Upstream Codex.dmg hash: $new_dmg_hash"
     replace_flake_hash "codexDmg = pkgs.fetchurl {" "hash = " "$new_dmg_hash"
+
+    if ! nix_pin_files_changed; then
+        echo "Nix pins unchanged; skipping package-output verification."
+        return 0
+    fi
 
     # Seed the Nix store so the verification build can reuse the DMG that was
     # already downloaded for hashing instead of fetching the same artifact again.

@@ -8,13 +8,14 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   enabledLinuxFeatureIds,
-  loadLinuxFeatureMainBundlePatches,
   loadLinuxFeaturePatchDescriptors,
 } = require("../../scripts/lib/linux-features.js");
 const {
   createPatchReport,
+} = require("../../scripts/lib/patch-report.js");
+const {
   patchExtractedApp,
-} = require("../../scripts/patch-linux-window-ui.js");
+} = require("../../scripts/patches/runner.js");
 const {
   applyAssistantRenderPatch,
   applyComposerControlPatch,
@@ -22,7 +23,7 @@ const {
   applyComposerRuntimePatch,
   applyDictationEndpointPatch,
   applyReadAloudMainBundlePatch,
-  patches: featurePatches,
+  descriptors: featurePatches,
 } = require("./patch.js");
 
 function twice(fn, source) {
@@ -121,6 +122,14 @@ const conversationGlobals = [
   "codexLinuxConversationToggleMute",
   "codexLinuxConversationVersion",
 ];
+
+test("dictation endpoint descriptor tracks moved upstream composer bundle", () => {
+  const descriptor = featurePatches.find((patch) => patch.id === "dictation-endpoint");
+  assert.ok(descriptor);
+  assert.equal(descriptor.pattern.test("app-initial~app-main~onboarding-page-BUwCKIcU.js"), true);
+  assert.equal(descriptor.pattern.test("use-dictation-BUwCKIcU.js"), true);
+  assert.equal(descriptor.pattern.test("use-dictation-hotkey-BUwCKIcU.js"), false);
+});
 
 function fetchBodies(events) {
   return events.map((event) => JSON.parse(event.body));
@@ -357,10 +366,50 @@ function createFakeDocument() {
   };
 }
 
+function createAudioStream() {
+  return {
+    getTracks() {
+      return [];
+    },
+  };
+}
+
+function createCountingAudioContext({ level = () => 0 } = {}) {
+  const stats = {
+    fftSizes: [],
+    sampleCalls: 0,
+  };
+  class FakeAudioContext {
+    createMediaStreamSource() {
+      return {
+        connect() {},
+        disconnect() {},
+      };
+    }
+    createAnalyser() {
+      return {
+        _fftSize: 0,
+        set fftSize(value) {
+          stats.fftSizes.push(value);
+          this._fftSize = value;
+        },
+        get fftSize() {
+          return this._fftSize;
+        },
+        getFloatTimeDomainData(data) {
+          stats.sampleCalls++;
+          data.fill(level());
+        },
+      };
+    }
+    close() {}
+  }
+  return { AudioContext: FakeAudioContext, stats };
+}
+
 test("conversation mode stays disabled until listed in features.json", () => {
   withTempFeatureConfig([], (root) => {
     assert.deepEqual(enabledLinuxFeatureIds({ featuresRoot: root }), []);
-    assert.deepEqual(loadLinuxFeatureMainBundlePatches({ featuresRoot: root }), []);
     assert.deepEqual(loadLinuxFeaturePatchDescriptors({ featuresRoot: root }), []);
   });
 });
@@ -403,7 +452,7 @@ test("main bundle patch upgrades older conversation speech gates", () => {
 
 test("composer runtime appends one browser-side conversation controller", () => {
   const patched = twice(applyComposerRuntimePatch, "console.log(`composer`);");
-  assert.match(patched, /conversation-mode-v19/);
+  assert.match(patched, /conversation-mode-v20/);
   assert.match(patched, /activeConversationId/);
   assert.match(patched, /seenAssistantKeys/);
   assert.match(patched, /assistantKey/);
@@ -452,6 +501,7 @@ test("composer runtime appends one browser-side conversation controller", () => 
   assert.match(patched, /codex-linux-conversation-interrupt-threshold/);
   assert.match(patched, /interruptMs:420/);
   assert.match(patched, /interruptGraceMs:180/);
+  assert.match(patched, /audioPollMs:32/);
   assert.match(patched, /echoCancellation:!0/);
   assert.match(patched, /resetTranscriptState/);
   assert.match(patched, /stopTracks/);
@@ -1689,6 +1739,177 @@ test("conversation endpoint fails closed when the audio graph cannot start", () 
   }, { AudioContext: BrokenAudioContext });
 });
 
+test("conversation endpoint paces microphone analysis below display frame rate", () => {
+  const stream = createAudioStream();
+  const { AudioContext, stats } = createCountingAudioContext({ level: () => 0.05 });
+
+  withConversationRuntime(({ animationFrames, timers }) => {
+    assert.equal(
+      globalThis.codexLinuxConversationToggle({
+        conversationId: "thread-a",
+        isResponseInProgress: false,
+        startDictation() {},
+        stopDictation() {},
+        onStop() {},
+      }),
+      true,
+    );
+
+    const cleanup = globalThis.codexLinuxConversationEndpoint({
+      stream,
+      stop() {
+        throw new Error("stop should not be called before the silence window");
+      },
+      isActive() {
+        return true;
+      },
+    });
+
+    assert.equal(stats.fftSizes.at(-1), 512);
+    assert.equal(animationFrames.length, 0);
+    runTimer(timers, (timer) => timer.delay === 32, "first endpoint audio poll");
+    assert.equal(stats.sampleCalls, 1);
+    runTimer(timers, (timer) => timer.delay === 32, "second endpoint audio poll");
+    assert.equal(stats.sampleCalls, 2);
+
+    cleanup();
+    assert.equal(timers.filter((timer) => timer.delay === 32 && !timer.cleared).length, 0);
+  }, { AudioContext, performance: { now: () => 320 } });
+});
+
+test("conversation interrupt monitor paces microphone analysis below display frame rate", () => {
+  let now = 0;
+  let getUserMediaCalls = 0;
+  const stream = createAudioStream();
+  const { AudioContext, stats } = createCountingAudioContext({ level: () => 0.05 });
+  const navigator = {
+    userAgent: "Codex Desktop Linux",
+    mediaDevices: {
+      getUserMedia() {
+        getUserMediaCalls++;
+        return {
+          then(resolve) {
+            resolve(stream);
+            return {
+              catch() {},
+            };
+          },
+        };
+      },
+    },
+  };
+
+  withConversationRuntime(({ animationFrames, timers }) => {
+    const controls = {
+      conversationId: "thread-a",
+      isResponseInProgress: false,
+      startDictation() {},
+      stopDictation() {},
+      onStop() {},
+    };
+
+    assert.equal(globalThis.codexLinuxConversationToggle(controls), true);
+    assert.equal(globalThis.codexLinuxConversationShouldSendTranscript("Start a monitor-protected response.", "send"), true);
+    assert.equal(globalThis.codexLinuxConversationSync("thread-a", { ...controls, isResponseInProgress: true }), true);
+    assert.equal(getUserMediaCalls, 1);
+    assert.equal(stats.fftSizes.at(-1), 512);
+    assert.equal(animationFrames.length, 0);
+
+    runTimer(timers, (timer) => timer.delay === 32, "first monitor audio poll");
+    assert.equal(stats.sampleCalls, 1);
+  }, { AudioContext, navigator, performance: { now: () => (now += 320) } });
+});
+
+test("conversation endpoint still stops dictation after paced silence", () => {
+  let now = 0;
+  let level = 0.05;
+  let stopCalls = 0;
+  const stream = createAudioStream();
+  const { AudioContext } = createCountingAudioContext({ level: () => level });
+
+  withConversationRuntime(({ timers }) => {
+    assert.equal(
+      globalThis.codexLinuxConversationToggle({
+        conversationId: "thread-a",
+        isResponseInProgress: false,
+        startDictation() {},
+        stopDictation() {},
+        onStop() {},
+      }),
+      true,
+    );
+
+    globalThis.codexLinuxConversationEndpoint({
+      stream,
+      stop() {
+        stopCalls++;
+      },
+      isActive() {
+        return true;
+      },
+    });
+
+    now = 32;
+    runTimer(timers, (timer) => timer.delay === 32, "initial voiced endpoint poll");
+    now = 288;
+    runTimer(timers, (timer) => timer.delay === 32, "speech confirmation endpoint poll");
+    assert.equal(stopCalls, 0);
+
+    level = 0;
+    now = 2100;
+    runTimer(timers, (timer) => timer.delay === 32, "silence endpoint poll");
+    assert.equal(stopCalls, 1);
+    assert.equal(timers.filter((timer) => timer.delay === 32 && !timer.cleared).length, 0);
+  }, { AudioContext, performance: { now: () => now } });
+});
+
+test("conversation interrupt monitor still triggers after sustained paced speech", () => {
+  let now = 0;
+  let onStopCalls = 0;
+  const stream = createAudioStream();
+  const { AudioContext, stats } = createCountingAudioContext({ level: () => 0.06 });
+  const navigator = {
+    userAgent: "Codex Desktop Linux",
+    mediaDevices: {
+      getUserMedia() {
+        return {
+          then(resolve) {
+            resolve(stream);
+            return {
+              catch() {},
+            };
+          },
+        };
+      },
+    },
+  };
+
+  withConversationRuntime(({ timers }) => {
+    const controls = {
+      conversationId: "thread-a",
+      isResponseInProgress: false,
+      startDictation() {},
+      stopDictation() {},
+      onStop() {
+        onStopCalls++;
+      },
+    };
+
+    assert.equal(globalThis.codexLinuxConversationToggle(controls), true);
+    assert.equal(globalThis.codexLinuxConversationShouldSendTranscript("Start a monitor-protected response.", "send"), true);
+    assert.equal(globalThis.codexLinuxConversationSync("thread-a", { ...controls, isResponseInProgress: true }), true);
+
+    now = 200;
+    runTimer(timers, (timer) => timer.delay === 32, "initial monitor speech poll");
+    now = 650;
+    runTimer(timers, (timer) => timer.delay === 32, "sustained monitor speech poll");
+
+    assert.equal(stats.sampleCalls, 2);
+    assert.equal(onStopCalls, 1);
+    assert.equal(timers.filter((timer) => timer.delay === 32 && !timer.cleared).length, 0);
+  }, { AudioContext, navigator, performance: { now: () => now } });
+});
+
 test("dictation endpoint patch adds VAD stop-on-silence and send action", () => {
   const patched = twice(applyDictationEndpointPatch, dictationSource);
   assert.match(patched, /echoCancellation:!0/);
@@ -1836,7 +2057,7 @@ test("conversation mode patches matching app assets and records report entries",
         fs.writeFileSync(path.join(tempApp, "package.json"), JSON.stringify({ name: "codex" }));
         fs.writeFileSync(path.join(assetsDir, "browser-sidebar-comment-light-dismiss-test.js"), dictationSource);
         fs.writeFileSync(path.join(assetsDir, "composer-test.js"), composerControlSource);
-        fs.writeFileSync(path.join(assetsDir, "local-conversation-thread-test.js"), assistantRenderSource);
+        fs.writeFileSync(path.join(assetsDir, "local-conversation-turn-test.js"), assistantRenderSource);
 
         const report = createPatchReport();
         const { warnings } = captureWarns(() => patchExtractedApp(tempApp, { report }));
@@ -1857,7 +2078,7 @@ test("conversation mode patches matching app assets and records report entries",
           /codexLinuxConversationToggle/,
         );
         assert.match(
-          fs.readFileSync(path.join(assetsDir, "local-conversation-thread-test.js"), "utf8"),
+          fs.readFileSync(path.join(assetsDir, "local-conversation-turn-test.js"), "utf8"),
           /codexLinuxConversationAssistant/,
         );
         for (const name of [

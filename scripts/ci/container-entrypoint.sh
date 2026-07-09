@@ -244,20 +244,14 @@ run_core_job() {
     cargo check --workspace --all-targets
     cargo test --workspace --all-targets
 
-    node --check scripts/patch-linux-window-ui.js
-    node --check scripts/patch-linux-window-ui.test.js
-    for file in scripts/patches/*.js; do
-        node --check "$file"
-    done
-    node --check scripts/ci/validate-patch-report.js
-    node --test scripts/patch-linux-window-ui.test.js
+    bash scripts/ci/run-node-checks.sh
 
     bash tests/scripts_smoke.sh
 
     append_summary "Rust and Smoke Tests" \
         "Shell syntax checks passed." \
         "Rust formatting, clippy, check, and tests passed." \
-        "Node patcher checks and script smoke tests passed."
+        "Node syntax checks, Node tests, and script smoke tests passed."
 }
 
 run_deb_job() {
