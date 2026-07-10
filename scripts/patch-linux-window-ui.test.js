@@ -2191,6 +2191,16 @@ test("adds the Linux quit guard for the current interleaved bundler prelude", ()
   assert.equal((patched.match(/codexLinuxQuitInProgress=!1/g) ?? []).length, 1);
 });
 
+test("adds the Linux quit guard when Electron follows another prelude import", () => {
+  const source =
+    "let s=require(`node:url`),c=require(`electron`);c=e.o(c);let l=require(`node:os`);l=e.o(l);let u=require(`node:path`);u=e.o(u);let d=require(`node:util`),f=require(`node:crypto`),p=require(`node:fs`);p=e.o(p);";
+
+  const patched = applyPatchTwice(applyLinuxQuitGuardPatch, source);
+
+  assert.match(patched, /p=e\.o\(p\);let codexLinuxQuitInProgress=!1/);
+  assert.equal((patched.match(/codexLinuxQuitInProgress=!1/g) ?? []).length, 1);
+});
+
 test("bypasses the upstream before-quit confirmation after a Linux explicit quit", () => {
   const source = `${mainBundlePrefix}${beforeQuitConfirmationBundleFixture()}`;
   const patched = applyPatchTwice(
@@ -2408,6 +2418,27 @@ test("redirects the renamed Linux-aware titlebar overlay sync away from the tran
   );
   assert.doesNotMatch(patched, /setTitleBarOverlay\(b2\(/);
   assert.deepEqual(warnings, []);
+});
+
+test("separates the latest shared primary and quick-chat Linux titlebar branch", () => {
+  const source = [
+    "function I9(e){return e===`avatarOverlay`}",
+    "function L9({platform:e,appearance:t,opaqueWindowSurfaceEnabled:n,prefersDarkColors:r}){return n?{backgroundColor:r?hne:gne,backgroundMaterial:e===`win32`?`none`:null}:e===`linux`&&!I9(t)?{backgroundColor:r?hne:gne,backgroundMaterial:null}:e===`win32`&&!I9(t)?{backgroundColor:k9,backgroundMaterial:`mica`}:{backgroundColor:k9,backgroundMaterial:null}}",
+    "function j9(e=1){return{color:k9,symbolColor:c.nativeTheme.shouldUseDarkColors?One:Dne,height:Math.round(Ene*e)}}",
+    "function z9({appearance:e,opaqueWindowSurfaceEnabled:t,platform:n,windowZoom:r=1}){switch(e){case`quickChat`:case`primary`:return n===`darwin`?{titleBarStyle:`hiddenInset`,...e===`quickChat`?{resizable:!0}:{}}:n===`win32`||n===`linux`?{titleBarStyle:`hidden`,titleBarOverlay:j9(r),...e===`quickChat`?{resizable:!0}:{}}:{titleBarStyle:`default`,...e===`quickChat`?{resizable:!0}:{}}}}",
+    "installApplicationMenuTitleBarOverlaySync(e,t){if(process.platform!==`win32`&&process.platform!==`linux`||t!==`primary`&&t!==`quickChat`)return;let n=()=>{e.isDestroyed()||e.setTitleBarOverlay(j9(this.windowZooms.get(e.id)))};return c.nativeTheme.on(`updated`,n),n(),()=>{c.nativeTheme.off(`updated`,n)}}",
+    "(process.platform===`win32`||process.platform===`linux`)&&(this.windowZooms.set(n.id,t),n.setTitleBarOverlay(j9(t)))",
+  ].join("");
+
+  const { value: patched, warnings } = captureWarns(() =>
+    applyPatchTwice(applyLinuxNativeTitlebarPatch, source),
+  );
+
+  assert.deepEqual(warnings, []);
+  assert.match(patched, /n===`win32`\?\{titleBarStyle:`hidden`,titleBarOverlay:j9\(r\),/);
+  assert.match(patched, /n===`linux`\?\{titleBarStyle:`hidden`,titleBarOverlay:codexLinuxTitleBarOverlay\(r\),/);
+  assert.match(patched, /t!==`primary`&&t!==`quickChat`/);
+  assert.equal((patched.match(/function codexLinuxTitleBarOverlay/g) ?? []).length, 1);
 });
 
 
@@ -3212,6 +3243,23 @@ test("forces Linux primary BrowserWindow to be focusable for current boolean min
   assert.doesNotMatch(patched, /focusable:!1,webPreferences:k/);
 });
 
+test("forces the latest undefined focusable spread on for Linux primary windows", () => {
+  const iconAsset = "app-test.png";
+  const source = [
+    "async createWindow(e={}){let{appearance:o=`primary`,focusable:m}=e,D={},",
+    "M=new c.BrowserWindow({show:s,...m===void 0?{}:{focusable:m},",
+    "...process.platform===`win32`||process.platform===`linux`?{autoHideMenuBar:!0}:{},",
+    "backgroundMaterial:j??void 0,...D,minWidth:T?.width,minHeight:T?.height,webPreferences:k});}",
+  ].join("");
+
+  const patched = applyPatchTwice(applyLinuxWindowOptionsPatch, source, iconAsset);
+
+  assert.match(
+    patched,
+    /\.\.\.process\.platform===`linux`&&o===`primary`\?\{focusable:!0\}:m==null\?\{\}:\{focusable:m\}/,
+  );
+});
+
 test("keeps focusable destructuring valid while patching current boolean minified shape", () => {
   const source = [
     "async createWindow(e={}){let{title:n,width:i=1280,height:o=820,appearance:c=`primary`,",
@@ -3377,6 +3425,22 @@ test("adds Linux tray icon fallback when current upstream uses small file icon f
   assert.deepEqual(warnings, []);
   assert.match(patched, /__codexLinuxTrayIcon=n\.nativeImage\.createFromPath/);
   assert.match(patched, /n\.app\.getFileIcon\(process\.execPath,\{size:`small`\}\)/);
+});
+
+test("adds Linux tray icons before the latest split icon resolver fallback", () => {
+  const iconPathExpression = "process.resourcesPath+`/../content/webview/assets/app-test.png`";
+  const source =
+    "let c=require(`electron`);async function are(e,t,n){if(process.platform===`darwin`){return{defaultIcon:null,chronicleRunningIcon:null}}let r=K9(e,t,n);return r==null?{defaultIcon:await c.app.getFileIcon(process.execPath,{size:`small`}),chronicleRunningIcon:null}:{defaultIcon:r,chronicleRunningIcon:null}}";
+
+  const { value: patched, warnings } = captureWarns(() =>
+    applyPatchTwice(applyLinuxTrayPatch, source, iconPathExpression),
+  );
+
+  assert.equal(warnings.some((warning) => warning.includes("tray icon fallback")), false);
+  assert.match(patched, /__codexLinuxTrayIcon=c\.nativeImage\.createFromPath/);
+  assert.match(patched, /__codexLinuxAppIcon=c\.nativeImage\.createFromPath/);
+  assert.match(patched, /__codexLinuxUpstreamTrayIcon=c\.nativeImage\.createFromPath/);
+  assert.equal((patched.match(/__codexLinuxTrayIcon=/g) ?? []).length, 1);
 });
 
 test("adds Linux tray support even when About dialog already uses the bundled icon path", () => {
