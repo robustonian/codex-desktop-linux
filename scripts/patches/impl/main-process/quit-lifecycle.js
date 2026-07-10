@@ -25,7 +25,7 @@ function applyLinuxQuitGuardPatch(currentSource) {
   }
 
   const currentBundlerQuitGuardNeedle =
-    /let ([A-Za-z_$][\w$]*)=(?:codexLinuxPatchExternalOpen\()?require\(`electron`\)(?:\))?;(?:\1=[^;]+;)?[\s\S]{0,500}?(?:let|,)\s*([A-Za-z_$][\w$]*)=require\(`node:path`\);(?:\2=[^;]+;)?[\s\S]{0,500}?(?:let|,)\s*([A-Za-z_$][\w$]*)=require\(`node:fs`\);(?:\3=[^;]+;)?/;
+    /(?:let|,)\s*([A-Za-z_$][\w$]*)=(?:codexLinuxPatchExternalOpen\()?require\(`electron`\)(?:\))?;(?:\1=[^;]+;)?[\s\S]{0,500}?(?:let|,)\s*([A-Za-z_$][\w$]*)=require\(`node:path`\);(?:\2=[^;]+;)?[\s\S]{0,500}?(?:let|,)\s*([A-Za-z_$][\w$]*)=require\(`node:fs`\);(?:\3=[^;]+;)?/;
   const currentBundlerQuitGuardMatch = patchedSource.match(currentBundlerQuitGuardNeedle);
   if (currentBundlerQuitGuardMatch != null) {
     const matchedPrefix = currentBundlerQuitGuardMatch[0];
