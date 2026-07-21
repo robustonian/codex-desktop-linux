@@ -918,6 +918,8 @@ function applyLinuxRemoteControlProfileAvailabilityPatch(currentSource) {
     /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\),([A-Za-z_$][\w$]*)=!([A-Za-z_$][\w$]*)(?=,[\s\S]*?showRemoteControlConnectionsSection:\1)/u;
   const mobileSidebarGateRegex =
     /function ([A-Za-z_$][\w$]*)\(\{enabled:([A-Za-z_$][\w$]*),hasCompletedCodexMobileSetup:([A-Za-z_$][\w$]*),isChatGptAuth:([A-Za-z_$][\w$]*),remoteControlFeaturesVisible:([A-Za-z_$][\w$]*),remoteControlOnboardingEnabled:([A-Za-z_$][\w$]*)\}\)\{return \2&&\4&&\5&&\6&&!\3\}/u;
+  const mobileHelpMenuGateRegex =
+    /(\{authMethod:([A-Za-z_$][\w$]*)\}=([A-Za-z_$][\w$]*)\(\),([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\),([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(`410065390`\),\{data:([A-Za-z_$][\w$]*),isLoading:([A-Za-z_$][\w$]*)\}=([A-Za-z_$][\w$]*)\([A-Za-z_$][\w$]*\.CODEX_MOBILE_SETUP_COMPLETED\),([A-Za-z_$][\w$]*)=)\2===`chatgpt`&&\4&&!\9&&\8===!1/u;
   const buildReplacement = (functionName, stateVar, slingshotVar) =>
     `function ${functionName}({remoteControlConnectionsState:${stateVar},slingshotEnabled:${slingshotVar}}){let ${marker}=typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`);return ${marker}||${slingshotVar}&&(${stateVar}?.available??!0)&&${stateVar}?.accessRequired!==!0}`;
   const buildMobileSidebarReplacement = (
@@ -929,76 +931,102 @@ function applyLinuxRemoteControlProfileAvailabilityPatch(currentSource) {
     onboardingEnabledVar,
   ) =>
     `function ${functionName}({enabled:${enabledVar},hasCompletedCodexMobileSetup:${setupCompleteVar},isChatGptAuth:${chatGptAuthVar},remoteControlFeaturesVisible:${featuresVisibleVar},remoteControlOnboardingEnabled:${onboardingEnabledVar}}){let ${mobileSidebarMarker}=typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`);return !${setupCompleteVar}&&(${mobileSidebarMarker}||${enabledVar}&&${chatGptAuthVar}&&${featuresVisibleVar}&&${onboardingEnabledVar})}`;
+  const mobileHelpMenuHelper =
+    `function ${mobileSidebarMarker}({isChatGptAuth:e,remoteControlFeaturesVisible:t,isLoading:n,hasCompletedCodexMobileSetup:r}){let i=typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`);return !n&&r===!1&&(i||e&&t)}`;
+  let patchedSource = currentSource;
 
-  if (commentedSettingsHelperRegex.test(currentSource)) {
-    return currentSource.replace(commentedSettingsHelperRegex, "$1\n$2");
+  if (commentedSettingsHelperRegex.test(patchedSource)) {
+    patchedSource = patchedSource.replace(commentedSettingsHelperRegex, "$1\n$2");
   }
 
-  if (currentSource.includes(settingsMarker)) {
-    return currentSource;
-  }
-
-  if (currentSource.includes(mobileSidebarMarker)) {
-    return currentSource;
-  }
-
-  const mobileSidebarMatch = currentSource.match(mobileSidebarGateRegex);
-  if (mobileSidebarMatch != null) {
-    const [
-      ,
-      functionName,
-      enabledVar,
-      setupCompleteVar,
-      chatGptAuthVar,
-      featuresVisibleVar,
-      onboardingEnabledVar,
-    ] = mobileSidebarMatch;
-    return currentSource.replace(
-      mobileSidebarGateRegex,
-      buildMobileSidebarReplacement(
+  if (!patchedSource.includes(mobileSidebarMarker)) {
+    const mobileSidebarMatch = patchedSource.match(mobileSidebarGateRegex);
+    if (mobileSidebarMatch != null) {
+      const [
+        ,
         functionName,
         enabledVar,
         setupCompleteVar,
         chatGptAuthVar,
         featuresVisibleVar,
         onboardingEnabledVar,
-      ),
-    );
+      ] = mobileSidebarMatch;
+      patchedSource = patchedSource.replace(
+        mobileSidebarGateRegex,
+        buildMobileSidebarReplacement(
+          functionName,
+          enabledVar,
+          setupCompleteVar,
+          chatGptAuthVar,
+          featuresVisibleVar,
+          onboardingEnabledVar,
+        ),
+      );
+    } else {
+      const mobileHelpMenuMatch = patchedSource.match(mobileHelpMenuGateRegex);
+      if (mobileHelpMenuMatch != null) {
+        const [
+          ,
+          prefix,
+          authMethodVar,
+          ,
+          remoteControlFeaturesVisibleVar,
+          ,
+          ,
+          ,
+          setupCompleteVar,
+          isLoadingVar,
+          ,
+          showMobileSetupVar,
+        ] = mobileHelpMenuMatch;
+        patchedSource = `${patchedSource.replace(
+          mobileHelpMenuGateRegex,
+          `${prefix}${mobileSidebarMarker}({isChatGptAuth:${authMethodVar}===\`chatgpt\`,remoteControlFeaturesVisible:${remoteControlFeaturesVisibleVar},isLoading:${isLoadingVar},hasCompletedCodexMobileSetup:${setupCompleteVar}})`,
+        )}\n${mobileHelpMenuHelper}`;
+        if (!patchedSource.includes(`${showMobileSetupVar}=${mobileSidebarMarker}(`)) {
+          console.warn(
+            "WARN: Codex Mobile profile sidebar patch did not update the expected showMobileSetup binding",
+          );
+        }
+      }
+    }
   }
 
-  const settingsTabsMatch = currentSource.match(settingsTabsGateRegex);
+  const settingsTabsMatch = patchedSource.match(settingsTabsGateRegex);
   if (
+    !patchedSource.includes(settingsMarker) &&
     settingsTabsMatch != null &&
-    currentSource.includes("remote_control_connections_state") &&
-    currentSource.includes("showRemoteControlConnectionsSection")
+    patchedSource.includes("remote_control_connections_state") &&
+    patchedSource.includes("showRemoteControlConnectionsSection")
   ) {
     const [, sectionVar, sectionFn, otherDevicesVar, otherDevicesGateVar] =
       settingsTabsMatch;
     const settingsHelper =
       `function ${settingsMarker}(e){return typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`)?!0:e}`;
-    return `${currentSource.replace(
+    patchedSource = `${patchedSource.replace(
       settingsTabsGateRegex,
       `${sectionVar}=${settingsMarker}(${sectionFn}()),${otherDevicesVar}=${settingsMarker}(!${otherDevicesGateVar})`,
     )}\n${settingsHelper}`;
   }
 
-  if (currentSource.includes(marker)) {
-    const patchedMatch = currentSource.match(patchedVisibilityGateRegex);
+  if (patchedSource.includes(marker)) {
+    const patchedMatch = patchedSource.match(patchedVisibilityGateRegex);
     if (patchedMatch != null) {
       const [, functionName, stateVar, slingshotVar] = patchedMatch;
-      return currentSource.replace(
+      return patchedSource.replace(
         patchedVisibilityGateRegex,
         buildReplacement(functionName, stateVar, slingshotVar),
       );
     }
-    return currentSource;
+    return patchedSource;
   }
 
   const visibilityGateRegex =
     /function ([A-Za-z_$][\w$]*)\(\{remoteControlConnectionsState:([A-Za-z_$][\w$]*),slingshotEnabled:([A-Za-z_$][\w$]*)\}\)\{return \3&&\(\2\?\.available\?\?!0\)&&\2\?\.accessRequired!==!0\}/u;
-  const match = currentSource.match(visibilityGateRegex);
+  const match = patchedSource.match(visibilityGateRegex);
   if (match == null) {
     if (
+      patchedSource === currentSource &&
       currentSource.includes("remoteControlConnectionsState") &&
       currentSource.includes("accessRequired")
     ) {
@@ -1006,11 +1034,11 @@ function applyLinuxRemoteControlProfileAvailabilityPatch(currentSource) {
         "WARN: Could not find remote-control profile availability gate — skipping Linux remote-control profile availability patch",
       );
     }
-    return currentSource;
+    return patchedSource;
   }
 
   const [, functionName, stateVar, slingshotVar] = match;
-  return currentSource.replace(
+  return patchedSource.replace(
     visibilityGateRegex,
     buildReplacement(functionName, stateVar, slingshotVar),
   );

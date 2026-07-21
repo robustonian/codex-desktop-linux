@@ -988,6 +988,27 @@ test("app-server feature enablement descriptor matches current app-main chunks",
   assert.equal(descriptor.pattern.test("experimental-feature-visibility-Bvp90zWX.js"), false);
 });
 
+test("remote-control profile availability descriptor matches current split app-main chunks", () => {
+  const descriptor = corePatchDescriptors().find(
+    (descriptor) => descriptor.id === "linux-remote-control-profile-availability",
+  );
+
+  assert.ok(descriptor);
+  assert.equal(descriptor.pattern.test("app-main-DxUcMyo0.js"), true);
+  assert.equal(descriptor.pattern.test("remote-connections-settings-DDQHBgTC.js"), true);
+  assert.equal(
+    descriptor.pattern.test(
+      "app-initial~app-main~new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~iufn7mg3-MXsOJYYa.js",
+    ),
+    true,
+  );
+  assert.equal(
+    descriptor.pattern.test("app-initial~app-main~page-CQfFDtNf.js"),
+    true,
+  );
+  assert.equal(descriptor.pattern.test("codex-mobile-setup-flow-BNPyTLo-.js"), false);
+});
+
 test("patch descriptors reject unsupported ciPolicy values", () => {
   assert.throws(
     () =>
@@ -1954,6 +1975,22 @@ test("keeps remote-control connections visible on Linux when a profile app-serve
   assert.equal(context.macAllowedResult, true);
 });
 
+test("keeps current split-bundle remote-control availability visible on Linux profiles", () => {
+  const source =
+    "function eur(){let e=(0,rur.c)(3),[t]=F(`remote_control_connections_state`),n=Xee(),r;return e[0]!==t||e[1]!==n?(r=tur({remoteControlConnectionsState:t,slingshotEnabled:n}),e[0]=t,e[1]=n,e[2]=r):r=e[2],r}function tur({remoteControlConnectionsState:e,slingshotEnabled:t}){return t&&(e?.available??!0)&&e?.accessRequired!==!0}function nur({selectedConnectionsTab:e,showControlOtherDevices:t,showControlThisMacTab:n,showRemoteControlConnectionsSection:r,showRemoteSshConnections:i,showTabbedSshPage:a,isWslConnectionsLoading:o,showWslConnections:s}){return e}";
+
+  const patched = applyPatchTwice(
+    applyLinuxRemoteControlProfileAvailabilityPatch,
+    source,
+  );
+
+  assert.match(patched, /codexLinuxRemoteControlProfileAvailability/);
+  assert.match(
+    patched,
+    /return codexLinuxRemoteControlProfileAvailability\|\|t&&\(e\?\.available\?\?!0\)&&e\?\.accessRequired!==!0/,
+  );
+});
+
 test("upgrades the earlier Linux remote-control profile availability patch", () => {
   const source =
     "function dt({remoteControlConnectionsState:e,slingshotEnabled:t}){let codexLinuxRemoteControlProfileAvailability=typeof navigator!=`undefined`&&navigator.userAgent.includes(`Linux`);return t&&(e?.available??!0)&&(codexLinuxRemoteControlProfileAvailability||e?.accessRequired!==!0)}";
@@ -2095,6 +2132,79 @@ test("keeps the Codex Mobile sidebar setup entry visible on Linux profiles", () 
   assert.equal(context.linuxCompleteResult, false);
   assert.equal(context.macResult, false);
   assert.equal(context.macAllowedResult, true);
+});
+
+test("keeps the current Codex Mobile help menu setup entry visible on Linux profiles", () => {
+  const source =
+    "function L1e(){let e=(0,Gz.c)(3),{authMethod:t}=Ba(),n=bse(),r=za(`410065390`),{data:i,isLoading:a}=q(cn.CODEX_MOBILE_SETUP_COMPLETED),o=t===`chatgpt`&&n&&!a&&i===!1,s;return e[0]!==r||e[1]!==o?(s=R1e({showChromeExtensionSetup:r,showMobileSetup:o}),e[0]=r,e[1]=o,e[2]=s):s=e[2],s}";
+
+  const patched = applyPatchTwice(
+    applyLinuxRemoteControlProfileAvailabilityPatch,
+    source,
+  );
+
+  assert.match(patched, /codexLinuxCodexMobileProfileAvailability/);
+  assert.match(
+    patched,
+    /o=codexLinuxCodexMobileProfileAvailability\(\{isChatGptAuth:t===`chatgpt`,remoteControlFeaturesVisible:n,isLoading:a,hasCompletedCodexMobileSetup:i\}\)/,
+  );
+
+  const runPatched = ({ userAgent, authMethod, remoteControlFeaturesVisible, isLoading, setupComplete }) => {
+    const context = {
+      Gz: { c: () => [Symbol.for("react.memo_cache_sentinel")] },
+      Ba: () => ({ authMethod }),
+      bse: () => remoteControlFeaturesVisible,
+      za: () => false,
+      q: () => ({ data: setupComplete, isLoading }),
+      cn: { CODEX_MOBILE_SETUP_COMPLETED: "codex-mobile-has-connected-device" },
+      R1e: ({ showMobileSetup }) => showMobileSetup,
+      navigator: { userAgent },
+      result: null,
+    };
+    vm.runInNewContext(`${patched};result=L1e();`, context);
+    return context.result;
+  };
+
+  assert.equal(
+    runPatched({
+      userAgent: "Linux x86_64",
+      authMethod: "apikey",
+      remoteControlFeaturesVisible: false,
+      isLoading: false,
+      setupComplete: false,
+    }),
+    true,
+  );
+  assert.equal(
+    runPatched({
+      userAgent: "Linux x86_64",
+      authMethod: "apikey",
+      remoteControlFeaturesVisible: false,
+      isLoading: false,
+      setupComplete: true,
+    }),
+    false,
+  );
+  assert.equal(
+    runPatched({
+      userAgent: "Macintosh",
+      authMethod: "apikey",
+      remoteControlFeaturesVisible: false,
+      isLoading: false,
+      setupComplete: false,
+    }),
+    false,
+  );
+  assert.equal(
+    runPatched({
+      userAgent: "Macintosh",
+      authMethod: "chatgpt",
+      remoteControlFeaturesVisible: true,
+      isLoading: false,
+      setupComplete: false,
+    }),
+    true,
+  );
 });
 
 test("repairs remote-control settings helper appended into a source map comment", () => {
