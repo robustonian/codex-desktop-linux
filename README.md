@@ -332,6 +332,21 @@ make package
 make install
 ```
 
+For a local self-build when you cannot or do not want to replace the system
+package under `/opt/codex-desktop`, install a user-local launcher instead:
+
+```bash
+bash scripts/install-user-launcher.sh
+hash -r
+type -a codex-desktop
+codex-desktop --profile desktop_fugu
+```
+
+Fully quit any running packaged Codex Desktop first. The default app instance
+uses the same app id, state directory, webview port, and launch socket, so an
+already-running `/opt/codex-desktop` process can otherwise receive the launch
+request before the rebuilt local launcher starts.
+
 Verify the installed native package when testing Linux wrapper changes. On
 Debian-based systems:
 
