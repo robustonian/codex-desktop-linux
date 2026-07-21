@@ -61,11 +61,91 @@ cleanup() {
 }
 trap cleanup EXIT
 
-{
-    printf '%s\n' '#!/usr/bin/env bash'
-    printf '%s\n' '# Managed by codex-desktop-linux scripts/install-user-launcher.sh'
-    printf 'exec %q "$@"\n' "$APP_LAUNCHER"
-} > "$tmp"
+cat > "$tmp" <<EOF
+#!/usr/bin/env bash
+# Managed by codex-desktop-linux scripts/install-user-launcher.sh
+set -euo pipefail
+
+TARGET_LAUNCHER=$(printf '%q' "$APP_LAUNCHER")
+TARGET_DIR=$(printf '%q' "$REPO_DIR/codex-app")
+
+truthy() {
+    case "\${1:-}" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+launch_args_allow_existing_app() {
+    if truthy "\${CODEX_MULTI_LAUNCH:-}"; then
+        return 0
+    fi
+
+    local arg
+    for arg in "\$@"; do
+        case "\$arg" in
+            -h|--help|--diagnose-scaling|--new-instance|--multi-instance|--multi-launch)
+                return 0
+                ;;
+        esac
+    done
+
+    return 1
+}
+
+current_user_pid() {
+    local pid="\$1"
+    local uid
+
+    [[ "\$pid" =~ ^[0-9]+\$ ]] || return 1
+    [ -r "/proc/\$pid/status" ] || return 1
+    uid="\$(awk '/^Uid:/ {print \$2; exit}' "/proc/\$pid/status" 2>/dev/null || true)"
+    [ "\$uid" = "\$(id -u)" ]
+}
+
+foreign_codex_desktop_pid() {
+    local app_id="\${CODEX_LINUX_APP_ID:-\${CODEX_APP_ID:-codex-desktop}}"
+    local proc_cmdline pid cmdline arg0
+
+    for proc_cmdline in /proc/[0-9]*/cmdline; do
+        [ -r "\$proc_cmdline" ] || continue
+        pid="\${proc_cmdline#/proc/}"
+        pid="\${pid%/cmdline}"
+        current_user_pid "\$pid" || continue
+        cmdline="\$(tr '\\0' ' ' < "\$proc_cmdline" 2>/dev/null || true)"
+        [[ "\$cmdline" == *"--app-id=\$app_id"* ]] || continue
+        [[ "\$cmdline" != *" --type="* ]] || continue
+        arg0="\$(tr '\\0' '\\n' < "\$proc_cmdline" 2>/dev/null | sed -n '1p')"
+        case "\$arg0" in
+            "\$TARGET_DIR/electron"|"\$TARGET_DIR/electron "*) continue ;;
+            */electron|*/electron\ *) ;;
+            *) continue ;;
+        esac
+        printf '%s\\n' "\$pid"
+        return 0
+    done
+
+    return 1
+}
+
+if ! launch_args_allow_existing_app "\$@"; then
+    if pid="\$(foreign_codex_desktop_pid)"; then
+        install_dir="\$(dirname "\$(tr '\\0' '\\n' < "/proc/\$pid/cmdline" 2>/dev/null | sed -n '1p')" 2>/dev/null || echo unknown)"
+        cat >&2 <<MSG
+Codex Desktop is already running from \$install_dir (pid \$pid).
+This user launcher points at \$TARGET_DIR.
+
+Fully quit the running Codex Desktop first, then run:
+  codex-desktop --profile desktop_fugu
+
+Use --new-instance only if you explicitly want a side-by-side test instance.
+MSG
+        exit 1
+    fi
+fi
+
+exec "\$TARGET_LAUNCHER" "\$@"
+EOF
 chmod 0755 "$tmp"
 mv "$tmp" "$WRAPPER"
 trap - EXIT

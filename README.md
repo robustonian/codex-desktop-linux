@@ -343,9 +343,10 @@ codex-desktop --profile desktop_fugu
 ```
 
 Fully quit any running packaged Codex Desktop first. The default app instance
-uses the same app id, state directory, webview port, and launch socket, so an
-already-running `/opt/codex-desktop` process can otherwise receive the launch
-request before the rebuilt local launcher starts.
+uses the same app id, state directory, webview port, and launch socket, so the
+user launcher refuses to start when it detects an already-running
+`/opt/codex-desktop` primary Electron process. Use `--new-instance` only when
+you explicitly want a side-by-side test instance.
 
 Verify the installed native package when testing Linux wrapper changes. On
 Debian-based systems:
