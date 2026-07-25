@@ -3,33 +3,82 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const vm = require("node:vm");
 
 const {
-  applyLinuxChromeExtensionStatusPatch,
+  applyLinuxBrowserUseSocketDirectoryPatch,
   applyLinuxExternalOpenEnvPatch,
 } = require("./browser.js");
 
-test("Linux Chrome extension opener searches Chrome Beta and Unstable commands", () => {
-  const source =
-    'const fs=require("node:fs"),os=require("node:os"),path=require("node:path");' +
-    "function validate(e){return e}" +
-    "function profileDir({homeDir:e,localAppDataDir:t,platform:r}){return `/profile`}" +
-    "function detect(){return null}" +
-    "function run(){}" +
-    "function extensionUrl(e){return `chrome://extensions/?id=${e}`}" +
-    "const openCommand=`open`,bundleId=`com.google.Chrome`;" +
-    "function status({extensionId:e,homeDir:t=os.homedir(),localAppDataDir:r=process.env.LOCALAPPDATA,platform:n=process.platform}){let o=validate(e),i=profileDir({homeDir:t,localAppDataDir:r,platform:n});return i==null||!fs.existsSync(i)?!1:fs.readdirSync(i,{withFileTypes:!0}).some(s=>s.isDirectory()&&fs.existsSync(path.join(i,s.name,`Extensions`,o)))}" +
-    "async function openExtension({extensionId:e,platform:t=process.platform,detectChromeCommand:r=detect,runCommand:n=run}){if(t===`darwin`){await n(openCommand,[`-b`,bundleId,extensionUrl(e)]);return}if(t===`win32`){let o=r();if(o==null)throw Error(`Google Chrome is not installed`);await n(o,[extensionUrl(e)]);return}throw new Error(`Opening Chrome extension settings is only supported on macOS and Windows`)}" +
-    "function nextHelper(){}";
+const browserUseSocketFixture =
+  '"use strict";' +
+  'var zt=e=>e===`win32`?`\\\\\\\\.\\\\pipe\\\\codex-browser-use`:`/tmp/codex-browser-use`;' +
+  'var Sd=class{server;pipePath;async start(){await new Promise((e,t)=>{this.server.once(`error`,t),this.server.listen(this.pipePath,()=>{this.server.off(`error`,t),e()})})}};' +
+  'globalThis.socketDirectory=zt(`linux`);';
 
-  const patched = applyLinuxChromeExtensionStatusPatch(source);
-
-  assert.match(
-    patched,
-    /`google-chrome-stable`,`google-chrome-beta`,`google-chrome-unstable`,`chromium-browser`/,
+function evaluateBrowserUseSocketPatch({ env = {}, metadataUid = 1000 } = {}) {
+  const operations = [];
+  const fs = {
+    mkdirSync: (target, options) => operations.push(["mkdir", target, options]),
+    lstatSync: (target) => ({
+      isDirectory: () => true,
+      isSymbolicLink: () => false,
+      uid: metadataUid,
+      target,
+    }),
+    chmodSync: (target, mode) => operations.push(["chmod", target, mode]),
+  };
+  const context = {
+    globalThis: {},
+    process: { env, getuid: () => 1000, platform: "linux" },
+    require: (specifier) => {
+      assert.equal(specifier, "node:fs");
+      return fs;
+    },
+  };
+  vm.runInNewContext(
+    applyLinuxBrowserUseSocketDirectoryPatch(browserUseSocketFixture),
+    context,
   );
-  assert.match(patched, /`google-chrome-beta`/);
-  assert.match(patched, /`google-chrome-unstable`/);
+  return { context, operations };
+}
+
+test("Linux IAB producer uses the same deterministic per-user socket directory as Browser clients", () => {
+  const { context, operations } = evaluateBrowserUseSocketPatch();
+
+  assert.equal(context.globalThis.socketDirectory, "/tmp/codex-browser-use-1000");
+  assert.equal(operations[0][0], "mkdir");
+  assert.equal(operations[0][1], "/tmp/codex-browser-use-1000");
+  assert.equal(operations[0][2].recursive, true);
+  assert.equal(operations[0][2].mode, 0o700);
+  assert.deepEqual(operations[1], ["chmod", "/tmp/codex-browser-use-1000", 0o700]);
+});
+
+test("Linux IAB producer honors the explicit shared socket directory override", () => {
+  const { context } = evaluateBrowserUseSocketPatch({
+    env: { CODEX_BROWSER_USE_SOCKET_DIR: "/custom/browser-use" },
+  });
+
+  assert.equal(context.globalThis.socketDirectory, "/custom/browser-use");
+});
+
+test("Linux IAB producer rejects a socket directory owned by another user", () => {
+  assert.throws(
+    () => evaluateBrowserUseSocketPatch({ metadataUid: 2000 }),
+    /not owned by the current user/,
+  );
+});
+
+test("Linux IAB socket alignment patch hardens the directory and socket modes", () => {
+  const patched = applyLinuxBrowserUseSocketDirectoryPatch(browserUseSocketFixture);
+
+  assert.match(patched, /mkdirSync\(t,\{recursive:!0,mode:448\}\)/);
+  assert.match(patched, /chmodSync\(t,448\)/);
+  assert.match(patched, /chmodSync\(this\.pipePath,384\)/);
+  assert.match(patched, /this\.server\.close\(\(\)=>\{\}\)/);
+  assert.match(patched, /t\(e\);return/);
+  assert.match(patched, /codexLinuxBrowserUseSocketMode/);
+  assert.equal(applyLinuxBrowserUseSocketDirectoryPatch(patched), patched);
 });
 
 test("Linux external open env patch wraps electron require with helper", () => {

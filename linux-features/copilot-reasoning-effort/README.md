@@ -25,12 +25,12 @@ feature to the generated app.
 
 ## What It Patches
 
-- `use-model-settings-*.js` reads and writes
-  `copilot-default-reasoning-effort` next to `copilot-default-model`.
-- `font-settings-*.js` keeps the model's full `supportedReasoningEfforts` list
-  for Copilot auth instead of forcing only `medium`.
-- `index-*.js` keeps reasoning effort dropdown entries and the `/reasoning`
-  command enabled when the normal model and effort prerequisites are present.
+- The current `...thread-app-shell~cf704xib-*.js` bundle reads and
+  writes `copilot-default-reasoning-effort` next to `copilot-default-model` and
+  keeps the model's full `supportedReasoningEfforts` list for Copilot auth.
+- The current `...~ho~iufn7mg3-*.js` bundle keeps the
+  reasoning effort controls and `/reasoning` command enabled when the normal
+  model and effort prerequisites are present.
 
 ## Validation
 

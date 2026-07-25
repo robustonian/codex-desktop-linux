@@ -5,7 +5,7 @@
 # shellcheck shell=bash
 
 # ---- Download or find Codex DMG ----
-DEFAULT_DMG_URL="https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
+DEFAULT_DMG_URL="https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg"
 DMG_URL="${CODEX_UPSTREAM_DMG_URL:-$DEFAULT_DMG_URL}"
 DMG_REMOTE_FINGERPRINT=""
 
@@ -167,6 +167,42 @@ write_cached_dmg_metadata() {
     fi
 }
 
+download_dmg() {
+    local tmp_dest="$1"
+    local tmp_dir
+    local tmp_name
+
+    tmp_dir="$(dirname "$tmp_dest")"
+    tmp_name="$(basename "$tmp_dest")"
+
+    if command -v aria2c >/dev/null 2>&1; then
+        info "Using aria2c for parallel DMG download..."
+        if aria2c \
+                --max-connection-per-server=16 \
+                --split=16 \
+                --max-tries=3 \
+                --retry-wait=10 \
+                --connect-timeout=30 \
+                --timeout=600 \
+                --allow-overwrite=true \
+                --auto-file-renaming=false \
+                --console-log-level=warn \
+                --summary-interval=0 \
+                --dir="$tmp_dir" \
+                --out="$tmp_name" \
+                -- "$DMG_URL" >/dev/null \
+                && [ -s "$tmp_dest" ]; then
+            return 0
+        fi
+
+        warn "aria2c download failed; falling back to curl"
+        rm -f "$tmp_dest" "$tmp_dest.aria2"
+    fi
+
+    curl -L --progress-bar --max-time 600 --connect-timeout 30 \
+        -o "$tmp_dest" -- "$DMG_URL"
+}
+
 get_dmg() {
     local dmg_dest="$CACHED_DMG_PATH"
     local metadata_path="$CACHED_DMG_METADATA_PATH"
@@ -205,13 +241,12 @@ get_dmg() {
         fi
     fi
 
-    info "Downloading Codex Desktop DMG..."
+    info "Downloading ChatGPT Desktop DMG..."
     info "URL: $(redact_dmg_url "$DMG_URL")"
 
     rm -f "$tmp_dest"
-    if ! curl -L --progress-bar --max-time 600 --connect-timeout 30 \
-            -o "$tmp_dest" -- "$DMG_URL"; then
-        rm -f "$tmp_dest"
+    if ! download_dmg "$tmp_dest"; then
+        rm -f "$tmp_dest" "$tmp_dest.aria2"
         error "Download failed. Download manually and place as: $dmg_dest"
     fi
 

@@ -56,6 +56,33 @@ function applyLinuxFileManagerPatch(currentSource) {
   return patchedSource;
 }
 
+function applyLinuxX11ProjectPickerPatch(currentSource) {
+  if (currentSource.includes("codexLinuxUseUnparentedX11ProjectPicker")) {
+    return currentSource;
+  }
+
+  const pickerPattern =
+    /let ([A-Za-z_$][\w$]*)=\{properties:([A-Za-z_$][\w$]*),title:`Select Project Root`\},([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.BrowserWindow\.fromWebContents\(([A-Za-z_$][\w$]*)\),([A-Za-z_$][\w$]*)=\3==null\?await \4\.dialog\.showOpenDialog\(\1\):await \4\.dialog\.showOpenDialog\(\3,\1\)/u;
+  const match = pickerPattern.exec(currentSource);
+  if (match == null) {
+    if (
+      currentSource.includes("Select Project Root") &&
+      currentSource.includes("showOpenDialog")
+    ) {
+      console.warn(
+        "WARN: Could not find X11 project picker insertion point — skipping unparented X11 project picker patch",
+      );
+    }
+    return currentSource;
+  }
+
+  const [, optionsVar, propertiesVar, parentVar, electronVar, webContentsVar, resultVar] = match;
+  return currentSource.replace(
+    pickerPattern,
+    `let ${optionsVar}={properties:${propertiesVar},title:\`Select Project Root\`},${parentVar}=${electronVar}.BrowserWindow.fromWebContents(${webContentsVar}),codexLinuxSessionType=(process.env.XDG_SESSION_TYPE||\`\`).trim().toLowerCase(),codexLinuxUseUnparentedX11ProjectPicker=process.platform===\`linux\`&&(codexLinuxSessionType===\`x11\`||codexLinuxSessionType!==\`wayland\`&&!process.env.WAYLAND_DISPLAY&&!!process.env.DISPLAY),${resultVar}=codexLinuxUseUnparentedX11ProjectPicker||${parentVar}==null?await ${electronVar}.dialog.showOpenDialog(${optionsVar}):await ${electronVar}.dialog.showOpenDialog(${parentVar},${optionsVar})`,
+  );
+}
+
 function applyLinuxWorkerFileManagerPatch(currentSource) {
   const block = findCallBlock(currentSource, "id:`fileManager`");
   if (block == null) {
@@ -142,7 +169,7 @@ function applyLinuxTerminalUserPathPatch(currentSource) {
   }
 
   const terminalEnvRegex =
-    /async buildTerminalEnv\(([^)]*)\)\{let ([A-Za-z_$][\w$]*)=\{\.\.\.process\.env\};([\s\S]*?)return process\.platform!==`win32`&&\(\2\.TERM=([A-Za-z_$][\w$]*),delete \2\.TERMINFO,delete \2\.TERMINFO_DIRS\),([A-Za-z_$][\w$]*)\.\$r\(\2\)\}/u;
+    /async buildTerminalEnv\(([^)]*)\)\{let ([A-Za-z_$][\w$]*)=\{\.\.\.process\.env\};([\s\S]*?)return process\.platform!==`win32`&&\(\2\.TERM=([A-Za-z_$][\w$]*),delete \2\.TERMINFO,delete \2\.TERMINFO_DIRS\),([A-Za-z_$][\w$]*)\.t\(\2\)\}/u;
   const match = currentSource.match(terminalEnvRegex);
   if (match == null) {
     if (currentSource.includes("buildTerminalEnv") && currentSource.includes("node-pty")) {
@@ -185,6 +212,121 @@ function applyLinuxTerminalUserPathPatch(currentSource) {
   }
 
   return patchedSource;
+}
+
+function applyLinuxTerminalHostEnvironmentPatch(currentSource) {
+  const marker = "function codexLinuxRestoreTerminalLibraryPath(";
+  if (currentSource.includes(marker)) {
+    return currentSource;
+  }
+
+  const terminalEnvPattern =
+    /async buildTerminalEnv\([^)]*\)\{let ([A-Za-z_$][\w$]*)=\{\.\.\.process\.env\};/u;
+  const match = currentSource.match(terminalEnvPattern);
+  if (match == null) {
+    if (currentSource.includes("buildTerminalEnv") && currentSource.includes("node-pty")) {
+      console.warn(
+        "WARN: Could not find terminal environment base — skipping Linux terminal library path patch",
+      );
+    }
+    return currentSource;
+  }
+
+  const helper =
+    "function codexLinuxRestoreTerminalLibraryPath(e){try{let t=process.env.CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_STATE,n=t==null?void 0:process.env.CODEX_LINUX_HOST_LD_LIBRARY_PATH_STATE??t,r=process.env.CODEX_LINUX_HOST_LD_LIBRARY_PATH_STATE==null?process.env.CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_VALUE:process.env.CODEX_LINUX_HOST_LD_LIBRARY_PATH_VALUE;n===`unset`?delete e.LD_LIBRARY_PATH:n===`empty`?e.LD_LIBRARY_PATH=``:n===`value`&&typeof r==`string`&&(e.LD_LIBRARY_PATH=r);for(let t of[`CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_STATE`,`CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_VALUE`,`CODEX_LINUX_HOST_LD_LIBRARY_PATH_STATE`,`CODEX_LINUX_HOST_LD_LIBRARY_PATH_VALUE`])delete e[t]}catch{}return e}";
+  const insertion = `${match[0]}process.platform===\`linux\`&&codexLinuxRestoreTerminalLibraryPath(${match[1]});`;
+  return `${helper}${currentSource.replace(terminalEnvPattern, insertion)}`;
+}
+
+function applyLinuxHostProcessEnvironmentPatch(currentSource) {
+  const marker = "function codexLinuxHostProcessEnv(";
+  if (currentSource.includes(marker)) {
+    return currentSource;
+  }
+  const hasShellEnvironmentLoader = currentSource.includes("Failed to load shell env");
+  const hasCliEnvironmentBuilder = currentSource.includes("Unable to locate the Codex CLI binary");
+  if (!hasShellEnvironmentLoader && !hasCliEnvironmentBuilder) {
+    return currentSource;
+  }
+
+  const helper =
+    "function codexLinuxHostProcessEnv(e){let t={...e},n=process.env.CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_STATE,r=n==null?void 0:process.env.CODEX_LINUX_HOST_LD_LIBRARY_PATH_STATE??n,o=process.env.CODEX_LINUX_HOST_LD_LIBRARY_PATH_STATE==null?process.env.CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_VALUE:process.env.CODEX_LINUX_HOST_LD_LIBRARY_PATH_VALUE;r===`unset`?delete t.LD_LIBRARY_PATH:r===`empty`?t.LD_LIBRARY_PATH=``:r===`value`&&typeof o==`string`&&(t.LD_LIBRARY_PATH=o);for(let e of[`CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_STATE`,`CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_VALUE`,`CODEX_LINUX_HOST_LD_LIBRARY_PATH_STATE`,`CODEX_LINUX_HOST_LD_LIBRARY_PATH_VALUE`])delete t[e];return t}function codexLinuxLoginShellExtraEnv(e){let t=codexLinuxHostProcessEnv(e),n=process.env.CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_STATE,r=n==null?void 0:process.env.CODEX_LINUX_HOST_LD_LIBRARY_PATH_STATE??n;return r===`unset`&&(t.LD_LIBRARY_PATH=void 0),t}function codexLinuxShellEnvResult(e){let t={...e},n=process.env.CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_STATE;n!=null&&(Object.hasOwn(t,`LD_LIBRARY_PATH`)?t.LD_LIBRARY_PATH===``?(process.env.CODEX_LINUX_HOST_LD_LIBRARY_PATH_STATE=`empty`,delete process.env.CODEX_LINUX_HOST_LD_LIBRARY_PATH_VALUE):(process.env.CODEX_LINUX_HOST_LD_LIBRARY_PATH_STATE=`value`,process.env.CODEX_LINUX_HOST_LD_LIBRARY_PATH_VALUE=t.LD_LIBRARY_PATH):(process.env.CODEX_LINUX_HOST_LD_LIBRARY_PATH_STATE=`unset`,delete process.env.CODEX_LINUX_HOST_LD_LIBRARY_PATH_VALUE),delete t.LD_LIBRARY_PATH);for(let e of[`CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_STATE`,`CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_VALUE`,`CODEX_LINUX_HOST_LD_LIBRARY_PATH_STATE`,`CODEX_LINUX_HOST_LD_LIBRARY_PATH_VALUE`])delete t[e];return t}";
+
+  const shellLoadPattern =
+    /([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\(\{interactive:!0,extraEnv:\{\[\1\.([A-Za-z_$][\w$]*)\]:`1`\},signal:([A-Za-z_$][\w$]*)\.signal\}\)/u;
+  const shellAssignPattern = /Object\.assign\(process\.env,([A-Za-z_$][\w$]*)\.userEnv\)/u;
+  const cliEnvPattern =
+    /let ([A-Za-z_$][\w$]*)=(\{\.\.\.process\.env,LOG_FORMAT:`json`,RUST_LOG:process\.env\.RUST_LOG\?\?`warn`,CODEX_INTERNAL_ORIGINATOR_OVERRIDE:[^}]+\}),([A-Za-z_$][\w$]*)=/u;
+  let patchedSource = currentSource;
+  if (hasShellEnvironmentLoader) {
+    const shellLoadMatch = currentSource.match(shellLoadPattern);
+    if (shellLoadMatch == null || !shellAssignPattern.test(currentSource)) {
+      console.warn(
+        "WARN: Could not find inherited login-shell environment builder — skipping Linux host process environment patch",
+      );
+      return currentSource;
+    }
+    const [, shellModule, shellMethod, shellMarker, abortController] = shellLoadMatch;
+    patchedSource = patchedSource.replace(
+      shellLoadPattern,
+      `${shellModule}.${shellMethod}({interactive:!0,extraEnv:codexLinuxLoginShellExtraEnv({...process.env,[${shellModule}.${shellMarker}]:\`1\`}),signal:${abortController}.signal})`,
+    );
+    patchedSource = patchedSource.replace(
+      shellAssignPattern,
+      "Object.assign(process.env,$1.userEnv=codexLinuxShellEnvResult($1.userEnv))",
+    );
+  }
+  if (hasCliEnvironmentBuilder) {
+    if (!cliEnvPattern.test(currentSource)) {
+      console.warn(
+        "WARN: Could not find inherited Codex CLI environment builder — skipping Linux host process environment patch",
+      );
+      return currentSource;
+    }
+    patchedSource = patchedSource.replace(
+      cliEnvPattern,
+      "let $1=codexLinuxHostProcessEnv($2),$3=",
+    );
+  }
+
+  const strictPrefix = /^(?:"use strict"|'use strict');?/u;
+  return strictPrefix.test(patchedSource)
+    ? patchedSource.replace(strictPrefix, (match) => `${match}${helper}`)
+    : `${helper}${patchedSource}`;
+}
+
+function patchLinuxHostProcessEnvironmentTargets(extractedDir) {
+  const buildDir = path.join(extractedDir, ".vite", "build");
+  if (!fs.existsSync(buildDir)) {
+    return { matched: 0, changed: 0, reason: "Vite build directory not found" };
+  }
+  const candidates = fs
+    .readdirSync(buildDir)
+    .filter((name) => name.endsWith(".js"))
+    .sort()
+    .map((name) => path.join(buildDir, name))
+    .filter((candidate) => {
+      const source = fs.readFileSync(candidate, "utf8");
+      return (
+        source.includes("Failed to load shell env") ||
+        source.includes("Unable to locate the Codex CLI binary")
+      );
+    });
+
+  let changed = 0;
+  for (const candidate of candidates) {
+    const source = fs.readFileSync(candidate, "utf8");
+    const patchedSource = applyLinuxHostProcessEnvironmentPatch(source);
+    if (patchedSource !== source) {
+      fs.writeFileSync(candidate, patchedSource);
+      changed += 1;
+    }
+  }
+  return {
+    matched: candidates.length,
+    changed,
+    ...(candidates.length === 0 ? { reason: "host environment bundles not found" } : {}),
+  };
 }
 
 function applyLinuxGitOriginsSourceFallbackPatch(currentSource) {
@@ -326,20 +468,26 @@ function applyLinuxRemoteControlConfigPreservationPatch(currentSource) {
 }
 
 function applyLinuxProfiledRemoteControlAuthClientPatch(currentSource) {
-  const marker = "CODEX_LINUX_PROFILED_CLI_PATH";
-  if (currentSource.includes("codexLinuxDesktopAuthAppServerClient")) {
-    return currentSource;
-  }
-
   let patchedSource = currentSource;
-  const localConnectionNeedle =
-    "let i=this.createAppServerConnection(z);if(this.remoteControlDeviceKeyClient=";
-  const localConnectionPatch =
-    "let i=this.createAppServerConnection(z),codexLinuxDesktopAuthAppServerClient=i;if(process.platform===`linux`&&process.env.CODEX_LINUX_PROFILED_CLI_PATH){let codexLinuxAuthHostConfig={...Su,codex_cli_command:[process.env.CODEX_LINUX_PROFILED_CLI_PATH,`app-server`,`--analytics-default-enabled`]};codexLinuxDesktopAuthAppServerClient=this.createAppServerConnection(`local-auth`,codexLinuxAuthHostConfig)}this.desktopAuthAppServerClient=codexLinuxDesktopAuthAppServerClient;if(this.remoteControlDeviceKeyClient=";
-  if (patchedSource.includes(localConnectionNeedle)) {
-    patchedSource = patchedSource.replace(localConnectionNeedle, localConnectionPatch);
+  const authClientMarker = "codexLinuxDesktopAuthAppServerClient";
+  const localConnectionRegex =
+    /let ([A-Za-z_$][\w$]*)=this\.createAppServerConnection\(([A-Za-z_$][\w$]*)\),([A-Za-z_$][\w$]*)=new ([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*);this\.remoteControlDeviceKeyClient=/u;
+  const localConnectionMatch = patchedSource.match(localConnectionRegex);
+  if (!patchedSource.includes(`${authClientMarker}=`) && localConnectionMatch != null) {
+    const [, localClientVar, localHostIdVar, executionRegistryVar, executionRegistryCtor] =
+      localConnectionMatch;
+    patchedSource = patchedSource.replace(
+      localConnectionRegex,
+      `let ${localClientVar}=this.createAppServerConnection(${localHostIdVar}),${authClientMarker}=${localClientVar};` +
+        `if(process.platform===\`linux\`&&process.env.CODEX_LINUX_PROFILED_CLI_PATH){` +
+        `let codexLinuxAuthHostConfig={...this.getHostConfigForHostId(${localHostIdVar}),codex_cli_command:[process.env.CODEX_LINUX_PROFILED_CLI_PATH,\`app-server\`,\`--analytics-default-enabled\`]};` +
+        `${authClientMarker}=this.createAppServerConnection(\`local-auth\`,codexLinuxAuthHostConfig)}` +
+        `this.desktopAuthAppServerClient=${authClientMarker};` +
+        `let ${executionRegistryVar}=new ${executionRegistryCtor};this.remoteControlDeviceKeyClient=`,
+    );
   } else if (
-    patchedSource.includes("this.createAppServerConnection(z)") &&
+    !patchedSource.includes(`${authClientMarker}=`) &&
+    patchedSource.includes("this.createAppServerConnection(") &&
     patchedSource.includes("this.remoteControlDeviceKeyClient=")
   ) {
     console.warn(
@@ -347,40 +495,44 @@ function applyLinuxProfiledRemoteControlAuthClientPatch(currentSource) {
     );
   }
 
-  const handlerNeedle =
-    "prodApiBaseUrl:e.prodApiBaseUrl},i,this.remoteControlDeviceKeyClient,";
-  if (patchedSource.includes(handlerNeedle)) {
+  const handlerAuthRegex =
+    /(this\.remoteConnectionsHandler=new [A-Za-z_$][\w$]*\([\s\S]{0,500}?prodApiBaseUrl:[A-Za-z_$][\w$]*\.prodApiBaseUrl\},)([A-Za-z_$][\w$]*)(,this\.remoteControlDeviceKeyClient,)/u;
+  const handlerAuthMatch = patchedSource.match(handlerAuthRegex);
+  if (
+    handlerAuthMatch != null &&
+    handlerAuthMatch[2] !== authClientMarker
+  ) {
     patchedSource = patchedSource.replace(
-      handlerNeedle,
-      "prodApiBaseUrl:e.prodApiBaseUrl},codexLinuxDesktopAuthAppServerClient,this.remoteControlDeviceKeyClient,",
+      handlerAuthRegex,
+      `$1${authClientMarker}$3`,
     );
   } else if (
+    handlerAuthMatch == null &&
     patchedSource.includes("this.remoteConnectionsHandler=new") &&
-    patchedSource.includes("prodApiBaseUrl:e.prodApiBaseUrl")
+    patchedSource.includes("prodApiBaseUrl:")
   ) {
     console.warn(
       "WARN: Could not find remote-connections handler auth argument for profiled remote-control auth client patch",
     );
   }
 
-  const remoteConnectionNeedle =
-    "this.createAppServerConnection(e.hostId,t,!0,this.getLocalAppServerClient(),this.remoteControlDeviceKeyClient)";
-  if (patchedSource.includes(remoteConnectionNeedle)) {
+  const remoteConnectionRegex =
+    /this\.createAppServerConnection\(([A-Za-z_$][\w$]*)\.hostId,([A-Za-z_$][\w$]*),!0,this\.getLocalAppServerClient\(\),this\.remoteControlDeviceKeyClient\)/u;
+  if (remoteConnectionRegex.test(patchedSource)) {
     patchedSource = patchedSource.replace(
-      remoteConnectionNeedle,
-      "this.createAppServerConnection(e.hostId,t,!0,this.desktopAuthAppServerClient??this.getLocalAppServerClient(),this.remoteControlDeviceKeyClient)",
+      remoteConnectionRegex,
+      "this.createAppServerConnection($1.hostId,$2,!0,this.desktopAuthAppServerClient??this.getLocalAppServerClient(),this.remoteControlDeviceKeyClient)",
     );
   } else if (
+    !patchedSource.includes(
+      "this.desktopAuthAppServerClient??this.getLocalAppServerClient()",
+    ) &&
     patchedSource.includes("createAndRegisterRemoteConnection") &&
     patchedSource.includes("this.getLocalAppServerClient()")
   ) {
     console.warn(
       "WARN: Could not find remote-control transport auth argument for profiled remote-control auth client patch",
     );
-  }
-
-  if (patchedSource.includes(marker) || !currentSource.includes("this.createAppServerConnection(z)")) {
-    return patchedSource;
   }
 
   return patchedSource;
@@ -500,14 +652,18 @@ function applyLinuxLocalAppServerFeatureEnablementHandlerPatch(currentSource) {
 }
 
 module.exports = {
+  applyLinuxHostProcessEnvironmentPatch,
   applyLinuxFileManagerPatch,
+  applyLinuxX11ProjectPickerPatch,
   applyLinuxGitOriginsSourceFallbackPatch,
+  applyLinuxTerminalHostEnvironmentPatch,
   applyLinuxTerminalUserPathPatch,
   applyLinuxLocalAppServerFeatureEnablementHandlerPatch,
   applyLinuxOwlFeatureBindingFallbackPatch,
   applyLinuxProfiledRemoteControlAuthClientPatch,
   applyLinuxWorkerFileManagerPatch,
   patchLinuxOwlFeatureBindingFallbackAssets,
+  patchLinuxHostProcessEnvironmentTargets,
   patchLinuxWorkerFileManagerTarget,
   applyLinuxRemoteControlConfigPreservationPatch,
   applyLinuxXdgDocumentsDirPatch,

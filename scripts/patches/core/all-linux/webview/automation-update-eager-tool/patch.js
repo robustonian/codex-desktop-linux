@@ -5,6 +5,7 @@ const {
 } = require("../../../../descriptor.js");
 const {
   applyAutomationUpdateEagerToolPatch,
+  matchesAutomationUpdateEagerToolContract,
 } = require("../../../../impl/webview/index.js");
 
 module.exports = [
@@ -13,8 +14,9 @@ module.exports = [
     phase: "webview-asset",
     order: 1045,
     ciPolicy: "optional",
-    pattern: /\.js$/,
-    missingDescription: "webview JavaScript bundle",
+    pattern: /^app-initial-[^.]+\.js$/,
+    assetMatch: matchesAutomationUpdateEagerToolContract,
+    missingDescription: "dynamic Codex app tools bundle",
     skipDescription: "automation_update eager dynamic tool patch",
     apply: applyAutomationUpdateEagerToolPatch,
   }),

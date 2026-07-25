@@ -7,6 +7,7 @@ use std::{
     io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write},
     net::Shutdown,
     os::unix::{
+        ffi::OsStrExt,
         fs::{MetadataExt, PermissionsExt},
         io::AsRawFd,
         net::{UnixListener, UnixStream},
@@ -18,13 +19,29 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[path = "../chrome_runtime.rs"]
+mod chrome_runtime;
+
+use chrome_runtime::RuntimeManager;
+
 const HOST_NAME: &str = "com.openai.codexextension";
 const SOCKET_DIR_ENV: &str = "CODEX_BROWSER_USE_SOCKET_DIR";
 const SESSIONS_DIR_ENV: &str = "CODEX_BROWSER_USE_SESSIONS_DIR";
-const DEFAULT_SOCKET_DIR: &str = "/tmp/codex-browser-use";
+const SOCKET_DIR_NAME: &str = "codex-browser-use";
+const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
 const ROLLOUT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const OBSERVED_TURN_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const ROLLOUT_SEARCH_MAX_DEPTH: usize = 5;
+/// Chrome permits native-messaging payloads up to 64 MiB from the extension.
+const MAX_ACCEPTED_FRAME_BYTES: usize = 64 * 1024 * 1024;
+/// Requests older than this can no longer hold correlation state indefinitely.
+const PENDING_REQUEST_TTL: Duration = Duration::from_secs(10 * 60);
+/// Bounds unanswered correlations independently in each bridge direction.
+const MAX_PENDING_REQUESTS_PER_DIRECTION: usize = 1024;
+/// Bounds retained string IDs to about 4 MiB per direction at the entry cap.
+const MAX_PENDING_REQUEST_ID_STRING_BYTES: usize = 4 * 1024;
+const PENDING_REQUEST_LIMIT_ERROR_CODE: i64 = -32001;
+const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
 
 type SharedState = Arc<Mutex<HostState>>;
 type SharedChromeWriter = Arc<Mutex<Box<dyn Write + Send>>>;
@@ -39,12 +56,14 @@ struct PendingChromeRequest {
     client_id: usize,
     client_request_id: Value,
     fallback_extension_info: bool,
+    created_at: Instant,
 }
 
 #[derive(Clone)]
 struct PendingClientRequest {
     client_id: usize,
     chrome_request_id: Value,
+    created_at: Instant,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -74,6 +93,7 @@ struct HostState {
     next_client_id: usize,
     next_chrome_id: u64,
     next_client_request_id: u64,
+    runtime_manager: Arc<RuntimeManager>,
 }
 
 impl HostState {
@@ -81,6 +101,7 @@ impl HostState {
         stdout: SharedChromeWriter,
         rollout_tracker: RolloutTracker,
         extension_id: Option<String>,
+        runtime_manager: Arc<RuntimeManager>,
     ) -> Self {
         Self {
             stdout,
@@ -92,6 +113,7 @@ impl HostState {
             next_client_id: 1,
             next_chrome_id: 1,
             next_client_request_id: 1,
+            runtime_manager,
         }
     }
 
@@ -115,6 +137,15 @@ impl HostState {
             &mut self.pending_client_requests,
             client_id,
         );
+    }
+
+    fn prune_expired_pending_requests(&mut self, now: Instant) {
+        self.pending_chrome_requests.retain(|_, pending| {
+            now.saturating_duration_since(pending.created_at) < PENDING_REQUEST_TTL
+        });
+        self.pending_client_requests.retain(|_, pending| {
+            now.saturating_duration_since(pending.created_at) < PENDING_REQUEST_TTL
+        });
     }
 
     fn send_chrome(&self, message: &Value) {
@@ -301,9 +332,10 @@ impl RolloutTracker {
 }
 
 fn main() -> Result<()> {
-    let socket_dir = socket_dir();
+    let effective_uid = unsafe { libc::geteuid() };
+    let socket_dir = socket_dir(effective_uid);
+    let socket_path = socket_path(&socket_dir)?;
     prepare_socket_dir(&socket_dir)?;
-    let socket_path = socket_path(&socket_dir);
     remove_socket_if_present(&socket_path)?;
 
     let listener = UnixListener::bind(&socket_path)
@@ -314,10 +346,12 @@ fn main() -> Result<()> {
     let stdout: SharedChromeWriter = Arc::new(Mutex::new(Box::new(io::stdout())));
     let rollout_tracker = RolloutTracker::new(Arc::clone(&stdout));
     let extension_id = extension_id_from_args();
+    let runtime_manager = Arc::new(RuntimeManager::new(extension_id.clone()));
     let state = Arc::new(Mutex::new(HostState::new(
         stdout,
         rollout_tracker,
         extension_id,
+        Arc::clone(&runtime_manager),
     )));
 
     log(&format!("listening on {}", socket_path.display()));
@@ -328,14 +362,21 @@ fn main() -> Result<()> {
     }
 
     let result = read_chrome_messages(Arc::clone(&state));
+    runtime_manager.shutdown();
     remove_socket_if_present(&socket_path)?;
     result
 }
 
-fn socket_dir() -> PathBuf {
-    env::var_os(SOCKET_DIR_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET_DIR))
+fn socket_dir(effective_uid: u32) -> PathBuf {
+    if let Some(path) = env::var_os(SOCKET_DIR_ENV).filter(|value| !value.is_empty()) {
+        return PathBuf::from(path);
+    }
+
+    default_socket_dir(effective_uid)
+}
+
+fn default_socket_dir(effective_uid: u32) -> PathBuf {
+    PathBuf::from(format!("/tmp/{SOCKET_DIR_NAME}-{effective_uid}"))
 }
 
 fn sessions_root() -> Option<PathBuf> {
@@ -365,12 +406,23 @@ fn is_extension_id(value: &str) -> bool {
     value.len() == 32 && value.bytes().all(|byte| matches!(byte, b'a'..=b'p'))
 }
 
-fn socket_path(socket_dir: &Path) -> PathBuf {
+fn socket_path(socket_dir: &Path) -> Result<PathBuf> {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    socket_dir.join(format!("extension-{}-{nonce}.sock", process::id()))
+    socket_path_for(socket_dir, process::id(), nonce)
+}
+
+fn socket_path_for(socket_dir: &Path, process_id: u32, nonce: u128) -> Result<PathBuf> {
+    let path = socket_dir.join(format!("extension-{process_id}-{nonce}.sock"));
+    if path.as_os_str().as_bytes().len() > MAX_UNIX_SOCKET_PATH_BYTES {
+        bail!(
+            "unix socket path exceeds the {MAX_UNIX_SOCKET_PATH_BYTES}-byte Linux limit: {}",
+            path.display()
+        );
+    }
+    Ok(path)
 }
 
 fn prepare_socket_dir(path: &Path) -> Result<()> {
@@ -532,7 +584,8 @@ fn read_client_messages(state: SharedState, client_id: usize, stream: UnixStream
 
 fn handle_client_message(state: &SharedState, client_id: usize, message: Value) {
     {
-        let state = state.lock().expect("host state mutex poisoned");
+        let mut state = state.lock().expect("host state mutex poisoned");
+        state.prune_expired_pending_requests(Instant::now());
         if !state.clients.contains_key(&client_id) {
             return;
         }
@@ -584,13 +637,30 @@ fn handle_client_message(state: &SharedState, client_id: usize, message: Value) 
         return;
     }
 
-    let Some(client_request_id) = message.get("id").cloned() else {
-        return;
+    let client_request_id = match bounded_pending_request_id(&message) {
+        Ok(id) => id,
+        Err(error) => {
+            let state = state.lock().expect("host state mutex poisoned");
+            if state.clients.contains_key(&client_id) {
+                state.send_client(client_id, &invalid_request_id_error(error));
+            }
+            return;
+        }
     };
     let fallback_extension_info = message.get("method").and_then(Value::as_str) == Some("getInfo");
 
     let mut state = state.lock().expect("host state mutex poisoned");
     if !state.clients.contains_key(&client_id) {
+        return;
+    }
+    if state.pending_chrome_requests.len() >= MAX_PENDING_REQUESTS_PER_DIRECTION {
+        state.send_client(
+            client_id,
+            &pending_request_limit_error(
+                client_request_id,
+                "Too many pending client requests to Chrome",
+            ),
+        );
         return;
     }
     let chrome_id = format!("linux-{}-{}", process::id(), state.next_chrome_id);
@@ -601,12 +671,31 @@ fn handle_client_message(state: &SharedState, client_id: usize, message: Value) 
             client_id,
             client_request_id,
             fallback_extension_info,
+            created_at: Instant::now(),
         },
     );
     state.send_chrome(&with_id(message, Value::String(chrome_id)));
 }
 
 fn handle_chrome_message(state: &SharedState, message: Value) {
+    {
+        let mut state = state.lock().expect("host state mutex poisoned");
+        state.prune_expired_pending_requests(Instant::now());
+    }
+
+    if chrome_runtime::is_runtime_request(&message) {
+        let runtime_manager = {
+            let state = state.lock().expect("host state mutex poisoned");
+            Arc::clone(&state.runtime_manager)
+        };
+        // App-server children use PR_SET_PDEATHSIG. Launch them from this
+        // long-lived native-messaging thread, not a short-lived request worker.
+        let response = runtime_manager.handle_request(&message);
+        let state = state.lock().expect("host state mutex poisoned");
+        state.send_chrome(&response);
+        return;
+    }
+
     if is_response(&message) {
         let Some(id) = message_id_as_str(&message) else {
             return;
@@ -643,7 +732,14 @@ fn handle_chrome_message(state: &SharedState, message: Value) {
         return;
     }
 
-    let chrome_request_id = message.get("id").cloned().unwrap_or(Value::Null);
+    let chrome_request_id = match bounded_pending_request_id(&message) {
+        Ok(id) => id,
+        Err(error) => {
+            let state = state.lock().expect("host state mutex poisoned");
+            state.send_chrome(&invalid_request_id_error(error));
+            return;
+        }
+    };
     let mut state = state.lock().expect("host state mutex poisoned");
     let client_id = match select_single_client_id(&state.clients) {
         Ok(client_id) => client_id,
@@ -661,12 +757,20 @@ fn handle_chrome_message(state: &SharedState, message: Value) {
     };
 
     let client_request_id = format!("chrome-{}-{}", process::id(), state.next_client_request_id);
+    if state.pending_client_requests.len() >= MAX_PENDING_REQUESTS_PER_DIRECTION {
+        state.send_chrome(&pending_request_limit_error(
+            chrome_request_id,
+            "Too many pending Chrome requests to the browser client",
+        ));
+        return;
+    }
     state.next_client_request_id += 1;
     state.pending_client_requests.insert(
         client_request_id.clone(),
         PendingClientRequest {
             client_id,
             chrome_request_id,
+            created_at: Instant::now(),
         },
     );
     state.send_client(
@@ -692,6 +796,41 @@ fn remove_pending_requests_for_client(
 ) {
     pending_chrome_requests.retain(|_, pending| pending.client_id != client_id);
     pending_client_requests.retain(|_, pending| pending.client_id != client_id);
+}
+
+fn pending_request_limit_error(id: Value, message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": PENDING_REQUEST_LIMIT_ERROR_CODE,
+            "message": message
+        }
+    })
+}
+
+fn bounded_pending_request_id(message: &Value) -> std::result::Result<Value, &'static str> {
+    match message.get("id") {
+        Some(Value::String(id)) if id.len() <= MAX_PENDING_REQUEST_ID_STRING_BYTES => {
+            Ok(Value::String(id.clone()))
+        }
+        Some(Value::String(_)) => Err("JSON-RPC request id exceeds the retained size limit"),
+        Some(Value::Number(id)) => Ok(Value::Number(id.clone())),
+        Some(Value::Null) => Ok(Value::Null),
+        Some(_) => Err("JSON-RPC request id must be a string, number, or null"),
+        None => Err("JSON-RPC request id is missing"),
+    }
+}
+
+fn invalid_request_id_error(message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": Value::Null,
+        "error": {
+            "code": INVALID_REQUEST_ERROR_CODE,
+            "message": message
+        }
+    })
 }
 
 fn is_request(message: &Value) -> bool {
@@ -868,6 +1007,14 @@ fn read_frame(reader: &mut impl Read) -> io::Result<Option<Value>> {
         }
 
         let length = u32::from_ne_bytes(header) as usize;
+        if length > MAX_ACCEPTED_FRAME_BYTES {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "native messaging frame length {length} exceeds {MAX_ACCEPTED_FRAME_BYTES}-byte limit"
+                ),
+            ));
+        }
         let mut body = vec![0_u8; length];
         reader.read_exact(&mut body)?;
 
@@ -901,6 +1048,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn socket_directory_default_is_scoped_by_uid() {
+        assert_eq!(
+            default_socket_dir(1000),
+            PathBuf::from("/tmp/codex-browser-use-1000")
+        );
+    }
+
+    #[test]
+    fn complete_socket_path_is_guarded_against_the_linux_limit() {
+        let short = socket_path_for(Path::new("/tmp/codex-browser-use-1000"), 42, 7).unwrap();
+        assert_eq!(
+            short,
+            PathBuf::from("/tmp/codex-browser-use-1000/extension-42-7.sock")
+        );
+
+        let long_dir = PathBuf::from("/tmp").join("x".repeat(MAX_UNIX_SOCKET_PATH_BYTES));
+        let error = socket_path_for(&long_dir, 42, 7).unwrap_err();
+        assert!(error.to_string().contains("unix socket path exceeds"));
+    }
+
+    #[test]
     fn frame_round_trip_uses_native_length_prefix() {
         let message = json!({ "jsonrpc": "2.0", "id": "1", "method": "ping" });
         let mut encoded = Vec::new();
@@ -911,6 +1079,18 @@ mod tests {
 
         let mut cursor = io::Cursor::new(encoded);
         assert_eq!(read_frame(&mut cursor).unwrap(), Some(message));
+    }
+
+    #[test]
+    fn rejects_frame_above_accepted_maximum_before_reading_body() {
+        let oversized_length = (MAX_ACCEPTED_FRAME_BYTES as u32) + 1;
+        let mut cursor = io::Cursor::new(oversized_length.to_ne_bytes());
+
+        let error = read_frame(&mut cursor).expect_err("oversized frame should be rejected");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(error.to_string().contains("exceeds"));
+        assert_eq!(cursor.position(), 4, "body must not be read or allocated");
     }
 
     #[test]
@@ -1022,6 +1202,190 @@ mod tests {
     }
 
     #[test]
+    fn handles_runtime_hello_without_a_browser_client() {
+        let (host_state, output) = test_host_state_with_output();
+        let state = Arc::new(Mutex::new(host_state));
+
+        handle_chrome_message(
+            &state,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "native-host:1",
+                "method": "codexRuntime/hello",
+                "params": {
+                    "constraints": {
+                        "extensionBuildChannel": "prod",
+                        "extensionId": "abcdefghijklmnopabcdefghijklmnop",
+                        "extensionVersion": "1.2.27203.26575",
+                        "nativeHostName": HOST_NAME,
+                        "requiredAppServerProtocolVersion": 2,
+                        "requiredNativeHostProtocolVersion": 2
+                    }
+                }
+            }),
+        );
+
+        let response = read_captured_message(&output);
+        assert_eq!(response["id"], "native-host:1");
+        assert_eq!(response["result"]["manifestSchemaVersion"], 2);
+        assert_eq!(response["result"]["nativeHostProtocolVersion"], 2);
+        assert_eq!(response["result"]["supportedProtocolVersions"], json!([2]));
+    }
+
+    #[test]
+    fn runtime_ensure_keeps_child_alive_after_request_returns() {
+        let root = unique_test_dir("codex-runtime-child");
+        let codex_home = root.join("codex-home");
+        let resources = root.join("resources");
+        let runtime_root = root.join("runtime");
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir_all(&codex_home).unwrap();
+        fs::create_dir_all(&resources).unwrap();
+        fs::set_permissions(&codex_home, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&resources, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let fake_cli = root.join("fake-app-server");
+        let python = test_executable("python3");
+        fs::write(
+            &fake_cli,
+            format!(
+                "#!{}\n{}",
+                python.display(),
+                r#"
+import signal
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+listen = sys.argv[sys.argv.index("--listen") + 1]
+path = listen.removeprefix("unix://")
+descendant = subprocess.Popen(["sleep", "300"])
+Path(__file__).with_name("descendant.pid").write_text(str(descendant.pid))
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(path)
+server.listen()
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+while True:
+    time.sleep(0.1)
+"#
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fake_cli, fs::Permissions::from_mode(0o700)).unwrap();
+        let fake_node = root.join("fake-node");
+        fs::write(&fake_node, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&fake_node, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let extension_id = "abcdefghijklmnopabcdefghijklmnop";
+        let extension_host_path = root.join("extension-host");
+        fs::copy(env::current_exe().unwrap(), &extension_host_path).unwrap();
+        fs::set_permissions(&extension_host_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let manifest_path = root.join("chrome-native-hosts-v2.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&json!({
+                "schemaVersion": 2,
+                "entries": [{
+                    "schemaVersion": 2,
+                    "appServerProtocolVersion": 2,
+                    "appVersion": "1.2.3",
+                    "channel": "prod",
+                    "cliVersion": "1.2.3",
+                    "entryId": "runtime-test",
+                    "extensionBuildChannels": ["prod"],
+                    "extensionIds": [extension_id],
+                    "installId": "install-test",
+                    "nativeHostNames": [HOST_NAME],
+                    "nativeHostProtocolVersion": 2,
+                    "nativeHostVersion": "1.2.3",
+                    "paths": {
+                        "codexCliPath": fake_cli,
+                        "codexHome": codex_home,
+                        "extensionHostPath": extension_host_path,
+                        "nodePath": fake_node,
+                        "resourcesPath": resources
+                    },
+                    "proxyHost": "127.0.0.1",
+                    "proxyPort": 0,
+                    "updatedAt": "2026-07-10T00:00:00Z"
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let runtime_manager = Arc::new(RuntimeManager::for_test_with_current_executable_path(
+            extension_id.to_string(),
+            runtime_root.clone(),
+            manifest_path,
+            &extension_host_path,
+        ));
+        let (mut host_state, output) = test_host_state_with_output();
+        host_state.runtime_manager = Arc::clone(&runtime_manager);
+        let state = Arc::new(Mutex::new(host_state));
+
+        handle_chrome_message(
+            &state,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "native-host:ensure",
+                "method": "codexRuntime/ensure",
+                "params": {
+                    "constraints": {
+                        "extensionBuildChannel": "prod",
+                        "extensionId": extension_id,
+                        "extensionVersion": "1.2.3",
+                        "nativeHostName": HOST_NAME,
+                        "requiredAppServerProtocolVersion": 2,
+                        "requiredNativeHostProtocolVersion": 2
+                    },
+                    "clientId": "sidepanel-window-test"
+                }
+            }),
+        );
+
+        let response = read_captured_message(&output);
+        assert_eq!(response["id"], "native-host:ensure");
+        assert_eq!(
+            response["result"]["connected"], true,
+            "runtime ensure response: {response}"
+        );
+        assert_eq!(runtime_manager.running_process_count(), 1);
+        let descendant_pid: libc::pid_t = fs::read_to_string(root.join("descendant.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+
+        runtime_manager.shutdown();
+        assert_eq!(runtime_manager.running_process_count(), 0);
+        assert!(!runtime_root.exists());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && process_is_live(descendant_pid) {
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(!process_is_live(descendant_pid));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn test_executable(name: &str) -> PathBuf {
+        let path = env::var_os("PATH").expect("PATH is required for extension host tests");
+        env::split_paths(&path)
+            .filter(|directory| directory.is_absolute())
+            .map(|directory| directory.join(name))
+            .find(|candidate| {
+                fs::metadata(candidate).is_ok_and(|metadata| {
+                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                })
+            })
+            .unwrap_or_else(|| panic!("could not resolve test executable from PATH: {name}"))
+    }
+
+    #[test]
     fn replacing_browser_client_evicts_stale_clients_and_pending_requests() {
         let mut state = test_host_state();
 
@@ -1036,6 +1400,7 @@ mod tests {
                 client_id: first_client_id,
                 client_request_id: json!("client-request-1"),
                 fallback_extension_info: false,
+                created_at: Instant::now(),
             },
         );
         state.pending_client_requests.insert(
@@ -1043,6 +1408,7 @@ mod tests {
             PendingClientRequest {
                 client_id: first_client_id,
                 chrome_request_id: json!("chrome-request-1"),
+                created_at: Instant::now(),
             },
         );
 
@@ -1158,6 +1524,7 @@ mod tests {
                 client_id: 1,
                 client_request_id: json!("client-cdp-call-1"),
                 fallback_extension_info: false,
+                created_at: Instant::now(),
             },
         );
         let state = Arc::new(Mutex::new(state));
@@ -1198,6 +1565,7 @@ mod tests {
                 client_id: 1,
                 client_request_id: json!("info-1"),
                 fallback_extension_info: true,
+                created_at: Instant::now(),
             },
         );
         state.extension_id = Some("abcdefghijklmnopabcdefghijklmnop".to_string());
@@ -1227,6 +1595,206 @@ mod tests {
     }
 
     #[test]
+    fn pruning_removes_expired_requests_and_keeps_live_correlations() {
+        let now = Instant::now();
+        let expired_at = now - PENDING_REQUEST_TTL - Duration::from_secs(1);
+        let mut state = test_host_state();
+        state.pending_chrome_requests.insert(
+            "expired-chrome".to_string(),
+            PendingChromeRequest {
+                client_id: 1,
+                client_request_id: json!("expired-client-id"),
+                fallback_extension_info: false,
+                created_at: expired_at,
+            },
+        );
+        state.pending_chrome_requests.insert(
+            "live-chrome".to_string(),
+            PendingChromeRequest {
+                client_id: 2,
+                client_request_id: json!("live-client-id"),
+                fallback_extension_info: true,
+                created_at: now,
+            },
+        );
+        state.pending_client_requests.insert(
+            "expired-client".to_string(),
+            PendingClientRequest {
+                client_id: 3,
+                chrome_request_id: json!("expired-chrome-id"),
+                created_at: expired_at,
+            },
+        );
+        state.pending_client_requests.insert(
+            "live-client".to_string(),
+            PendingClientRequest {
+                client_id: 4,
+                chrome_request_id: json!("live-chrome-id"),
+                created_at: now,
+            },
+        );
+
+        state.prune_expired_pending_requests(now);
+
+        assert!(!state.pending_chrome_requests.contains_key("expired-chrome"));
+        let live_chrome = &state.pending_chrome_requests["live-chrome"];
+        assert_eq!(live_chrome.client_id, 2);
+        assert_eq!(live_chrome.client_request_id, json!("live-client-id"));
+        assert!(live_chrome.fallback_extension_info);
+        assert!(!state.pending_client_requests.contains_key("expired-client"));
+        let live_client = &state.pending_client_requests["live-client"];
+        assert_eq!(live_client.client_id, 4);
+        assert_eq!(live_client.chrome_request_id, json!("live-chrome-id"));
+    }
+
+    #[test]
+    fn pending_request_ids_accept_only_bounded_json_rpc_scalars() {
+        let max_string = "x".repeat(MAX_PENDING_REQUEST_ID_STRING_BYTES);
+        assert_eq!(
+            bounded_pending_request_id(&json!({ "id": max_string })).unwrap(),
+            Value::String("x".repeat(MAX_PENDING_REQUEST_ID_STRING_BYTES))
+        );
+        assert_eq!(
+            bounded_pending_request_id(&json!({ "id": 42 })).unwrap(),
+            json!(42)
+        );
+        assert_eq!(
+            bounded_pending_request_id(&json!({ "id": null })).unwrap(),
+            Value::Null
+        );
+        assert!(bounded_pending_request_id(&json!({
+            "id": "x".repeat(MAX_PENDING_REQUEST_ID_STRING_BYTES + 1)
+        }))
+        .is_err());
+        assert!(bounded_pending_request_id(&json!({ "id": { "nested": true } })).is_err());
+    }
+
+    #[test]
+    fn oversized_client_request_id_is_rejected_without_retention() {
+        let (client_writer, mut client_reader) = UnixStream::pair().unwrap();
+        let (mut state, chrome_output) = test_host_state_with_output();
+        state.clients.insert(
+            1,
+            Client {
+                writer: Arc::new(Mutex::new(client_writer)),
+            },
+        );
+        let state = Arc::new(Mutex::new(state));
+
+        handle_client_message(
+            &state,
+            1,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "x".repeat(MAX_PENDING_REQUEST_ID_STRING_BYTES + 1),
+                "method": "getTabs"
+            }),
+        );
+
+        let response = read_frame(&mut client_reader).unwrap().unwrap();
+        assert_eq!(response["id"], Value::Null);
+        assert_eq!(response["error"]["code"], INVALID_REQUEST_ERROR_CODE);
+        assert!(chrome_output.lock().unwrap().is_empty());
+        assert!(state.lock().unwrap().pending_chrome_requests.is_empty());
+    }
+
+    #[test]
+    fn oversized_chrome_request_id_is_rejected_without_retention() {
+        let (mut state, chrome_output) = test_host_state_with_output();
+        state.clients.insert(1, test_client());
+        let state = Arc::new(Mutex::new(state));
+
+        handle_chrome_message(
+            &state,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "x".repeat(MAX_PENDING_REQUEST_ID_STRING_BYTES + 1),
+                "method": "browserCommand"
+            }),
+        );
+
+        let response = read_captured_message(&chrome_output);
+        assert_eq!(response["id"], Value::Null);
+        assert_eq!(response["error"]["code"], INVALID_REQUEST_ERROR_CODE);
+        assert!(state.lock().unwrap().pending_client_requests.is_empty());
+    }
+
+    #[test]
+    fn full_chrome_request_map_returns_correlated_error_to_client() {
+        let (client_writer, mut client_reader) = UnixStream::pair().unwrap();
+        let (mut state, chrome_output) = test_host_state_with_output();
+        state.clients.insert(
+            1,
+            Client {
+                writer: Arc::new(Mutex::new(client_writer)),
+            },
+        );
+        let now = Instant::now();
+        for index in 0..MAX_PENDING_REQUESTS_PER_DIRECTION {
+            state.pending_chrome_requests.insert(
+                format!("pending-{index}"),
+                PendingChromeRequest {
+                    client_id: 1,
+                    client_request_id: json!(index),
+                    fallback_extension_info: false,
+                    created_at: now,
+                },
+            );
+        }
+        let state = Arc::new(Mutex::new(state));
+
+        handle_client_message(
+            &state,
+            1,
+            json!({ "jsonrpc": "2.0", "id": "over-cap", "method": "getTabs" }),
+        );
+
+        let response = read_frame(&mut client_reader).unwrap().unwrap();
+        assert_eq!(response["id"], "over-cap");
+        assert_eq!(response["error"]["code"], PENDING_REQUEST_LIMIT_ERROR_CODE);
+        assert!(chrome_output.lock().unwrap().is_empty());
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.pending_chrome_requests.len(),
+            MAX_PENDING_REQUESTS_PER_DIRECTION
+        );
+        assert_eq!(state.next_chrome_id, 1);
+    }
+
+    #[test]
+    fn full_client_request_map_returns_correlated_error_to_chrome() {
+        let (mut state, chrome_output) = test_host_state_with_output();
+        state.clients.insert(1, test_client());
+        let now = Instant::now();
+        for index in 0..MAX_PENDING_REQUESTS_PER_DIRECTION {
+            state.pending_client_requests.insert(
+                format!("pending-{index}"),
+                PendingClientRequest {
+                    client_id: 1,
+                    chrome_request_id: json!(index),
+                    created_at: now,
+                },
+            );
+        }
+        let state = Arc::new(Mutex::new(state));
+
+        handle_chrome_message(
+            &state,
+            json!({ "jsonrpc": "2.0", "id": "chrome-over-cap", "method": "browserCommand" }),
+        );
+
+        let response = read_captured_message(&chrome_output);
+        assert_eq!(response["id"], "chrome-over-cap");
+        assert_eq!(response["error"]["code"], PENDING_REQUEST_LIMIT_ERROR_CODE);
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.pending_client_requests.len(),
+            MAX_PENDING_REQUESTS_PER_DIRECTION
+        );
+        assert_eq!(state.next_client_request_id, 1);
+    }
+
+    #[test]
     fn disconnect_cleanup_removes_pending_state_for_client() {
         let mut pending_chrome = HashMap::from([
             (
@@ -1235,6 +1803,7 @@ mod tests {
                     client_id: 1,
                     client_request_id: json!("chrome-request-1"),
                     fallback_extension_info: false,
+                    created_at: Instant::now(),
                 },
             ),
             (
@@ -1243,6 +1812,7 @@ mod tests {
                     client_id: 2,
                     client_request_id: json!("chrome-request-2"),
                     fallback_extension_info: false,
+                    created_at: Instant::now(),
                 },
             ),
         ]);
@@ -1252,6 +1822,7 @@ mod tests {
                 PendingClientRequest {
                     client_id: 1,
                     chrome_request_id: json!("client-request-1"),
+                    created_at: Instant::now(),
                 },
             ),
             (
@@ -1259,6 +1830,7 @@ mod tests {
                 PendingClientRequest {
                     client_id: 2,
                     chrome_request_id: json!("client-request-2"),
+                    created_at: Instant::now(),
                 },
             ),
         ]);
@@ -1290,6 +1862,9 @@ mod tests {
                 sessions_root: None,
             },
             Some("abcdefghijklmnopabcdefghijklmnop".to_string()),
+            Arc::new(RuntimeManager::new(Some(
+                "abcdefghijklmnopabcdefghijklmnop".to_string(),
+            ))),
         )
     }
 
@@ -1308,6 +1883,9 @@ mod tests {
                 sessions_root: None,
             },
             Some("abcdefghijklmnopabcdefghijklmnop".to_string()),
+            Arc::new(RuntimeManager::new(Some(
+                "abcdefghijklmnopabcdefghijklmnop".to_string(),
+            ))),
         );
         (state, output)
     }
@@ -1316,6 +1894,15 @@ mod tests {
         let data = output.lock().unwrap().clone();
         let mut cursor = io::Cursor::new(data);
         read_frame(&mut cursor).unwrap().unwrap()
+    }
+
+    fn process_is_live(pid: libc::pid_t) -> bool {
+        let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        stat.rsplit_once(')')
+            .and_then(|(_, suffix)| suffix.trim_start().chars().next())
+            .is_some_and(|state| state != 'Z')
     }
 
     struct CaptureWriter {

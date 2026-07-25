@@ -7,10 +7,8 @@ PACKAGE_NAME="codex-desktop"
 SYSTEM_ROOT="/opt/$PACKAGE_NAME"
 SYSTEM_BUILD_INFO="$SYSTEM_ROOT/.codex-linux/build-info.json"
 SYSTEM_ASSETS_ROOT="$SYSTEM_ROOT/content/webview/assets"
-REMOTE_AVAILABILITY_MARKER="codexLinuxRemoteControlProfileAvailability||"
 REMOTE_TABS_MARKER="codexLinuxRemoteControlProfileTabsAvailable"
 REMOTE_TABS_COMMENT_BUG=".js.mapfunction $REMOTE_TABS_MARKER"
-CODEX_MOBILE_SIDEBAR_MARKER="codexLinuxCodexMobileProfileAvailability"
 
 info() {
     echo "[INFO] $*" >&2
@@ -30,8 +28,8 @@ usage() {
 Usage: bash scripts/verify-installed.sh [PACKAGE_FILE]
 
 Verifies that the installed /opt/codex-desktop payload matches a built native
-package from dist/ and that the Linux profile remote-control patches are
-present in the installed webview assets.
+package from dist/ and that the current Linux profile remote-control tabs patch
+is present in the installed webview assets.
 
 When PACKAGE_FILE is omitted, the newest native package in dist/ is used.
 EOF
@@ -163,19 +161,18 @@ asset_marker_present() {
     grep -Fq "$marker" "$SYSTEM_ASSETS_ROOT/$asset"
 }
 
-asset_marker_absent() {
-    local prefix="$1"
-    local marker="$2"
+asset_marker_absent_any() {
+    local marker="$1"
     local asset
 
     [ -d "$SYSTEM_ASSETS_ROOT" ] || return 1
-    asset="$(
-        find "$SYSTEM_ASSETS_ROOT" -maxdepth 1 -type f -name "${prefix}*.js" -printf '%f\n' \
-            | sort \
-            | head -n 1
-    )"
-    [ -n "$asset" ] || return 1
-    ! grep -Fq "$marker" "$SYSTEM_ASSETS_ROOT/$asset"
+    for asset in "$SYSTEM_ASSETS_ROOT"/*.js; do
+        [ -f "$asset" ] || continue
+        if grep -Fq "$marker" "$asset"; then
+            return 1
+        fi
+    done
+    return 0
 }
 
 main() {
@@ -215,13 +212,6 @@ main() {
         failed=1
     fi
 
-    if asset_marker_present "use-plugin-install-flow-" "$REMOTE_AVAILABILITY_MARKER"; then
-        echo "Profile availability marker: present"
-    else
-        warn "Profile availability marker is missing from installed webview assets"
-        failed=1
-    fi
-
     if asset_marker_present "remote-connections-settings-" "$REMOTE_TABS_MARKER"; then
         echo "Remote connections settings tabs marker: present"
     else
@@ -229,17 +219,10 @@ main() {
         failed=1
     fi
 
-    if asset_marker_absent "remote-connections-settings-" "$REMOTE_TABS_COMMENT_BUG"; then
+    if asset_marker_absent_any "$REMOTE_TABS_COMMENT_BUG"; then
         echo "Remote connections settings tabs helper placement: valid"
     else
         warn "Remote connections settings tabs helper is commented out by a sourceMappingURL line"
-        failed=1
-    fi
-
-    if asset_marker_present "app-main-" "$CODEX_MOBILE_SIDEBAR_MARKER"; then
-        echo "Codex Mobile sidebar profile marker: present"
-    else
-        warn "Codex Mobile sidebar profile marker is missing from installed webview assets"
         failed=1
     fi
 

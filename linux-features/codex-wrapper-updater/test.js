@@ -10,7 +10,6 @@ const test = require("node:test");
 const {
   applyMainBundlePatch,
   applyWebviewRuntimePatch,
-  applyWrapperUpdateGeneralSettingsPatch,
   applyWrapperUpdateSettingsPatch,
   patchWrapperUpdateSettingsAssets,
 } = require("./patch.js");
@@ -47,6 +46,16 @@ function fakeManager(temp, body = "exit ${CODEX_FAKE_MANAGER_STATUS:-0}\n") {
   return manager;
 }
 
+function withoutWarnings(fn) {
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    return fn();
+  } finally {
+    console.warn = originalWarn;
+  }
+}
+
 test("main bundle patch writes app-state wrapper marker", () => {
   const source =
     `"use strict";var f=require("node:fs"),p=require("node:path"),c=require("node:child_process");` +
@@ -61,72 +70,76 @@ test("main bundle patch writes app-state wrapper marker", () => {
   assert.match(patched, /codex-wrapper-updater/);
   assert.match(patched, /wrapper_dev_mode/);
   assert.match(patched, /installed_wrapper_commit/);
+  assert.match(patched, /installed_commit/);
   assert.doesNotMatch(patched, /wrapper-update-pending/);
   assert.doesNotMatch(patched, /wrapper_status/);
 });
 
-test("webview runtime renders dev-mode and installed-sha chips", () => {
+test("main bundle helper does not shadow minified module variables", () => {
+  const source =
+    `"use strict";var p=require("node:fs"),u=require("node:path"),c=require("node:child_process");` +
+    `var handlers={"native-desktop-apps":async()=>({ok:true})};`;
+
+  const patched = applyMainBundlePatch(source);
+
+  assert.match(patched, /codexLinuxWrapFs\(\)\.existsSync\(__codexWrapStatePath\)/);
+  assert.match(patched, /codexLinuxWrapFs\(\)\.readFileSync\(__codexWrapStatePath,`utf8`\)/);
+  assert.match(patched, /codexLinuxWrapFs\(\)\.mkdirSync\(codexLinuxWrapPath\(\)\.dirname\(__codexWrapMarkerPath\),\{recursive:!0\}\)/);
+  assert.match(patched, /codexLinuxWrapFs\(\)\.writeFileSync\(__codexWrapMarkerPath,new Date\(\)\.toISOString\(\)\)/);
+  assert.match(patched, /let __codexWrapCheckProcess=codexLinuxWrapChildProcess\(\)\.spawn\(/);
+  assert.doesNotMatch(patched, /let p=codexLinuxWrapStatePath\(\)/);
+  assert.doesNotMatch(patched, /let c=c\.spawn\(/);
+  assert.doesNotMatch(patched, /__codexChild/);
+});
+
+test("webview runtime renders dev-mode without an installed SHA chip", () => {
   const patched = applyWebviewRuntimePatch("console.log('codex');");
 
-  assert.match(patched, /codex-linux-wrapper-sha/);
-  assert.match(patched, /installed_commit/);
+  assert.match(patched, /codex-wrapper-updater-v4/);
+  assert.doesNotMatch(patched, /codex-linux-wrapper-sha/);
   assert.match(patched, /dev-mode/);
   assert.match(patched, /\\u2699/);
   assert.match(patched, /\\u2193/);
 });
 
+test("webview runtime is not swallowed by a trailing sourcemap comment", () => {
+  const patched = applyWebviewRuntimePatch("console.log('codex');\n//# sourceMappingURL=index.js.map");
+
+  assert.match(patched, /sourceMappingURL=index\.js\.map\n;\(\(\)=>/);
+  assert.doesNotMatch(patched, /sourceMappingURL=index\.js\.map;\(\(\)=>/);
+});
+
 test("settings patch adds wrapper update toggle", () => {
   const source =
     `var KEYS={autoUpdateOnExit:"codex-linux-auto-update-on-exit"};` +
-    `function Settings(){return $.jsx(SettingsGroup,{children:$.jsx(LinuxToggle,{settingKey:KEYS.autoUpdateOnExit,label:"Install updates when you close Codex",description:"When on, a ready update waits for Codex to close and then installs. When off, updates wait until you click Update."})})}`;
+    `function Settings(){return $.jsx(SettingsGroup,{children:$.jsx(LinuxToggle,{settingKey:KEYS.autoUpdateOnExit,label:"Install updates when you close ChatGPT",description:"When on, a ready update waits for ChatGPT to close and then installs. When off, updates wait until you click Update."})})}`;
 
   const patched = applyWrapperUpdateSettingsPatch(source);
 
   assert.match(patched, /wrapperUpdates:"codex-linux-wrapper-updates-enabled"/);
   assert.match(patched, /featurePickerOnUpdate:"codex-linux-feature-picker-on-update"/);
-  assert.match(patched, /Check for Codex Desktop Linux updates/);
+  assert.match(patched, /Check for ChatGPT Desktop for Linux updates/);
   assert.match(patched, /Ask which features to enable on update/);
   assert.equal(applyWrapperUpdateSettingsPatch(patched), patched);
 });
 
-test("general settings patch adds wrapper update toggles for current upstream settings", () => {
-  const source =
-    `function $n(){let D,k,A,j,M;e[16]===Symbol.for(\`react.memo_cache_sentinel\`)?(D=(0,$.jsx)(K,{electron:!0,children:(0,$.jsx)(Br,{})}),k=(0,$.jsx)(zr,{}),A=(0,$.jsx)(Hn,{}),j=(0,$.jsx)(Mr,{}),M=(0,$.jsx)(Pr,{}),e[16]=D,e[17]=k,e[18]=A,e[19]=j,e[20]=M):(D=e[16],k=e[17],A=e[18],j=e[19],M=e[20]);}` +
-    `function Br(){return null}function Vr(e,t){return e}`;
-
-  const patched = applyWrapperUpdateGeneralSettingsPatch(source);
-
-  assert.match(patched, /CodexLinuxWrapperUpdatesSetting/);
-  assert.match(patched, /CodexLinuxFeaturePickerOnUpdateSetting/);
-  assert.match(patched, /codex-linux-wrapper-updates-enabled/);
-  assert.match(patched, /codex-linux-feature-picker-on-update/);
-  assert.match(patched, /Check for Codex Desktop Linux updates/);
-  assert.match(patched, /Ask which features to enable on update/);
-  assert.match(patched, /get-global-state/);
-  assert.match(patched, /set-global-state/);
-  assert.doesNotMatch(patched, /set-setting/);
-  assert.match(
-    patched,
-    /children:\[\(0,\$\.jsx\)\(Br,\{\}\),\(0,\$\.jsx\)\(CodexLinuxWrapperUpdatesSetting,\{\}\),\(0,\$\.jsx\)\(CodexLinuxFeaturePickerOnUpdateSetting,\{\}\)\]/,
-  );
-  assert.equal(applyWrapperUpdateGeneralSettingsPatch(patched), patched);
-});
-
-test("settings asset patch skips re-exported general settings bundles", () => {
-  const appDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-wrapper-updater-settings-assets-"));
+test("settings asset patch does not fall back to legacy settings bundles", () => {
+  const appDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-wrapper-updater-legacy-settings-"));
   const assetsDir = path.join(appDir, "webview", "assets");
   fs.mkdirSync(assetsDir, { recursive: true });
-  fs.writeFileSync(path.join(assetsDir, "general-settings-a.js"), `export{e as GeneralSettings};`);
-  fs.writeFileSync(
-    path.join(assetsDir, "general-settings-z.js"),
-    `function $n(){let D,k,A,j,M;e[16]===Symbol.for(\`react.memo_cache_sentinel\`)?(D=(0,$.jsx)(K,{electron:!0,children:(0,$.jsx)(Br,{})}),k=(0,$.jsx)(zr,{}),A=(0,$.jsx)(Hn,{}),j=(0,$.jsx)(Mr,{}),M=(0,$.jsx)(Pr,{}),e[16]=D,e[17]=k,e[18]=A,e[19]=j,e[20]=M):(D=e[16],k=e[17],A=e[18],j=e[19],M=e[20]);}function Br(){return null}`,
-  );
+  const generalSettings = `function Br(){return null}`;
+  const keybindsSettings = `var KEYS={autoUpdateOnExit:"codex-linux-auto-update-on-exit"};`;
+  fs.writeFileSync(path.join(assetsDir, "general-settings-z.js"), generalSettings);
+  fs.writeFileSync(path.join(assetsDir, "keybinds-settings-linux.js"), keybindsSettings);
 
   try {
-    assert.deepEqual(patchWrapperUpdateSettingsAssets(appDir), { matched: true, changed: 1 });
-    assert.doesNotMatch(fs.readFileSync(path.join(assetsDir, "general-settings-a.js"), "utf8"), /WrapperUpdates/);
-    assert.match(fs.readFileSync(path.join(assetsDir, "general-settings-z.js"), "utf8"), /Check for Codex Desktop Linux updates/);
-    assert.match(fs.readFileSync(path.join(assetsDir, "general-settings-z.js"), "utf8"), /Ask which features to enable on update/);
+    assert.deepEqual(patchWrapperUpdateSettingsAssets(appDir), {
+      matched: false,
+      changed: 0,
+      reason: "linux-desktop-settings-linux.js is not present",
+    });
+    assert.equal(fs.readFileSync(path.join(assetsDir, "general-settings-z.js"), "utf8"), generalSettings);
+    assert.equal(fs.readFileSync(path.join(assetsDir, "keybinds-settings-linux.js"), "utf8"), keybindsSettings);
   } finally {
     fs.rmSync(appDir, { recursive: true, force: true });
   }
@@ -138,21 +151,42 @@ test("settings asset patch prefers generated Linux desktop settings bundle", () 
   fs.mkdirSync(assetsDir, { recursive: true });
   const linuxDesktopSettings =
     `var KEYS={autoUpdateOnExit:"codex-linux-auto-update-on-exit"};` +
-    `function Settings(){return $.jsx(SettingsGroup,{children:$.jsx(LinuxToggle,{settingKey:KEYS.autoUpdateOnExit,label:"Install updates when you close Codex",description:"When on, a ready update waits for Codex to close and then installs. When off, updates wait until you click Update."})})}`;
+    `function Settings(){return $.jsx(SettingsGroup,{children:$.jsx(LinuxToggle,{settingKey:KEYS.autoUpdateOnExit,label:"Install updates when you close ChatGPT",description:"When on, a ready update waits for ChatGPT to close and then installs. When off, updates wait until you click Update."})})}`;
   const generalSettings = `function Br(){return null}`;
   fs.writeFileSync(path.join(assetsDir, "linux-desktop-settings-linux.js"), linuxDesktopSettings);
   fs.writeFileSync(path.join(assetsDir, "general-settings-z.js"), generalSettings);
 
   try {
     assert.deepEqual(patchWrapperUpdateSettingsAssets(appDir), { matched: true, changed: 1 });
+    assert.deepEqual(patchWrapperUpdateSettingsAssets(appDir), { matched: true, changed: 0 });
     assert.match(
       fs.readFileSync(path.join(assetsDir, "linux-desktop-settings-linux.js"), "utf8"),
-      /Check for Codex Desktop Linux updates/,
+      /Check for ChatGPT Desktop for Linux updates/,
     );
     assert.equal(
       fs.readFileSync(path.join(assetsDir, "general-settings-z.js"), "utf8"),
       generalSettings,
     );
+  } finally {
+    fs.rmSync(appDir, { recursive: true, force: true });
+  }
+});
+
+test("settings asset patch leaves current asset unchanged on synthetic drift", () => {
+  const appDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-wrapper-updater-settings-drift-"));
+  const assetsDir = path.join(appDir, "webview", "assets");
+  fs.mkdirSync(assetsDir, { recursive: true });
+  const driftedSettings = `var KEYS={autoUpdateOnExit:"codex-linux-auto-update-on-exit"};function Settings(){return null}`;
+  const settingsPath = path.join(assetsDir, "linux-desktop-settings-linux.js");
+  fs.writeFileSync(settingsPath, driftedSettings);
+
+  try {
+    assert.deepEqual(withoutWarnings(() => patchWrapperUpdateSettingsAssets(appDir)), {
+      matched: false,
+      changed: 0,
+      reason: "could not find Linux update toggle",
+    });
+    assert.equal(fs.readFileSync(settingsPath, "utf8"), driftedSettings);
   } finally {
     fs.rmSync(appDir, { recursive: true, force: true });
   }

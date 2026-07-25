@@ -11,7 +11,6 @@ CONTROL_TEMPLATE="$REPO_DIR/packaging/linux/control"
 DESKTOP_TEMPLATE="$REPO_DIR/packaging/linux/codex-desktop.desktop"
 SERVICE_TEMPLATE="$REPO_DIR/packaging/linux/codex-update-manager.service"
 USER_SERVICE_HELPER_TEMPLATE="$REPO_DIR/packaging/linux/codex-update-manager-user-service.sh"
-ICON_SOURCE="$REPO_DIR/assets/codex-linux.png"
 PRERM_TEMPLATE="$REPO_DIR/packaging/linux/codex-update-manager.prerm"
 POSTRM_TEMPLATE="$REPO_DIR/packaging/linux/codex-update-manager.postrm"
 POSTINST_TEMPLATE="$REPO_DIR/packaging/linux/codex-update-manager.postinst"
@@ -19,6 +18,7 @@ PACKAGED_RUNTIME_TEMPLATE="$REPO_DIR/packaging/linux/codex-packaged-runtime.sh"
 
 PACKAGE_NAME="${PACKAGE_NAME:-codex-desktop}"
 PACKAGE_VERSION="${PACKAGE_VERSION:-$(date -u +%Y.%m.%d.%H%M%S)}"
+ICON_SOURCE="$(resolve_package_icon_source)"
 MAX_BUILD_THREADS="${MAX_BUILD_THREADS:-0}"
 UPDATER_BINARY_SOURCE="${UPDATER_BINARY_SOURCE:-$REPO_DIR/target/release/codex-update-manager}"
 UPDATER_SERVICE_SOURCE="${UPDATER_SERVICE_SOURCE:-$SERVICE_TEMPLATE}"
@@ -78,15 +78,27 @@ main() {
     stage_common_package_files "$PKG_ROOT"
     stage_optional_update_builder_bundle "$PKG_ROOT"
     write_launcher_stub "$PKG_ROOT"
+    stage_linux_feature_package_resources "$PKG_ROOT" "deb"
     run_linux_feature_package_hooks "$PKG_ROOT" "deb"
     normalize_package_payload_permissions "$PKG_ROOT"
     restore_linux_feature_payload_permissions "$PKG_ROOT"
+    restore_linux_feature_package_resource_permissions "$PKG_ROOT" "deb"
 
     sed \
         -e "s/__PACKAGE_NAME__/$PACKAGE_NAME/g" \
         -e "s/__VERSION__/$PACKAGE_VERSION/g" \
         -e "s/__ARCH__/$arch/g" \
         "$CONTROL_TEMPLATE" > "$PKG_ROOT/DEBIAN/control"
+    local feature_dependency_suffix
+    if ! feature_dependency_suffix="$(
+        linux_feature_package_dependency_suffix deb "$PKG_ROOT/opt/$PACKAGE_NAME"
+    )"; then
+        error "Failed to render Linux feature dependencies for deb"
+    fi
+    replace_literal_file_token \
+        "$PKG_ROOT/DEBIAN/control" \
+        ", __LINUX_FEATURE_DEPENDENCIES__" \
+        "$feature_dependency_suffix"
     if ! package_with_updater_enabled; then
         sed -i \
             -e 's/pkexec | policykit-1, //g' \

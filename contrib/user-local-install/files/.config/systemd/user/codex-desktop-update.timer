@@ -1,5 +1,5 @@
 [Unit]
-Description=Weekly update for Codex desktop Linux wrapper
+Description=Weekly update for ChatGPT Desktop for Linux wrapper
 
 [Timer]
 OnCalendar=Sun 05:00

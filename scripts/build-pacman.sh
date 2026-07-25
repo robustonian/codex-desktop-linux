@@ -11,11 +11,11 @@ INSTALL_HOOKS="$REPO_DIR/packaging/linux/codex-desktop.install"
 DESKTOP_TEMPLATE="$REPO_DIR/packaging/linux/codex-desktop.desktop"
 SERVICE_TEMPLATE="$REPO_DIR/packaging/linux/codex-update-manager.service"
 USER_SERVICE_HELPER_TEMPLATE="$REPO_DIR/packaging/linux/codex-update-manager-user-service.sh"
-ICON_SOURCE="$REPO_DIR/assets/codex-linux.png"
 PACKAGED_RUNTIME_TEMPLATE="$REPO_DIR/packaging/linux/codex-packaged-runtime.sh"
 
 PACKAGE_NAME="${PACKAGE_NAME:-codex-desktop}"
 PACKAGE_VERSION="${PACKAGE_VERSION:-$(date -u +%Y.%m.%d.%H%M%S)}"
+ICON_SOURCE="$(resolve_package_icon_source)"
 MAX_BUILD_THREADS="${MAX_BUILD_THREADS:-0}"
 UPDATER_BINARY_SOURCE="${UPDATER_BINARY_SOURCE:-$REPO_DIR/target/release/codex-update-manager}"
 UPDATER_SERVICE_SOURCE="${UPDATER_SERVICE_SOURCE:-$SERVICE_TEMPLATE}"
@@ -110,7 +110,8 @@ main() {
 	trap "rm -rf '$build_root'" EXIT
 
 	local staging_root="$build_root/staging"
-	local -a makepkg_env=("PKGDEST=$DIST_DIR")
+	# Pin PKGEXT so Debian/Ubuntu makepkg (defaults to .pkg.tar.gz) produces .zst for the collector
+	local -a makepkg_env=("PKGDEST=$DIST_DIR" "PKGEXT=.pkg.tar.zst")
 
 	if [ "$MAX_BUILD_THREADS" != "0" ]; then
 		local makepkg_config="$build_root/makepkg.conf"
@@ -122,9 +123,11 @@ main() {
 	stage_common_package_files "$staging_root"
 	stage_optional_update_builder_bundle "$staging_root"
 	write_launcher_stub "$staging_root"
+	stage_linux_feature_package_resources "$staging_root" "pacman"
 	run_linux_feature_package_hooks "$staging_root" "pacman"
 	normalize_package_payload_permissions "$staging_root"
 	restore_linux_feature_payload_permissions "$staging_root"
+	restore_linux_feature_package_resource_permissions "$staging_root" "pacman"
 
 	local package_name
 	local pacman_pkgver
@@ -144,15 +147,33 @@ main() {
 		-e "s|__STAGING_DIR__|$staging_dir|g" \
 		-e "s/__ARCH__/$arch_replacement/g" \
 		"$PKGBUILD_TEMPLATE" >"$build_root/PKGBUILD"
+	if ! package_with_updater_enabled; then
+		sed -i \
+			-e "/'polkit'/d" \
+			"$build_root/PKGBUILD"
+	fi
+	local feature_dependency_lines=""
+	local feature_dependencies
+	local feature_dependency
+	if ! feature_dependencies="$(
+		linux_feature_package_dependencies pacman "$staging_root/opt/$PACKAGE_NAME"
+	)"; then
+		error "Failed to render Linux feature dependencies for pacman"
+	fi
+	while IFS= read -r feature_dependency; do
+		[ -n "$feature_dependency" ] || continue
+		feature_dependency_lines+="    '$feature_dependency'"$'\n'
+	done <<<"$feature_dependencies"
+	replace_literal_file_token \
+		"$build_root/PKGBUILD" \
+		"__LINUX_FEATURE_DEPENDENCIES__" \
+		"$feature_dependency_lines"
 	if package_with_updater_enabled; then
 		sed -e "s|/opt/codex-desktop|/opt/$PACKAGE_NAME|g" \
 			-e "s|codex_desktop_repair_system_package_shadow_entries codex-desktop|codex_desktop_repair_system_package_shadow_entries $PACKAGE_NAME|g" \
 			"$INSTALL_HOOKS" >"$build_root/${PACKAGE_NAME}.install"
 	else
 		write_no_updater_pacman_install_hooks "$build_root/${PACKAGE_NAME}.install"
-		sed -i \
-			-e "/'polkit'/d" \
-			"$build_root/PKGBUILD"
 	fi
 
 	mkdir -p "$DIST_DIR"

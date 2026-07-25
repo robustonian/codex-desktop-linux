@@ -1,7 +1,7 @@
 Name:           __PACKAGE_NAME__
 Version:        __RPM_VERSION__
 Release:        __RPM_RELEASE__%{?dist}
-Summary:        Codex Desktop for Linux
+Summary:        ChatGPT Desktop for Linux
 License:        Proprietary
 ExclusiveArch:  __ARCH__
 %global __requires_exclude_from ^/opt/__PACKAGE_NAME__/.*$
@@ -22,11 +22,11 @@ Requires:       libdrm.so.2%{codex_elf_suffix}, libnspr4.so%{codex_elf_suffix}, 
 Requires:       libpango-1.0.so.0%{codex_elf_suffix}, libstdc++.so.6%{codex_elf_suffix}, libX11.so.6%{codex_elf_suffix}
 Requires:       libxcb.so.1%{codex_elf_suffix}, libXcomposite.so.1%{codex_elf_suffix}, libXdamage.so.1%{codex_elf_suffix}
 Requires:       libXext.so.6%{codex_elf_suffix}, libXfixes.so.3%{codex_elf_suffix}, libxkbcommon.so.0%{codex_elf_suffix}
-Requires:       libXrandr.so.2%{codex_elf_suffix}, libgbm.so.1%{codex_elf_suffix}
+Requires:       libXrandr.so.2%{codex_elf_suffix}, libgbm.so.1%{codex_elf_suffix}, __LINUX_FEATURE_DEPENDENCIES__
 Recommends:     zenity, kdialog
 
 %description
-Community-built Linux package for Codex Desktop generated from the macOS DMG.
+Community-built Linux package for ChatGPT Desktop generated from the macOS DMG.
 Requires the Codex CLI to be available in PATH or CODEX_CLI_PATH.
 %if __PACKAGE_WITH_UPDATER__
 Local auto-updates rebuild a Linux package from the upstream Codex.dmg and therefore
@@ -50,6 +50,7 @@ cp -a "__RPM_STAGING_DIR__/." "%{buildroot}/"
 %endif
 /usr/share/applications/__PACKAGE_NAME__.desktop
 /usr/share/icons/hicolor/256x256/apps/__PACKAGE_NAME__.png
+__LINUX_FEATURE_FILES__
 %if __PACKAGE_WITH_UPDATER__
 /usr/share/polkit-1/actions/com.github.ilysenko.codex-desktop-linux.update.policy
 %endif
@@ -109,5 +110,5 @@ fi
 %endif
 
 %changelog
-* Thu Jan 01 2026 Codex Desktop Linux Maintainers <maintainers@codex-desktop-linux>
+* Thu Jan 01 2026 ChatGPT Desktop for Linux Maintainers <maintainers@codex-desktop-linux>
 - Initial RPM package

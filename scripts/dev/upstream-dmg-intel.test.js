@@ -7,6 +7,8 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 
+const productionRegistry = require("./upstream-dmg-protected-surfaces.json");
+
 const {
   buildIntelReports,
   compareProtectedSurfaces,
@@ -244,6 +246,11 @@ function createFixtureApp(root, variant = "baseline") {
   const recordPlugin = path.join(resources, "plugins/openai-bundled/plugins/record-and-replay");
   const chromePlugin = path.join(resources, "plugins/openai-bundled/plugins/chrome");
 
+  writeFile(
+    path.join(resources, "skills/skills/.curated/hatch-pet/SKILL.md"),
+    "---\nname: hatch-pet\ndescription: Create Codex-compatible animated pets with spriteVersionNumber 2.\n---\n",
+  );
+
   writeJson(path.join(resources, "package.json"), {
     name: "codex-desktop",
     version: variant === "candidate" ? "2026.7.3" : "2026.7.2",
@@ -317,7 +324,7 @@ function createFixtureApp(root, variant = "baseline") {
     version: "1.0.0",
     mcpServers: {
       "event-stream": {
-        command: "SkyComputerUseClient",
+        command: "./bin/computer-use-client-launcher",
       },
     },
     skills: [{ name: "record-and-replay", path: "skills/record-and-replay/SKILL.md" }],
@@ -325,7 +332,7 @@ function createFixtureApp(root, variant = "baseline") {
   writeJson(path.join(recordPlugin, ".mcp.json"), {
     mcpServers: {
       "event-stream": {
-        command: "SkyComputerUseClient",
+        command: "./bin/computer-use-client-launcher",
         tools:
           variant === "candidate"
             ? ["event_stream_start", "browser_trace", "speech_context", "skysight_snapshot"]
@@ -413,6 +420,32 @@ test("extracts protected surfaces, plugins, native binaries, and bridge calls fr
         binary.relativePath.endsWith("native/sky.node"),
       ),
     );
+  }));
+
+test("protects the current Hatch Pet skill and Linux bundled-skill staging owner", () =>
+  withTempDir((workspace) => {
+    const hatchPetSurface = productionRegistry.surfaces.find(
+      (surface) => surface.id === "hatch_pet_skill",
+    );
+    assert.ok(hatchPetSurface, "expected production registry to protect Hatch Pet");
+
+    const appDir = createFixtureApp(workspace, "baseline");
+    const protectedSurfaces = extractProtectedSurfaces({
+      inventory: createInventory({
+        registry: { version: productionRegistry.version, surfaces: [hatchPetSurface] },
+        sourcePath: appDir,
+      }),
+      registry: { version: productionRegistry.version, surfaces: [hatchPetSurface] },
+      repoRoot: process.cwd(),
+    });
+    const surface = protectedSurfaces.surfacesById.hatch_pet_skill;
+
+    assert.equal(surface.status, "PRESENT");
+    assert.ok(surface.satisfiedAnchors.some((anchor) => anchor.id === "hatch-pet-skill-root"));
+    assert.deepEqual(hatchPetSurface.linuxSubstrate.requiredPaths, [
+      "scripts/lib/bundled-plugins.sh",
+      "tests/scripts_smoke.sh",
+    ]);
   }));
 
 test("marks Chronicle settings toggle surface partial when the Memory master toggle path disappears", () =>

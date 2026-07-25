@@ -6,9 +6,14 @@
 | Blank window | Check whether the configured webview port is already in use: `ss -tlnp \| grep -E '5175\|5176'` |
 | `ERR_CONNECTION_REFUSED` on the webview port | Ensure `python3` works and the configured port is free |
 | Stuck on Codex logo splash | Check `~/.cache/codex-desktop/launcher.log`; another process may be serving the webview port |
-| `CODEX_CLI_PATH` error | Reopen the app to retry automatic CLI install, or install manually with `npm i -g @openai/codex` / `npm i -g --prefix ~/.local @openai/codex` |
+| A second launch opens another app instance, or Remote Control immediately turns itself off with `EACCES ... /tmp/codex-ipc/ipc-<uid>.sock` in the logs | Update and fully restart Codex Desktop. The launcher gives Electron a private default `TMPDIR` under `$XDG_STATE_HOME/codex-desktop/tmp` (normally `~/.local/state/codex-desktop/tmp`), preventing another Linux user from owning the shared IPC directory without placing bulk temporary data in `$XDG_RUNTIME_DIR` tmpfs. An explicitly configured `TMPDIR` remains unchanged. |
+| `$XDG_RUNTIME_DIR/codex-desktop/tmp` consumes significant tmpfs memory | Update and fully restart Codex Desktop. Current launchers keep bulk temporary data in the private disk-backed app state directory while runtime-only sockets remain under `$XDG_RUNTIME_DIR`. Remove old runtime temporary directories only after confirming no older Codex Desktop process is using them. |
+| `CODEX_CLI_PATH` error | Reopen the app to retry automatic CLI install, or install manually with `npm i -g --include=optional @openai/codex` / `npm i -g --include=optional --prefix ~/.local @openai/codex` |
+| `Missing optional dependency @openai/codex-linux-x64` or malformed tool calls after a self-managed npm CLI install | Reinstall with optional dependencies: `npm i -g --include=optional @openai/codex`. To repair an existing nvm install, run `npm install --include=optional` from the installed `@openai/codex` package directory |
+| `codex-update-manager status --json` shows `cli_status: "update_required"` for `/usr/bin/codex` on Arch | Pacman itself has a newer package for the installed CLI. Update through pacman instead of npm, for example `sudo pacman -Syu`; pacman-managed CLI installs are intentionally not auto-updated through npm |
+| `codex-update-manager status --json` shows `/usr/bin/codex` with `cli_status: "up_to_date"` but `cli_official_latest_version` is newer than `cli_package_manager_latest_version` | The distro package is behind the official npm release, but pacman does not currently offer a newer package. ChatGPT Desktop will not auto-switch channels; read `cli_error_message` and decide whether to stay on the distro-managed CLI or replace it with another install method |
 | `nix run` exits with no window or terminal output | Check `~/.cache/codex-desktop/launcher.log`; the Nix package still requires a user-provided `codex` CLI |
-| `gh auth status` works in terminal but fails inside Codex Desktop | See [GitHub CLI auth in app-launched shells](github-cli-auth.md) |
+| `gh auth status` works in terminal but fails inside ChatGPT Desktop | See [GitHub CLI auth in app-launched shells](github-cli-auth.md) |
 | Electron hangs while CLI is outdated | Re-run the launcher and check `~/.cache/codex-desktop/launcher.log` plus `~/.local/state/codex-update-manager/service.log` |
 | GPU / Vulkan / Wayland errors | Try `CODEX_LINUX_RENDERING_MODE=wayland-gpu ./codex-app/start.sh` or persistent launch flags below |
 | UI massively oversized, tiny, or blurry | See [Oversized or blurry UI](#oversized-or-blurry-ui-hidpi--fractional-scaling); quick fix: `CODEX_FORCE_DEVICE_SCALE_FACTOR=1 ./codex-app/start.sh` |
@@ -18,7 +23,11 @@
 | Sandbox errors | The launcher already sets `--no-sandbox` |
 | Renderer crashes in containers with a tiny `/dev/shm` | The launcher keeps `--disable-dev-shm-usage` automatically when `/dev/shm` is missing or below 1 GiB; force it with `CODEX_ELECTRON_DISABLE_DEV_SHM_USAGE=1` |
 | Screen reader does not read the app UI | Renderer accessibility is forced automatically when Orca, brltty, the GNOME screen-reader setting, AT-SPI accessibility state (`org.a11y.Status IsEnabled` or `toolkit-accessibility`, e.g. after `codex-computer-use-linux setup`), or accessibility env markers are detected; force it with `CODEX_FORCE_RENDERER_ACCESSIBILITY=1` |
-| Stale install / cached DMG | `make build-app-fresh` removes the generated app and cached DMG, then downloads current upstream |
+| Stale install / cached DMG | `make build-app-fresh` refreshes the cached DMG and builds a clean candidate; the working app remains until acceptance succeeds |
+| `Candidate was not installed (verdict: rejected)` | Open `dist-next/rebuild/upstream-dmg-decision.json`. If the blocker is `enabled-feature-drift`, disable the named Linux Feature and retry; otherwise fix required current-DMG drift before retrying |
+| `Candidate was not installed (verdict: inconclusive)` | Check the build/inspect logs and missing report paths in `upstream-dmg-decision.json`; infrastructure failures intentionally preserve the working app |
+| `Atomic directory exchange is unsupported` | Keep the candidate and final app as sibling directories on a local Linux filesystem that supports `renameat2(RENAME_EXCHANGE)`; promotion deliberately does not use a non-atomic fallback |
+| Interrupted install left a promotion journal | Run the installer again. It recovers the previous app into the recorded backup before reusing the candidate path; the canonical app remains available throughout |
 | Computer Use plugin invisible in UI | Enable the Computer Use UI opt-in; upstream server/account rollout can still hide some controls |
 | Computer Use `doctor` reports no input backend | Grant `/dev/uinput`, enable XDG RemoteDesktop portal, or start `ydotoold` / `ydotool.service` |
 | Computer Use `doctor` reports `ydotool_socket: Permission denied` | Adjust the daemon socket so users in the `input` group can use it |
@@ -54,7 +63,7 @@ For native Wayland IME setups, try:
 --wayland-text-input-version=1
 ```
 
-Restart Codex Desktop after changing this file. Warm-start launches reuse the
+Restart ChatGPT Desktop after changing this file. Warm-start launches reuse the
 running Electron process and will not pick up new flags.
 
 ## Oversized Or Blurry UI (HiDPI / Fractional Scaling)
@@ -173,7 +182,7 @@ make install-native
 ```
 
 When opening an issue, include the distro/version, GNOME Shell version,
-`XDG_SESSION_TYPE`, package method, Codex Desktop build information, and whether
+`XDG_SESSION_TYPE`, package method, ChatGPT Desktop build information, and whether
 the lockup happens with `frameless-titlebar` enabled. This path changes the
 window controls contract, so it is kept opt-in rather than enabled for all
 Linux users.

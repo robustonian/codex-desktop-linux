@@ -1,4 +1,4 @@
-//! Read-only diagnostics for installed Codex Desktop Linux runtimes.
+//! Read-only diagnostics for installed ChatGPT Desktop for Linux runtimes.
 
 use crate::{
     config::{self, RuntimeConfig, RuntimePaths},

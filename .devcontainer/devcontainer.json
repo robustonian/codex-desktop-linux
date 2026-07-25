@@ -1,5 +1,5 @@
 {
-  "name": "Codex Desktop Linux",
+  "name": "ChatGPT Desktop for Linux",
   "build": {
     "dockerfile": "Dockerfile",
     "context": ".."

@@ -1,5 +1,5 @@
 [Unit]
-Description=Update Codex desktop Linux wrapper
+Description=Update ChatGPT Desktop for Linux wrapper
 
 [Service]
 Type=oneshot

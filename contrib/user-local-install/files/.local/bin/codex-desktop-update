@@ -87,7 +87,7 @@ if [ "$force" -eq 1 ] || [ "${DMG_ETAG-}" != "$remote_etag" ] || [ "${DMG_LAST_M
 fi
 
 if [ "$repo_changed" -eq 0 ] && [ "$dmg_changed" -eq 0 ] && [ "$force" -eq 0 ]; then
-    log "Codex desktop wrapper is already up to date."
+    log "ChatGPT Desktop wrapper is already up to date."
     exit 0
 fi
 
@@ -126,7 +126,7 @@ log "Rebuilding wrapper..."
         export CODEX_LINUX_FEATURES_CONFIG="$SOURCE_REPO_DIR/linux-features/features.json"
     fi
     TMPDIR="$STATE_DIR/tmp" \
-    CODEX_INSTALL_ALLOW_RUNNING=1 \
+    CODEX_INSTALL_ALLOW_RUNNING=0 \
         CODEX_INSTALL_ROOT="$OPT_ROOT" \
         CODEX_INSTALL_DIR="$APP_DIR" \
         ./install.sh

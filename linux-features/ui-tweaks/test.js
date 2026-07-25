@@ -7,10 +7,25 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
+require("./dock-icon.test.js");
+require("./suggested-prompts.test.js");
+
 const {
   discoverLinuxFeatureManifests,
   loadLinuxFeaturePatchDescriptors,
 } = require("../../scripts/lib/linux-features.js");
+const {
+  ADVANCED_MENU_VIEW_PATTERN,
+  DYNAMIC_POWER_EFFORTS_RUNTIME_MARKER,
+  INLINE_MODEL_LIST_RUNTIME_MARKER,
+  MODEL_PICKER_EFFORT_ASSET_PATTERN,
+  MODEL_PICKER_INLINE_ASSET_PATTERN,
+  MODEL_PICKER_STATE_ASSET_PATTERN,
+  SIMPLE_MENU_VIEW_PATTERN,
+  applyDefaultAdvancedViewPatch,
+  applyDynamicSupportedReasoningEffortsPatch,
+  applyInlineModelListPatch,
+} = require("./patches/model-picker-model-list.js");
 const {
   DEFAULT_PROJECT_NAME_STYLE,
   PROJECTS_SIDEBAR_ASSET_PATTERN,
@@ -21,12 +36,84 @@ const {
   descriptors: patches,
   sidebarProjectNameCss,
 } = require("./patches/sidebar-project-name.js");
+const {
+  ENGLISH_REASONING_LABELS,
+  ZH_CN_LOCALE_ASSET_PATTERN,
+  applyEnglishReasoningLabels,
+} = require("./patches/reasoning-effort-labels.js");
 
 function projectBundleFixture() {
   return [
     "function row(){let j=Pn(`group/folder-row group relative flex h-[var(--height-token-row)] text-sm text-token-foreground`);",
-    "let V=(0,Iy.jsx)(`span`,{className:`min-w-0 truncate pr-1`,children:p});return [j,V]}",
+    "let V=(0,Iy.jsx)(`span`,{className:`text-fade-truncate pr-1`,children:p});return [j,V]}",
   ].join("");
+}
+
+function modelPickerStateBundleFixture() {
+  return [
+    "function picker(){",
+    "vz=wu(`composer-model-picker-menu-view-v1`,`simple`);",
+    "}",
+  ].join("");
+}
+
+function modelPickerMenuBundleFixture() {
+  return [
+    "function menu(){",
+    "id:`composer.intelligenceDropdown.model.title`;",
+    "let ue=fragment,ie=ue;let fe;",
+    "id:`composer.intelligenceDropdown.model.rowLabel`;",
+    "id:`composer.intelligenceDropdown.effort.title`;",
+    "we=(0,c6.jsxs)(c6.Fragment,{children:[ye,effort]});",
+    "}",
+  ].join("");
+}
+
+function modelPickerPowerBundleFixture() {
+  return [
+    "function ARe(e,{includeUltraInSlider:t=!1,removeXHigh:n=!1}={}){let r=PRe((t?[...FRe,URe]:FRe).filter(({reasoningEffort:e})=>!n||e!==`xhigh`),e);if(r.length>=3)return r;let i=PRe(IRe.filter(({reasoningEffort:e})=>!n||e!==`xhigh`),e);return i.length>=3?i:[]}",
+    "function MRe(e){return e?.flatMap(({displayName:e,model:t,supportedReasoningEfforts:n})=>{let r=e==null?`Custom`:e,i=n.flatMap(({reasoningEffort:e})=>[e]);return(i.length>0?i:[`medium`]).map(e=>({id:`${t}:${e}`,model:t,modelLabel:r,reasoningEffort:e}))})??[]}",
+    "function PRe(e,t){return e.flatMap((e,n)=>t?.some(t=>t.model===e.model&&t.supportedReasoningEfforts.some(({reasoningEffort:t})=>t===e.reasoningEffort))?[{...e,powerSettingIndex:n}]:[])}",
+    "var FRe=[{id:`gpt-5.6-terra:low`,model:`gpt-5.6-terra`,modelLabel:`5.6 Terra`,reasoningEffort:`low`},{id:`gpt-5.6-sol:low`,model:`gpt-5.6-sol`,modelLabel:`5.6 Sol`,reasoningEffort:`low`},{id:`gpt-5.6-sol:medium`,model:`gpt-5.6-sol`,modelLabel:`5.6 Sol`,reasoningEffort:`medium`},{id:`gpt-5.6-sol:high`,model:`gpt-5.6-sol`,modelLabel:`5.6 Sol`,reasoningEffort:`high`},{id:`gpt-5.6-sol:xhigh`,model:`gpt-5.6-sol`,modelLabel:`5.6 Sol`,reasoningEffort:`xhigh`}];",
+    "var URe={id:`gpt-5.6-sol:ultra`,model:`gpt-5.6-sol`,modelLabel:`5.6 Sol`,reasoningEffort:`ultra`};",
+    "var IRe=[{id:`gpt-5.6-terra:low`,model:`gpt-5.6-terra`,modelLabel:`5.6 Terra`,reasoningEffort:`low`},{id:`gpt-5.6-terra:medium`,model:`gpt-5.6-terra`,modelLabel:`5.6 Terra`,reasoningEffort:`medium`},{id:`gpt-5.6-terra:high`,model:`gpt-5.6-terra`,modelLabel:`5.6 Terra`,reasoningEffort:`high`},{id:`gpt-5.6-terra:xhigh`,model:`gpt-5.6-terra`,modelLabel:`5.6 Terra`,reasoningEffort:`xhigh`}];",
+  ].join("");
+}
+
+function filteredGpt56Models(enabledReasoningEfforts) {
+  const enabled = new Set(enabledReasoningEfforts);
+  return [
+    {
+      displayName: "GPT-5.6-Terra",
+      model: "gpt-5.6-terra",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh"]
+        .filter((reasoningEffort) => enabled.has(reasoningEffort))
+        .map((reasoningEffort) => ({ reasoningEffort })),
+    },
+    {
+      displayName: "GPT-5.6-Sol",
+      model: "gpt-5.6-sol",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"]
+        .filter((reasoningEffort) => enabled.has(reasoningEffort))
+        .map((reasoningEffort) => ({ reasoningEffort })),
+    },
+  ];
+}
+
+function simplifiedChineseLocaleFixture() {
+  const labels = {
+    "composer.mode.local.reasoning.none.label": "无",
+    "composer.mode.local.reasoning.minimal.label": "极低",
+    "composer.mode.local.reasoning.low.label": "轻度",
+    "composer.mode.local.reasoning.medium.label": "中",
+    "composer.mode.local.reasoning.high.label": "高",
+    "composer.mode.local.reasoning.xhigh.label": "极高",
+    "composer.mode.local.reasoning.max.label": "最高",
+    "composer.mode.local.reasoning.ultra.label": "极高",
+  };
+  return Object.entries(labels)
+    .map(([key, value]) => `"${key}":\`${value}\``)
+    .join(",");
 }
 
 function applyPatchTwice(source, context) {
@@ -73,15 +160,218 @@ test("ui-tweaks is discoverable and disabled until listed in features.json", () 
     const descriptors = loadLinuxFeaturePatchDescriptors({ featuresRoot });
     assert.deepEqual(
       descriptors.map((descriptor) => [descriptor.id, descriptor.phase, descriptor.ciPolicy]),
-      [["feature:ui-tweaks:sidebar-project-name-style", "webview-asset", "optional"]],
+      [
+        ["feature:ui-tweaks:sidebar-project-name-style", "webview-asset", "optional"],
+        ["feature:ui-tweaks:model-picker-default-advanced-view", "webview-asset", "optional"],
+        ["feature:ui-tweaks:model-picker-inline-model-list", "webview-asset", "optional"],
+        [
+          "feature:ui-tweaks:model-picker-dynamic-supported-reasoning-efforts",
+          "webview-asset",
+          "optional",
+        ],
+        ["feature:ui-tweaks:reasoning-effort-labels-english", "webview-asset", "optional"],
+        ["feature:ui-tweaks:appearance-dock-icon-main-process", "main-bundle", "optional"],
+        ["feature:ui-tweaks:appearance-dock-icon-settings-row", "webview-asset", "optional"],
+        ["feature:ui-tweaks:appearance-dock-icon-settings-search", "webview-asset", "optional"],
+        ["feature:ui-tweaks:home-suggested-prompts-main-process", "main-bundle", "optional"],
+        ["feature:ui-tweaks:home-suggested-prompts-app-page", "webview-asset", "optional"],
+        ["feature:ui-tweaks:home-suggested-prompts-settings-row", "webview-asset", "optional"],
+        ["feature:ui-tweaks:home-suggested-prompts-content", "webview-asset", "optional"],
+      ],
     );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
+test("model picker descriptors target the current state and menu bundles", () => {
+  const stateAsset = "app-initial-BTphDPeq.js";
+  const effortAsset = stateAsset;
+
+  assert.match(stateAsset, MODEL_PICKER_STATE_ASSET_PATTERN);
+  assert.match(stateAsset, MODEL_PICKER_INLINE_ASSET_PATTERN);
+  assert.match(effortAsset, MODEL_PICKER_EFFORT_ASSET_PATTERN);
+
+  // Current-DMG-only targeting must not retain previous chunks as fallbacks.
+  assert.doesNotMatch(
+    "app-initial~app-main~page-CMpPiY3-.js",
+    MODEL_PICKER_STATE_ASSET_PATTERN,
+  );
+});
+
+test("model picker opens advanced view and renders model choices inline", () => {
+  const stateSource = modelPickerStateBundleFixture();
+  const menuSource = modelPickerMenuBundleFixture();
+  const patchedState = applyDefaultAdvancedViewPatch(stateSource);
+  const patchedMenu = applyInlineModelListPatch(menuSource);
+
+  assert.match(patchedState, ADVANCED_MENU_VIEW_PATTERN);
+  assert.doesNotMatch(patchedState, SIMPLE_MENU_VIEW_PATTERN);
+  assert.match(patchedMenu, new RegExp(INLINE_MODEL_LIST_RUNTIME_MARKER));
+  assert.match(patchedMenu, /children:\[ie,\/\*codex-linux-inline-model-list\*\//);
+  assert.equal(applyDefaultAdvancedViewPatch(patchedState), patchedState);
+  assert.equal(applyInlineModelListPatch(patchedMenu), patchedMenu);
+});
+
+test("GPT-5.6 Power slider follows reasoning efforts enabled in settings", () => {
+  const source = modelPickerPowerBundleFixture();
+  const patched = applyDynamicSupportedReasoningEffortsPatch(source);
+  const resolvePowerSelections = Function(`${patched};return ARe;`)();
+
+  assert.match(patched, new RegExp(DYNAMIC_POWER_EFFORTS_RUNTIME_MARKER));
+  assert.equal(applyDynamicSupportedReasoningEffortsPatch(patched), patched);
+  assert.deepEqual(
+    resolvePowerSelections(filteredGpt56Models(["low", "medium", "high", "xhigh", "max"]))
+      .map(({ id }) => id),
+    [
+      "gpt-5.6-terra:low",
+      "gpt-5.6-sol:low",
+      "gpt-5.6-sol:medium",
+      "gpt-5.6-sol:high",
+      "gpt-5.6-sol:xhigh",
+      "gpt-5.6-sol:max",
+    ],
+  );
+  assert.deepEqual(
+    resolvePowerSelections(filteredGpt56Models(["low", "medium", "high", "xhigh"]))
+      .map(({ id }) => id),
+    [
+      "gpt-5.6-terra:low",
+      "gpt-5.6-sol:low",
+      "gpt-5.6-sol:medium",
+      "gpt-5.6-sol:high",
+      "gpt-5.6-sol:xhigh",
+    ],
+  );
+  assert.deepEqual(
+    resolvePowerSelections(
+      filteredGpt56Models(["low", "medium", "high", "xhigh", "ultra"]),
+      { includeUltraInSlider: true },
+    ).map(({ id }) => id),
+    [
+      "gpt-5.6-terra:low",
+      "gpt-5.6-sol:low",
+      "gpt-5.6-sol:medium",
+      "gpt-5.6-sol:high",
+      "gpt-5.6-sol:xhigh",
+      "gpt-5.6-sol:ultra",
+    ],
+  );
+});
+
+test("GPT-5.6 Power slider effort patch fails soft when upstream markers drift", () => {
+  const source = "function modelPickerPowerSelections(){return []}";
+  const { value, warnings } = withCapturedWarns(() =>
+    applyDynamicSupportedReasoningEffortsPatch(source, { warnOnMissingMarkers: true }),
+  );
+
+  assert.equal(value, source);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /Could not find the supported reasoning effort mapper/);
+});
+
+test("model picker tweak can be disabled through feature settings", () => {
+  const stateSource = modelPickerStateBundleFixture();
+  const menuSource = modelPickerMenuBundleFixture();
+  const context = {
+    feature: {
+      settings: {
+        tweaks: {
+          modelPicker: {
+            showModelsByDefault: {
+              enabled: false,
+            },
+          },
+        },
+      },
+    },
+  };
+
+  assert.equal(applyDefaultAdvancedViewPatch(stateSource, context), stateSource);
+  assert.equal(applyInlineModelListPatch(menuSource, context), menuSource);
+  assert.equal(
+    applyDynamicSupportedReasoningEffortsPatch(modelPickerPowerBundleFixture(), context),
+    modelPickerPowerBundleFixture(),
+  );
+});
+
+test("model picker drift warns and leaves the asset unchanged", () => {
+  const source = "console.log('model picker drifted');";
+  const { value, warnings } = withCapturedWarns(() =>
+    applyDefaultAdvancedViewPatch(source, { warnOnMissingMarkers: true }),
+  );
+
+  assert.equal(value, source);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /^WARN: Could not find the persisted model picker view marker/);
+});
+
+test("reasoning effort labels stay in English in the Simplified Chinese locale", () => {
+  const source = simplifiedChineseLocaleFixture();
+  const patched = applyEnglishReasoningLabels(source);
+
+  for (const [key, label] of Object.entries(ENGLISH_REASONING_LABELS)) {
+    assert.match(patched, new RegExp(`"${key.replaceAll(".", "\\.")}":\\\`${label}\\\``));
+  }
+  assert.equal(applyEnglishReasoningLabels(patched), patched);
+  assert.match("zh-CN-BPHwMaw8.js", ZH_CN_LOCALE_ASSET_PATTERN);
+  assert.doesNotMatch("zh-TW-rBlCyjlT.js", ZH_CN_LOCALE_ASSET_PATTERN);
+});
+
+test("reasoning effort label drift warns and leaves the asset unchanged", () => {
+  const source = simplifiedChineseLocaleFixture().replace(
+    '"composer.mode.local.reasoning.ultra.label":`极高`',
+    '"composer.mode.local.reasoning.ultra.missing":`极高`',
+  );
+  const { value, warnings } = withCapturedWarns(() =>
+    applyEnglishReasoningLabels(source, { warnOnMissingMarkers: true }),
+  );
+
+  assert.equal(value, source);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /composer\.mode\.local\.reasoning\.ultra\.label/);
+});
+
+test("mixed reasoning effort label markers warn and remain byte-identical", () => {
+  const source = simplifiedChineseLocaleFixture().replace(
+    '"composer.mode.local.reasoning.medium.label":`中`',
+    '"composer.mode.local.reasoning.medium.label":`Medium`',
+  );
+  const { value, warnings } = withCapturedWarns(() =>
+    applyEnglishReasoningLabels(source, { warnOnMissingMarkers: true }),
+  );
+
+  assert.equal(value, source);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /mixed applied and untranslated reasoning label markers/i);
+});
+
+test("English reasoning effort labels can be disabled", () => {
+  const source = simplifiedChineseLocaleFixture();
+  const context = {
+    feature: {
+      settings: {
+        tweaks: {
+          reasoning: {
+            keepEffortLabelsEnglish: {
+              enabled: false,
+            },
+          },
+        },
+      },
+    },
+  };
+
+  assert.equal(applyEnglishReasoningLabels(source, context), source);
+});
+
 test("sidebar project descriptor targets only the current project sidebar asset", () => {
-  assert.match(
+  assert.match("app-initial-BTphDPeq.js", PROJECTS_SIDEBAR_ASSET_PATTERN);
+  assert.doesNotMatch(
+    "app-initial~app-main~page-kMhXWEru.js",
+    PROJECTS_SIDEBAR_ASSET_PATTERN,
+  );
+  assert.doesNotMatch(
     "app-initial~app-main~automations-page-BcHjEK7e.js",
     PROJECTS_SIDEBAR_ASSET_PATTERN,
   );
@@ -138,17 +428,18 @@ test("feature manifest defaults reach descriptor context through the feature loa
     const [descriptor] = loadLinuxFeaturePatchDescriptors({ featuresRoot });
     const patched = descriptor.apply(projectBundleFixture(), {});
 
-    assert.match(patched, /font-weight: 700 !important; padding-top: 0.25rem;/);
+    assert.match(patched, /font-weight: 700 !important;/);
+    assert.doesNotMatch(patched, /padding-top/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
-test("default project name style is bold with top padding and no forced color", () => {
+test("default project name style is bold without changing fixed row geometry", () => {
   const featureJson = JSON.parse(fs.readFileSync(path.join(__dirname, "feature.json"), "utf8"));
   assert.equal(featureJson.tweaks.sidebar.projectName.style, DEFAULT_PROJECT_NAME_STYLE);
   assert.match(DEFAULT_PROJECT_NAME_STYLE, /font-weight:\s*700\s*!important/);
-  assert.match(DEFAULT_PROJECT_NAME_STYLE, /padding-top:\s*0\.25rem/);
+  assert.doesNotMatch(DEFAULT_PROJECT_NAME_STYLE, /(?:padding|margin|height)/i);
   assert.doesNotMatch(DEFAULT_PROJECT_NAME_STYLE, /color/i);
   assert.doesNotMatch(sidebarProjectNameCss(DEFAULT_PROJECT_NAME_STYLE), /#000|black/i);
 });
@@ -207,7 +498,8 @@ test("invalid feature settings warn and fall back to defaults", () => {
     const patched = descriptors[0].apply(projectBundleFixture(), {});
 
     assert.match(warnings.join("\n"), /WARN: Linux feature 'ui-tweaks' settings/);
-    assert.match(patched, /font-weight: 700 !important; padding-top: 0.25rem;/);
+    assert.match(patched, /font-weight: 700 !important;/);
+    assert.doesNotMatch(patched, /padding-top/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -272,7 +564,8 @@ test("invalid and empty styles warn and fall back without throwing", () => {
     );
 
     assert.match(value, new RegExp(STYLE_ID));
-    assert.match(value, /font-weight: 700 !important; padding-top: 0.25rem;/);
+    assert.match(value, /font-weight: 700 !important;/);
+    assert.doesNotMatch(value, /padding-top/);
     assert.equal(warnings.length, 1);
     assert.match(warnings[0], /^WARN: ui-tweaks sidebar project name style/);
   }
@@ -297,7 +590,8 @@ test("unsafe styles warn, stay scoped, and fall back to the default", () => {
   );
 
   assert.match(value, new RegExp(STYLE_ID));
-  assert.match(value, /font-weight: 700 !important; padding-top: 0.25rem;/);
+  assert.match(value, /font-weight: 700 !important;/);
+  assert.doesNotMatch(value, /padding-top/);
   assert.doesNotMatch(value, /body\{display:none\}/);
   assert.equal(value.includes(unsafeStyle), false);
   assert.equal(warnings.length, 1);

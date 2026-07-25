@@ -5,6 +5,226 @@
 # shellcheck shell=bash
 
 # ---- Install Linux-safe bundled plugin resources ----
+list_portable_bundled_plugins() {
+    local marketplace="$1"
+
+    node - "$marketplace" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+
+const marketplacePath = process.argv[2];
+const marketplace = JSON.parse(fs.readFileSync(marketplacePath, "utf8"));
+const plugins = Array.isArray(marketplace.plugins) ? marketplace.plugins : [];
+const portableNames = new Set(["sites", "deep-research", "visualize"]);
+const emittedNames = new Set();
+
+for (const plugin of plugins) {
+  if (plugin == null || typeof plugin !== "object" || !portableNames.has(plugin.name)) {
+    continue;
+  }
+  const source = plugin.source;
+  if (source == null || source.source !== "local" || typeof source.path !== "string") {
+    continue;
+  }
+  const normalized = path.posix.normalize(source.path.replace(/\\/g, "/"));
+  if (normalized === `plugins/${plugin.name}` && !emittedNames.has(plugin.name)) {
+    emittedNames.add(plugin.name);
+    process.stdout.write(`${plugin.name}\n`);
+  }
+}
+NODE
+}
+
+validate_portable_bundled_plugin() {
+    local plugin_dir="$1"
+    local expected_name="$2"
+
+    python3 - "$plugin_dir" "$expected_name" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+root = Path(sys.argv[1])
+expected_name = sys.argv[2]
+manifest_path = root / ".codex-plugin" / "plugin.json"
+
+if root.is_symlink():
+    print("plugin root cannot be a symlink", file=sys.stderr)
+    sys.exit(1)
+if not root.is_dir():
+    print("plugin root must be a directory", file=sys.stderr)
+    sys.exit(1)
+if manifest_path.is_symlink():
+    print("plugin manifest cannot be a symlink", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    print(f"invalid plugin manifest: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+if manifest.get("name") != expected_name:
+    print("plugin manifest name does not match its marketplace entry", file=sys.stderr)
+    sys.exit(1)
+version = manifest.get("version")
+if not isinstance(version, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", version.strip()) is None:
+    print("plugin manifest version is missing or invalid", file=sys.stderr)
+    sys.exit(1)
+
+native_suffixes = {
+    ".app",
+    ".dll",
+    ".dylib",
+    ".exe",
+    ".framework",
+    ".node",
+    ".so",
+}
+native_magics = {
+    b"\x7fELF",
+    b"\xca\xfe\xba\xbe",
+    b"\xbe\xba\xfe\xca",
+    b"\xca\xfe\xba\xbf",
+    b"\xbf\xba\xfe\xca",
+    b"\xfe\xed\xfa\xce",
+    b"\xce\xfa\xed\xfe",
+    b"\xfe\xed\xfa\xcf",
+    b"\xcf\xfa\xed\xfe",
+}
+
+def fail_walk(error):
+    print(f"cannot inspect plugin tree: {error}", file=sys.stderr)
+    sys.exit(1)
+
+
+for current_root, directories, files in os.walk(root, followlinks=False, onerror=fail_walk):
+    current = Path(current_root)
+    for name in directories:
+        path = current / name
+        if path.is_symlink():
+            print(f"symlink is not allowed: {path.relative_to(root)}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            print(f"cannot inspect {path.relative_to(root)}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if not stat.S_ISDIR(metadata.st_mode):
+            print(f"non-directory entry is not allowed: {path.relative_to(root)}", file=sys.stderr)
+            sys.exit(1)
+        if metadata.st_mode & 0o6000:
+            print(f"privileged mode is not allowed: {path.relative_to(root)}", file=sys.stderr)
+            sys.exit(1)
+        if path.suffix.lower() in native_suffixes:
+            print(f"native bundle is not portable: {path.relative_to(root)}", file=sys.stderr)
+            sys.exit(1)
+
+    for name in files:
+        path = current / name
+        if path.is_symlink():
+            print(f"symlink is not allowed: {path.relative_to(root)}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            print(f"cannot inspect {path.relative_to(root)}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if not stat.S_ISREG(metadata.st_mode):
+            print(f"non-regular file is not allowed: {path.relative_to(root)}", file=sys.stderr)
+            sys.exit(1)
+        if metadata.st_mode & 0o6000:
+            print(f"privileged mode is not allowed: {path.relative_to(root)}", file=sys.stderr)
+            sys.exit(1)
+        if path.suffix.lower() in native_suffixes:
+            print(f"native file is not portable: {path.relative_to(root)}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            with path.open("rb") as stream:
+                header = stream.read(4)
+        except OSError as exc:
+            print(f"cannot read {path.relative_to(root)}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if header in native_magics or header[:2] == b"MZ":
+            print(f"native executable is not portable: {path.relative_to(root)}", file=sys.stderr)
+            sys.exit(1)
+PY
+}
+
+stage_portable_bundled_plugin_from_upstream() {
+    local source_plugin="$1"
+    local target_plugins="$2"
+    local plugin_name="$3"
+    local target_plugin="$target_plugins/$plugin_name"
+    local staging_plugin=""
+    local backup_plugin="$target_plugins/.${plugin_name}.backup.$$"
+
+    if [ ! -d "$source_plugin" ]; then
+        info "Portable bundled plugin $plugin_name not present in upstream app; skipping"
+        return 1
+    fi
+    if ! validate_portable_bundled_plugin "$source_plugin" "$plugin_name"; then
+        warn "Portable bundled plugin $plugin_name contains unsupported content; skipping"
+        return 1
+    fi
+
+    if ! staging_plugin="$(mktemp -d "$target_plugins/.${plugin_name}.tmp.XXXXXX")"; then
+        warn "Failed to create staging directory for portable bundled plugin $plugin_name"
+        return 1
+    fi
+    if ! cp -R "$source_plugin/." "$staging_plugin/"; then
+        rm -rf -- "$staging_plugin" || warn "Failed to clean staging directory for portable bundled plugin $plugin_name"
+        warn "Failed to stage portable bundled plugin $plugin_name"
+        return 1
+    fi
+    if ! remove_macos_sidecar_files "$staging_plugin"; then
+        rm -rf -- "$staging_plugin" || warn "Failed to clean staging directory for portable bundled plugin $plugin_name"
+        warn "Failed to clean macOS sidecar files for portable bundled plugin $plugin_name"
+        return 1
+    fi
+    if ! validate_portable_bundled_plugin "$staging_plugin" "$plugin_name"; then
+        rm -rf -- "$staging_plugin" || warn "Failed to clean staging directory for portable bundled plugin $plugin_name"
+        warn "Portable bundled plugin $plugin_name failed post-copy validation"
+        return 1
+    fi
+
+    if ! rm -rf -- "$backup_plugin"; then
+        rm -rf -- "$staging_plugin" || warn "Failed to clean staging directory for portable bundled plugin $plugin_name"
+        warn "Failed to prepare backup for portable bundled plugin $plugin_name"
+        return 1
+    fi
+    if [ -e "$target_plugin" ] || [ -L "$target_plugin" ]; then
+        if ! mv -- "$target_plugin" "$backup_plugin"; then
+            rm -rf -- "$staging_plugin" || warn "Failed to clean staging directory for portable bundled plugin $plugin_name"
+            warn "Failed to preserve existing portable bundled plugin $plugin_name"
+            return 1
+        fi
+    else
+        backup_plugin=""
+    fi
+    if ! mv -- "$staging_plugin" "$target_plugin"; then
+        rm -rf -- "$staging_plugin" || warn "Failed to clean staging directory for portable bundled plugin $plugin_name"
+        if [ -n "$backup_plugin" ]; then
+            if mv -- "$backup_plugin" "$target_plugin"; then
+                warn "Failed to install portable bundled plugin $plugin_name; previous target was restored"
+            else
+                warn "Failed to install portable bundled plugin $plugin_name and previous target could not be restored"
+            fi
+        else
+            warn "Failed to install portable bundled plugin $plugin_name"
+        fi
+        return 1
+    fi
+    if [ -n "$backup_plugin" ] && ! rm -rf -- "$backup_plugin"; then
+        warn "Failed to clean previous portable bundled plugin backup: $backup_plugin"
+    fi
+    info "Portable bundled plugin $plugin_name staged from upstream DMG"
+    return 0
+}
+
 find_cargo_for_linux_computer_use() {
     if command -v cargo >/dev/null 2>&1; then
         command -v cargo
@@ -19,12 +239,37 @@ find_cargo_for_linux_computer_use() {
     return 1
 }
 
+find_system_computer_use_binary() {
+    local name="$1"
+    local candidate
+
+    for candidate in \
+        "$HOME/.cargo/bin/$name" \
+        "$HOME/.local/bin/$name"; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    candidate="$(command -v "$name" 2>/dev/null || true)"
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+
+    return 1
+}
+
 build_linux_computer_use_backend() {
     local crate_dir="$SCRIPT_DIR/computer-use-linux"
     local backend_binary="$SCRIPT_DIR/target/release/codex-computer-use-linux"
     local cosmic_helper_binary="$SCRIPT_DIR/target/release/codex-computer-use-cosmic"
     local cargo_cmd=""
+    local system_backend=""
+    local system_cosmic=""
 
+    # Step 1: Environment override
     if [ -n "${CODEX_LINUX_COMPUTER_USE_BACKEND_SOURCE:-}" ] || [ -n "${CODEX_LINUX_COMPUTER_USE_COSMIC_SOURCE:-}" ]; then
         [ -n "${CODEX_LINUX_COMPUTER_USE_BACKEND_SOURCE:-}" ] || warn "CODEX_LINUX_COMPUTER_USE_BACKEND_SOURCE is not set"
         [ -n "${CODEX_LINUX_COMPUTER_USE_COSMIC_SOURCE:-}" ] || warn "CODEX_LINUX_COMPUTER_USE_COSMIC_SOURCE is not set"
@@ -35,6 +280,39 @@ build_linux_computer_use_backend() {
         return 0
     fi
 
+    # Steps 2-3 are opt-in: the vendored build stays the default so the
+    # repository only ships code it is responsible for. Set
+    # CODEX_LINUX_COMPUTER_USE_SYSTEM_INSTALL=1 to reuse a system-installed
+    # computer-use-linux (or install it from crates.io) instead of building
+    # the vendored crate.
+    if [ "${CODEX_LINUX_COMPUTER_USE_SYSTEM_INSTALL:-}" = "1" ]; then
+        # Step 2: System-installed binaries
+        if system_backend="$(find_system_computer_use_binary computer-use-linux)" &&
+            system_cosmic="$(find_system_computer_use_binary computer-use-linux-cosmic)"; then
+            info "Using system computer-use-linux MCP binaries: $system_backend"
+            printf '%s\n%s\n' "$system_backend" "$system_cosmic"
+            return 0
+        fi
+
+        # Step 3: Install from crates.io
+        if cargo_cmd="$(find_cargo_for_linux_computer_use)"; then
+            info "Installing computer-use-linux MCP from crates.io..."
+            if "$cargo_cmd" install --locked computer-use-linux >&2; then
+                if system_backend="$(find_system_computer_use_binary computer-use-linux)" &&
+                    system_cosmic="$(find_system_computer_use_binary computer-use-linux-cosmic)"; then
+                    printf '%s\n%s\n' "$system_backend" "$system_cosmic"
+                    return 0
+                fi
+                warn "computer-use-linux binaries missing after crates.io install"
+            else
+                warn "Failed to install computer-use-linux from crates.io; falling back to vendored build"
+            fi
+        else
+            warn "cargo not found for crates.io install; falling back to vendored build"
+        fi
+    fi
+
+    # Step 4: Vendored build fallback
     if [ ! -d "$crate_dir" ]; then
         warn "Linux Computer Use backend source not found at $crate_dir"
         return 1
@@ -45,7 +323,7 @@ build_linux_computer_use_backend() {
         return 1
     fi
 
-    info "Building Linux Computer Use backend..."
+    info "Building Linux Computer Use backend from vendored source..."
     if ! (cd "$SCRIPT_DIR" && "$cargo_cmd" build --release -p codex-computer-use-linux >&2); then
         warn "Failed to build Linux Computer Use backend"
         return 1
@@ -91,10 +369,16 @@ stage_linux_computer_use_plugin() {
     cp "$cosmic_helper_binary" "$target_plugin/bin/codex-computer-use-cosmic"
     chmod 0755 "$target_plugin/bin/codex-computer-use-linux"
     chmod 0755 "$target_plugin/bin/codex-computer-use-cosmic"
+    if [ "${backend_binary##*/}" = "computer-use-linux" ]; then
+        # The published backend resolves its COSMIC helper by this sibling name.
+        cp "$cosmic_helper_binary" "$target_plugin/bin/computer-use-linux-cosmic"
+        chmod 0755 "$target_plugin/bin/computer-use-linux-cosmic"
+    fi
 
-    if [ -f "$ICON_SOURCE" ]; then
+    local plugin_icon_source="${LINUX_ICON_SOURCE:-$ICON_SOURCE}"
+    if [ -f "$plugin_icon_source" ]; then
         mkdir -p "$target_plugin/assets"
-        cp "$ICON_SOURCE" "$target_plugin/assets/app-icon.png"
+        cp "$plugin_icon_source" "$target_plugin/assets/app-icon.png"
     fi
 
     find "$target_plugin" \( -name '*:com.apple.*' -o -name '.gitkeep' \) -delete
@@ -484,6 +768,170 @@ remove_macos_sidecar_files() {
     find "$root" -type f -name '*:com.apple.*' -delete
 }
 
+validate_upstream_bundled_skills() {
+    local skills_dir="$1"
+
+    python3 - "$skills_dir" <<'PY'
+import os
+from pathlib import Path
+import stat
+import sys
+
+root = Path(sys.argv[1])
+
+try:
+    root_metadata = root.lstat()
+except OSError as exc:
+    print(f"cannot inspect bundled skills root: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+if stat.S_ISLNK(root_metadata.st_mode):
+    print("bundled skills root cannot be a symlink", file=sys.stderr)
+    sys.exit(1)
+if not stat.S_ISDIR(root_metadata.st_mode):
+    print("bundled skills root must be a directory", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    resolved_root = root.resolve(strict=True)
+except (OSError, RuntimeError) as exc:
+    print(f"cannot resolve bundled skills root: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+
+def fail_walk(error):
+    print(f"cannot inspect bundled skills tree: {error}", file=sys.stderr)
+    sys.exit(1)
+
+
+for current_root, directories, files in os.walk(root, followlinks=False, onerror=fail_walk):
+    current = Path(current_root)
+    for name in directories + files:
+        path = current / name
+        relative_path = path.relative_to(root)
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            print(f"cannot inspect {relative_path}: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+        if stat.S_ISLNK(metadata.st_mode):
+            try:
+                target = os.readlink(path)
+            except OSError as exc:
+                print(f"cannot read symlink {relative_path}: {exc}", file=sys.stderr)
+                sys.exit(1)
+            if os.path.isabs(target):
+                print(f"absolute symlink is not allowed: {relative_path}", file=sys.stderr)
+                sys.exit(1)
+            try:
+                resolved_target = path.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                print(f"cannot resolve symlink {relative_path}: {exc}", file=sys.stderr)
+                sys.exit(1)
+            try:
+                resolved_target.relative_to(resolved_root)
+            except ValueError:
+                print(f"symlink escapes bundled skills root: {relative_path}", file=sys.stderr)
+                sys.exit(1)
+            try:
+                target_metadata = resolved_target.stat()
+            except OSError as exc:
+                print(f"cannot inspect symlink target {relative_path}: {exc}", file=sys.stderr)
+                sys.exit(1)
+            if not (stat.S_ISDIR(target_metadata.st_mode) or stat.S_ISREG(target_metadata.st_mode)):
+                print(f"unsupported symlink target type: {relative_path}", file=sys.stderr)
+                sys.exit(1)
+            continue
+
+        if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
+            print(f"unsupported file type: {relative_path}", file=sys.stderr)
+            sys.exit(1)
+        if metadata.st_mode & 0o6000:
+            print(f"privileged mode is not allowed: {relative_path}", file=sys.stderr)
+            sys.exit(1)
+PY
+}
+
+stage_upstream_bundled_skills() {
+    local source_skills="$1"
+    local target_skills="$2"
+    local target_parent
+    local staging_skills=""
+    local backup_skills=""
+
+    if [ ! -d "$source_skills" ]; then
+        info "Bundled skills not present in upstream resources; skipping"
+        return 0
+    fi
+    if ! validate_upstream_bundled_skills "$source_skills"; then
+        warn "Bundled skills source contains unsupported content"
+        return 1
+    fi
+
+    target_parent="$(dirname "$target_skills")"
+    mkdir -p "$target_parent"
+    if ! staging_skills="$(mktemp -d "$target_parent/.skills.tmp.XXXXXX")"; then
+        warn "Failed to create staging directory for bundled skills"
+        return 1
+    fi
+    if ! cp -R "$source_skills/." "$staging_skills/"; then
+        rm -rf -- "$staging_skills"
+        warn "Failed to stage bundled skills from upstream resources"
+        return 1
+    fi
+    if ! remove_macos_sidecar_files "$staging_skills"; then
+        rm -rf -- "$staging_skills"
+        warn "Failed to clean macOS sidecar files from bundled skills"
+        return 1
+    fi
+    if ! validate_upstream_bundled_skills "$staging_skills"; then
+        rm -rf -- "$staging_skills" || warn "Failed to clean bundled skills staging directory"
+        warn "Bundled skills failed post-copy validation"
+        return 1
+    fi
+    if ! chmod -R u+rwX,go-w "$staging_skills"; then
+        rm -rf -- "$staging_skills"
+        warn "Failed to normalize bundled skills permissions"
+        return 1
+    fi
+
+    backup_skills="$target_parent/.skills.backup.$$"
+    if ! rm -rf -- "$backup_skills"; then
+        rm -rf -- "$staging_skills"
+        warn "Failed to prepare bundled skills backup"
+        return 1
+    fi
+    if [ -e "$target_skills" ] || [ -L "$target_skills" ]; then
+        if ! mv -- "$target_skills" "$backup_skills"; then
+            rm -rf -- "$staging_skills"
+            warn "Failed to preserve existing bundled skills"
+            return 1
+        fi
+    else
+        backup_skills=""
+    fi
+    if ! mv -- "$staging_skills" "$target_skills"; then
+        rm -rf -- "$staging_skills"
+        if [ -n "$backup_skills" ]; then
+            if mv -- "$backup_skills" "$target_skills"; then
+                warn "Failed to install bundled skills; previous target was restored"
+            else
+                warn "Failed to install bundled skills and previous target could not be restored"
+            fi
+        else
+            warn "Failed to install bundled skills"
+        fi
+        return 1
+    fi
+    if [ -n "$backup_skills" ] && ! rm -rf -- "$backup_skills"; then
+        warn "Failed to clean previous bundled skills backup: $backup_skills"
+        return 1
+    fi
+
+    info "Bundled skills staged from upstream DMG"
+}
+
 chrome_extension_host_arch() {
     case "$ARCH" in
         x86_64) echo "x64" ;;
@@ -559,6 +1007,69 @@ patch_chrome_plugin_for_linux() {
     fi
 }
 
+patch_browser_client_iab_socket_scope() {
+    local client="$1"
+    local patcher="$SCRIPT_DIR/scripts/lib/patch-browser-client-iab-socket-scope.js"
+
+    if [ ! -f "$patcher" ]; then
+        warn "IAB Browser socket scope patch helper not found at $patcher; leaving browser-client.mjs unchanged"
+        return 0
+    fi
+
+    if ! node "$patcher" "$client" >&2; then
+        warn "IAB Browser socket scope patch helper failed; leaving browser-client.mjs unchanged"
+    fi
+}
+
+patch_browser_client_linux_socket_dir() {
+    local client="$1"
+    local patcher="$SCRIPT_DIR/scripts/lib/patch-browser-client-iab-socket-scope.js"
+
+    if [ ! -f "$patcher" ]; then
+        warn "Browser socket-directory patch helper not found at $patcher; leaving browser-client.mjs unchanged"
+        return 0
+    fi
+
+    if ! node "$patcher" "$client" --socket-dir-only >&2; then
+        warn "Browser socket-directory patch helper failed; leaving browser-client.mjs unchanged"
+    fi
+}
+
+patch_browser_use_node_repl_process_env_import() {
+    local client="$1"
+
+    if grep -q "codexLinuxBrowserUseProcessEnv" "$client"; then
+        return 0
+    fi
+
+    python3 - "$client" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
+pattern = re.compile(
+    r'import\{env as (?P<binding>[A-Za-z_$][\w$]*)\}from"node:process";'
+)
+match = pattern.search(source)
+if match is None:
+    if '"node:process"' in source:
+        print(
+            "WARN: Could not find Browser Use node:process env import — leaving browser-client.mjs unchanged",
+            file=sys.stderr,
+        )
+    raise SystemExit(0)
+
+binding = match.group("binding")
+replacement = (
+    "var codexLinuxBrowserUseProcessEnv=globalThis.nodeRepl?.env??{},"
+    f"{binding}=codexLinuxBrowserUseProcessEnv;"
+)
+path.write_text(source[:match.start()] + replacement + source[match.end():], encoding="utf-8")
+PY
+}
+
 normalize_plugin_script_executable_modes() {
     local target_plugin="$1"
     local scripts_dir="$target_plugin/scripts"
@@ -600,10 +1111,12 @@ stage_chrome_plugin_from_upstream() {
     cp -R "$source_plugin" "$target_plugin"
     remove_macos_sidecar_files "$target_plugin"
     patch_chrome_plugin_for_linux "$target_plugin"
+    patch_browser_use_node_repl_process_env_import "$target_plugin/scripts/browser-client.mjs"
     patch_browser_use_node_repl_env_guard "$target_plugin/scripts/browser-client.mjs"
     patch_browser_use_node_repl_config_shim "$target_plugin/scripts/browser-client.mjs"
     patch_browser_use_native_pipe_import_meta_bridge "$target_plugin/scripts/browser-client.mjs"
     patch_browser_use_site_status_allowlist_fallback "$target_plugin/scripts/browser-client.mjs"
+    patch_browser_client_linux_socket_dir "$target_plugin/scripts/browser-client.mjs"
     normalize_plugin_script_executable_modes "$target_plugin"
     if ! install_chrome_extension_host_resource "$target_plugin"; then
         rm -rf "$target_plugin"
@@ -628,33 +1141,17 @@ import sys
 
 path = Path(sys.argv[1])
 source = path.read_text(encoding="utf-8")
-patterns = [
-    re.compile(
-        r'async fetchBlocked\((?P<url>[A-Za-z_$][\w$]*)\)\{'
-        r'let (?P<response>[A-Za-z_$][\w$]*)=await (?P<fetch>[A-Za-z_$][\w$]*)'
-        r'\((?P=url)\.endpoint,\{method:"GET"\}\);'
-        r'if\(!(?P=response)\.ok\)throw new Error\((?P<format>[A-Za-z_$][\w$]*)'
-        r'\(`Browser Use cannot determine if \$\{(?P=url)\.displayUrl\} is allowed\. '
-        r'Please try again later or use another source\.`\)\);'
-        r'let (?P<json>[A-Za-z_$][\w$]*)=await (?P=response)\.json\(\);'
-        r'return (?P<status>[A-Za-z_$][\w$]*)\((?P=json)\)\}'
-    ),
-    re.compile(
-        r'async fetchBlocked\((?P<url>[A-Za-z_$][\w$]*),(?P<label>[A-Za-z_$][\w$]*)\)\{'
-        r'let (?P<response>[A-Za-z_$][\w$]*)=await (?P<fetch>[A-Za-z_$][\w$]*)'
-        r'\((?P=url)\.endpoint,\{method:"GET"\}\);'
-        r'if\(!(?P=response)\.ok\)throw new Error\((?P<format>[A-Za-z_$][\w$]*)'
-        r'\(`\$\{(?P=label)\} cannot determine if \$\{(?P=url)\.displayUrl\} is allowed\. '
-        r'Please try again later or use another source\.`\)\);'
-        r'let (?P<json>[A-Za-z_$][\w$]*)=await (?P=response)\.json\(\);'
-        r'return (?P<status>[A-Za-z_$][\w$]*)\((?P=json)\)\}'
-    ),
-]
-match = None
-for pattern in patterns:
-    match = pattern.search(source)
-    if match is not None:
-        break
+pattern = re.compile(
+    r'async fetchBlocked\((?P<url>[A-Za-z_$][\w$]*),(?P<label>[A-Za-z_$][\w$]*)\)\{'
+    r'let (?P<response>[A-Za-z_$][\w$]*)=await (?P<fetch>[A-Za-z_$][\w$]*)'
+    r'\((?P=url)\.endpoint,\{method:"GET"\}\);'
+    r'if\(!(?P=response)\.ok\)throw new Error\((?P<format>[A-Za-z_$][\w$]*)'
+    r'\(`\$\{(?P=label)\} cannot determine if \$\{(?P=url)\.displayUrl\} is allowed\. '
+    r'Please try again later or use another source\.`\)\);'
+    r'let (?P<json>[A-Za-z_$][\w$]*)=await (?P=response)\.json\(\);'
+    r'return (?P<status>[A-Za-z_$][\w$]*)\((?P=json)\)\}'
+)
+match = pattern.search(source)
 if match is None:
     if "/aura/site_status" not in source and "fetchBlocked(" not in source:
         raise SystemExit(0)
@@ -670,19 +1167,14 @@ fetch = match.group("fetch")
 formatter = match.group("format")
 json_value = match.group("json")
 status = match.group("status")
-label = match.groupdict().get("label")
+label = match.group("label")
 error = "__codexLinuxErr"
-error_message = (
-    f'Browser Use cannot determine if ${{{url}.displayUrl}} is allowed. Please try again later or use another source.'
-    if label is None
-    else f'${{{label}}} cannot determine if ${{{url}.displayUrl}} is allowed. Please try again later or use another source.'
-)
-args = url if label is None else f"{url},{label}"
+error_message = f'${{{label}}} cannot determine if ${{{url}.displayUrl}} is allowed. Please try again later or use another source.'
 replacement = (
-    f'async fetchBlocked({args}){{let {response};try{{{response}=await {fetch}({url}.endpoint,{{method:"GET"}})}}'
+    f'async fetchBlocked({url},{label}){{let {response};try{{{response}=await {fetch}({url}.endpoint,{{method:"GET"}})}}'
     f'catch({error}){{if(String({url}?.endpoint??"").includes("/aura/site_status")&&'
-    f'String({error}?.message??{error}).toLowerCase().includes("allowlist"))return console.warn'
-    f'("codexLinuxSiteStatusAllowlistFallback",{url}.endpoint),!1;throw {error}}}'
+    f'String({error}?.message??{error}).toLowerCase().includes("allowlist"))'
+    f'return!1/*codexLinuxSiteStatusAllowlistFallback*/;throw {error}}}'
     f'if(!{response}.ok)throw new Error({formatter}(`{error_message}`));'
     f'let {json_value}=await {response}.json();return {status}({json_value})}}'
 )
@@ -829,7 +1321,9 @@ value = match.group("value")
 shim = r'''
 function codexLinuxBrowserUseConfigShim() {
   let repl = globalThis.nodeRepl;
-  if (repl == null || repl.config != null) return;
+  if (repl == null) return;
+  codexLinuxBrowserUseNodeReplMethodShim(repl);
+  if (repl.config != null) return;
   let config = {
     read: async () => ({ config: await codexLinuxBrowserUseReadToml("config.toml") }),
     readRequirements: async () => ({ requirements: null }),
@@ -850,6 +1344,30 @@ function codexLinuxBrowserUseConfigShim() {
       Object.defineProperty(prototype, "config", {
         configurable: true,
         get: () => config,
+      });
+    }
+  } catch {}
+}
+
+function codexLinuxBrowserUseNodeReplMethodShim(repl) {
+  // Older Linux node_repl builds do not expose browser notification hooks.
+  codexLinuxBrowserUseDefineNodeReplMethod(repl, "addAfterSubmittedCodeHook", () => () => undefined);
+}
+
+function codexLinuxBrowserUseDefineNodeReplMethod(repl, name, value) {
+  if (typeof repl?.[name] == "function") return;
+
+  try {
+    repl[name] = value;
+    if (typeof repl[name] == "function") return;
+  } catch {}
+
+  try {
+    let prototype = Object.getPrototypeOf(repl);
+    if (prototype != null && Object.getOwnPropertyDescriptor(prototype, name) == null) {
+      Object.defineProperty(prototype, name, {
+        configurable: true,
+        value,
       });
     }
   } catch {}
@@ -1080,11 +1598,13 @@ stage_browser_plugin_from_upstream() {
     rm -rf "$target_plugin"
     cp -R "$source_plugin" "$target_plugin"
     remove_macos_sidecar_files "$target_plugin"
+    patch_browser_use_node_repl_process_env_import "$target_client"
     patch_browser_use_node_repl_env_guard "$target_client"
     patch_browser_use_node_repl_config_shim "$target_client"
     patch_browser_use_native_pipe_import_meta_bridge "$target_client"
     patch_browser_use_site_status_allowlist_fallback "$target_client"
     patch_browser_use_file_url_policy "$target_client"
+    patch_browser_client_iab_socket_scope "$target_client"
 
     info "Browser plugin staged from upstream DMG"
     return 0
@@ -1097,7 +1617,9 @@ write_bundled_plugins_marketplace() {
     local include_chrome="$4"
     local include_computer_use="$5"
 
-    node - "$source" "$destination" "$include_browser" "$include_chrome" "$include_computer_use" <<'NODE'
+    shift 5
+
+    node - "$source" "$destination" "$include_browser" "$include_chrome" "$include_computer_use" "$@" <<'NODE'
 const fs = require("fs");
 const path = require("path");
 
@@ -1106,6 +1628,7 @@ const destinationPath = process.argv[3];
 const includeBrowser = process.argv[4] === "1";
 const includeChrome = process.argv[5] === "1";
 const includeComputerUse = process.argv[6] === "1";
+const portablePluginNames = process.argv.slice(7);
 const marketplace = JSON.parse(fs.readFileSync(sourcePath, "utf8"));
 const sourcePlugins = marketplace.plugins || [];
 const plugins = [];
@@ -1235,10 +1758,50 @@ if (includeComputerUse) {
   });
 }
 
+for (const name of portablePluginNames) {
+  const plugin = sourcePlugins.find((entry) => {
+    if (entry == null || typeof entry !== "object" || entry.name !== name) {
+      return false;
+    }
+    const source = entry.source;
+    if (source == null || source.source !== "local" || typeof source.path !== "string") {
+      return false;
+    }
+    const normalized = path.posix.normalize(source.path.replace(/\\/g, "/"));
+    return normalized === `plugins/${name}`;
+  });
+  if (plugin == null) {
+    throw new Error(`Bundled marketplace does not contain ${name} plugin`);
+  }
+  plugins.push({
+    ...plugin,
+    source: {
+      source: "local",
+      path: `./plugins/${name}`,
+    },
+  });
+}
+
+const sourceOrder = new Map(sourcePlugins.map((plugin, index) => [plugin?.name, index]));
+plugins.sort((left, right) => {
+  const leftIndex = sourceOrder.get(left.name) ?? Number.MAX_SAFE_INTEGER;
+  const rightIndex = sourceOrder.get(right.name) ?? Number.MAX_SAFE_INTEGER;
+  return leftIndex - rightIndex;
+});
+
 marketplace.plugins = plugins;
 fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
 fs.writeFileSync(destinationPath, `${JSON.stringify(marketplace, null, 2)}\n`);
 NODE
+}
+
+harden_bundled_plugin_source_tree() {
+    local resources_dir="$INSTALL_DIR/resources"
+    local bundled_plugins_dir="$resources_dir/plugins/openai-bundled"
+
+    [ -d "$bundled_plugins_dir" ] || return 0
+    chmod go-w "$INSTALL_DIR" "$resources_dir" "$resources_dir/plugins"
+    chmod -R u+rwX,go-w "$bundled_plugins_dir"
 }
 
 install_bundled_plugin_resources() {
@@ -1253,6 +1816,12 @@ install_bundled_plugin_resources() {
     local include_browser=0
     local include_chrome=0
     local include_computer_use=0
+    local portable_plugin_names=""
+    local portable_plugins=()
+
+    if ! stage_upstream_bundled_skills "$upstream_resources/skills" "$resources_dir/skills"; then
+        return 1
+    fi
 
     if [ ! -f "$source_marketplace" ]; then
         warn "Bundled plugin marketplace not found in upstream app; skipping bundled plugins"
@@ -1260,6 +1829,20 @@ install_bundled_plugin_resources() {
     fi
 
     mkdir -p "$bundled_plugins_dir/plugins" "$bundled_plugins_dir/.agents/plugins"
+
+    if ! portable_plugin_names="$(list_portable_bundled_plugins "$source_marketplace")"; then
+        warn "Could not parse portable bundled plugins from upstream marketplace"
+        portable_plugin_names=""
+    fi
+    while IFS= read -r plugin_name; do
+        [ -n "$plugin_name" ] || continue
+        if stage_portable_bundled_plugin_from_upstream \
+            "$bundled_source_root/plugins/$plugin_name" \
+            "$bundled_plugins_dir/plugins" \
+            "$plugin_name"; then
+            portable_plugins+=("$plugin_name")
+        fi
+    done <<< "$portable_plugin_names"
 
     if source_browser_plugin="$(find_browser_plugin_source "$bundled_source_root" "$source_marketplace")" &&
         stage_browser_plugin_from_upstream "$source_browser_plugin" "$bundled_plugins_dir/plugins"; then
@@ -1278,12 +1861,18 @@ install_bundled_plugin_resources() {
         warn "Linux Computer Use plugin will be unavailable"
     fi
 
-    if [ "$include_browser" -eq 0 ] && [ "$include_chrome" -eq 0 ] && [ "$include_computer_use" -eq 0 ]; then
+    if [ "$include_browser" -eq 0 ] && [ "$include_chrome" -eq 0 ] && [ "$include_computer_use" -eq 0 ] && [ "${#portable_plugins[@]}" -eq 0 ]; then
         warn "No Linux-safe bundled plugins were staged"
         return 0
     fi
 
-    write_bundled_plugins_marketplace "$source_marketplace" "$bundled_plugins_dir/.agents/plugins/marketplace.json" "$include_browser" "$include_chrome" "$include_computer_use"
+    write_bundled_plugins_marketplace \
+        "$source_marketplace" \
+        "$bundled_plugins_dir/.agents/plugins/marketplace.json" \
+        "$include_browser" \
+        "$include_chrome" \
+        "$include_computer_use" \
+        "${portable_plugins[@]}"
 
     install_linux_executable_resource "$upstream_resources/node" "$resources_dir/node" "node runtime" "info" || true
     install_browser_use_node_repl_resource "$upstream_resources" "$resources_dir/node_repl" || true

@@ -8,18 +8,21 @@
 let
   cfg = config.programs.codexDesktopLinux;
   remoteCfg = cfg.remoteControl;
+  remoteEnvironmentFilePath =
+    if remoteCfg.environmentFile == null then null else lib.removePrefix "-" remoteCfg.environmentFile;
+  remoteEnvironmentFileSegments =
+    if remoteEnvironmentFilePath == null then [ ] else lib.drop 1 (lib.splitString "/" remoteEnvironmentFilePath);
+  remoteEnvironmentFileIsCanonical =
+    remoteEnvironmentFilePath != null
+    && lib.hasPrefix "/" remoteEnvironmentFilePath
+    && lib.all (segment: segment != "" && segment != "." && segment != "..") remoteEnvironmentFileSegments;
   system = pkgs.stdenv.hostPlatform.system;
   flakePackages = self.packages.${system};
-  packageName =
-    if cfg.remoteMobileControl.enable && cfg.computerUseUi.enable then
-      "codex-desktop-computer-use-ui-remote-mobile-control"
-    else if cfg.remoteMobileControl.enable then
-      "codex-desktop-remote-mobile-control"
-    else if cfg.computerUseUi.enable then
-      "codex-desktop-computer-use-ui"
-    else
-      "codex-desktop";
-  basePackage = if cfg.package != null then cfg.package else flakePackages.${packageName};
+  linuxFeatures = import ./linux-features.nix { inherit lib; };
+  packageSelection = import ./package-selection.nix {
+    inherit cfg flakePackages lib;
+  };
+  basePackage = packageSelection.package;
   codexCliPackage =
     if cfg.cliPackage != null then
       cfg.cliPackage
@@ -31,7 +34,7 @@ let
   # Thin wrapper that bakes CODEX_CLI_PATH into the launcher. The `.desktop`
   # entry shipped by the package launches `<pkg>/bin/codex-desktop` by absolute
   # path, so wrapping that binary (and repointing the desktop entry at the
-  # wrapper) makes Codex Desktop locate the CLI no matter how it is started --
+  # wrapper) makes ChatGPT Desktop locate the CLI no matter how it is started --
   # graphical autostart, application launcher, terminal, or a warm-start handoff
   # to an already-running instance -- without depending on the session/login
   # `PATH` and without requiring a re-login for a config change to take effect.
@@ -77,7 +80,7 @@ let
 in
 {
   options.programs.codexDesktopLinux = {
-    enable = lib.mkEnableOption "Codex Desktop for Linux";
+    enable = lib.mkEnableOption "ChatGPT Desktop for Linux";
 
     package = lib.mkOption {
       type = lib.types.nullOr lib.types.package;
@@ -86,10 +89,13 @@ in
         inputs.codex-desktop-linux.packages.''${pkgs.stdenv.hostPlatform.system}.codex-desktop
       '';
       description = ''
-        Codex Desktop package to install. When unset, the module selects one of
-        this flake's package variants from
+        ChatGPT Desktop package to install. When unset, the module builds the
+        selected configuration from
         {option}`programs.codexDesktopLinux.computerUseUi.enable` and
-        {option}`programs.codexDesktopLinux.remoteMobileControl.enable`.
+        {option}`programs.codexDesktopLinux.linuxFeatures`. The
+        {option}`programs.codexDesktopLinux.remoteMobileControl.enable` option
+        remains a compatibility shorthand for the `remote-mobile-control`
+        feature.
       '';
     };
 
@@ -99,10 +105,10 @@ in
       defaultText = lib.literalExpression "pkgs.codex";
       example = lib.literalExpression "pkgs.codex";
       description = ''
-        Codex CLI package that Codex Desktop should launch. When set, the
-        installed Codex Desktop launcher (and its `.desktop` entry) is wrapped so
+        Codex CLI package that ChatGPT Desktop should launch. When set, the
+        installed ChatGPT Desktop launcher (and its `.desktop` entry) is wrapped so
         it always starts with {env}`CODEX_CLI_PATH` pointing at this package's
-        `codex` binary. This lets Codex Desktop locate the CLI regardless of how
+        `codex` binary. This lets ChatGPT Desktop locate the CLI regardless of how
         it is started — graphical autostart, application launcher, terminal, or a
         warm-start handoff to an already-running instance — without depending on
         the session/login {env}`PATH` and without requiring a re-login for the
@@ -112,7 +118,7 @@ in
         When unset, the module falls back to
         {option}`programs.codexDesktopLinux.remoteControl.package` if
         {option}`programs.codexDesktopLinux.remoteControl.enable` is set;
-        otherwise the launcher is left unwrapped and Codex Desktop relies on
+        otherwise the launcher is left unwrapped and ChatGPT Desktop relies on
         discovering `codex` on {env}`PATH`.
       '';
     };
@@ -120,6 +126,22 @@ in
     computerUseUi.enable = lib.mkEnableOption "the Linux Computer Use UI package variant";
 
     remoteMobileControl.enable = lib.mkEnableOption "the experimental Linux mobile remote-control package variant";
+
+    linuxFeatures = lib.mkOption {
+      type = linuxFeatures.optionType;
+      default = [ ];
+      example = [
+        "appshots"
+        "open-target-discovery"
+      ];
+      description = ''
+        Nix-compatible optional Linux features to include in the package. IDs
+        are deduplicated and sorted before the package derivation is created.
+        Features not supported by the Nix packaging layer fail module
+        evaluation. This option does not affect an explicitly configured
+        {option}`programs.codexDesktopLinux.package`.
+      '';
+    };
 
     remoteControl = {
       enable = lib.mkEnableOption "a system-wide user app-server unit with remote control enabled";
@@ -171,11 +193,14 @@ in
       };
 
       environmentFile = lib.mkOption {
-        type = lib.types.nullOr lib.types.path;
+        type = lib.types.nullOr lib.types.str;
         default = null;
         example = "/run/secrets/codex-remote-control.env";
         description = ''
-          Additional environment file as defined in {manpage}`systemd.exec(5)`.
+          Runtime path to an additional environment file as defined in
+          {manpage}`systemd.exec(5)`. Use a quoted runtime string. Nix path
+          literals or interpolations can copy contents into the Nix store
+          before module validation; store-backed values are rejected.
         '';
       };
 
@@ -220,6 +245,28 @@ in
       {
         assertion = !remoteCfg.enable || pkgs.stdenv.hostPlatform.isLinux;
         message = "`programs.codexDesktopLinux.remoteControl.enable` is only supported on Linux";
+      }
+      {
+        assertion =
+          remoteCfg.environmentFile == null
+          || (!builtins.hasContext remoteCfg.environmentFile && remoteEnvironmentFileIsCanonical);
+        message = ''
+          `programs.codexDesktopLinux.remoteControl.environmentFile` must be an
+          absolute canonical runtime path without Nix store context, optionally
+          prefixed with `-`
+        '';
+      }
+      {
+        assertion =
+          remoteCfg.environmentFile == null
+          || (
+            remoteEnvironmentFilePath != builtins.storeDir
+            && !lib.hasPrefix "${builtins.storeDir}/" remoteEnvironmentFilePath
+          );
+        message = ''
+          `programs.codexDesktopLinux.remoteControl.environmentFile` must be a
+          runtime path outside the Nix store
+        '';
       }
     ];
 

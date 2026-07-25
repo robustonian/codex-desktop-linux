@@ -11,6 +11,7 @@ UPSTREAM_INTEL_PATCH_REPORT ?= $(REBUILD_REPORT_DIR)/patch-report.json
 UPSTREAM_INTEL_IMAGE ?= codex-desktop-linux-devcontainer:local
 PACKAGE_NAME := codex-desktop
 PACKAGE_WITH_UPDATER ?= 1
+CODEX_CLI_BUNDLE_SOURCE ?=
 MAX_BUILD_THREADS ?= 0
 MAX_BUILD_THREADS_VALUE := $(strip $(MAX_BUILD_THREADS))
 MAX_BUILD_THREADS_ENABLED := $(filter-out 0,$(MAX_BUILD_THREADS_VALUE))
@@ -68,7 +69,7 @@ printf '%s\n' "$$format"
 .PHONY: help check test build-updater maybe-build-updater update rebuild rebuild-install inspect-upstream inspect-upstream-intel inspect-upstream-intel-devcontainer build-app build-app-fresh setup-native bootstrap-native install-native update-native rebuild-next run-app build-dev-app run-dev-app deb rpm pacman appimage package install service-enable service-status clean-dist clean-state
 
 help:
-	@printf '\nCodex Desktop Linux Make Targets\n\n'
+	@printf '\nChatGPT Desktop for Linux Make Targets\n\n'
 	@printf '  %-18s %s\n' "make check" "Run cargo check for codex-update-manager"
 	@printf '  %-18s %s\n' "make test" "Run updater test suite"
 	@printf '  %-18s %s\n' "make build-updater" "Build codex-update-manager in release mode"
@@ -110,7 +111,9 @@ help:
 	@printf '  %-18s %s\n' "DEV_APP_NAME=..." "Override side-by-side test app display name"
 	@printf '  %-18s %s\n' "PACKAGE_VERSION=..." "Override the package version for make deb / make rpm / make pacman / make appimage"
 	@printf '  %-18s %s\n' "PACKAGE_WITH_UPDATER=0" "Build packages without codex-update-manager or the updater service"
+	@printf '  %-18s %s\n' "CODEX_CLI_BUNDLE_SOURCE=..." "Embed an installed Codex CLI package in a local AppImage"
 	@printf '  %-18s %s\n' "MAX_BUILD_THREADS=8" "Set supported build jobs/compression threads (default: 0, tool/user defaults)"
+	@printf '  %-18s %s\n' "CODEX_SUDO_ALERT=1" "Play a best-effort alert before an interactive sudo password prompt"
 	@printf '  %-18s %s\n' "RPM_BINARY_PAYLOAD=..." "Advanced RPM payload flags override (default follows MAX_BUILD_THREADS)"
 	@printf '  %-18s %s\n' "APPIMAGETOOL=..." "Override the appimagetool executable for make appimage"
 	@printf '  %-18s %s\n' "DEB=/path/file.deb" "Override the .deb used by make install"
@@ -125,7 +128,9 @@ help:
 	@printf '  %s\n' "make setup-native"
 	@printf '  %s\n' "make bootstrap-native"
 	@printf '  %s\n' "make install-native"
+	@printf '  %s\n' "CODEX_SUDO_ALERT=1 make install-native"
 	@printf '  %s\n' "PACKAGE_WITH_UPDATER=0 make update-native"
+	@printf '  %s\n' "CODEX_CLI_BUNDLE_SOURCE=/path/to/node_modules/@openai/codex make appimage"
 	@printf '  %s\n' "make inspect-upstream DMG=/tmp/Codex.dmg"
 	@printf '  %s\n' "make inspect-upstream-intel DMG=/tmp/Codex-new.dmg"
 	@printf '  %s\n' "make inspect-upstream-intel-devcontainer"
@@ -170,7 +175,7 @@ rebuild:
 	MAX_BUILD_THREADS="$(MAX_BUILD_THREADS)" \
 	REBUILD_REPORT_DIR="$(REBUILD_REPORT_DIR)" \
 	CODEX_NEXT_APP_DIR="$(NEXT_APP_DIR)" \
-		./scripts/rebuild-candidate.sh "$(DMG)"
+		./scripts/rebuild-candidate.sh $(if $(strip $(DMG)),"$(DMG)")
 
 rebuild-install:
 	@echo "[make] Running rebuild and local install flow"
@@ -178,7 +183,7 @@ rebuild-install:
 	REBUILD_REPORT_DIR="$(REBUILD_REPORT_DIR)" \
 	CODEX_NEXT_APP_DIR="$(NEXT_APP_DIR)" \
 	CODEX_FINAL_APP_DIR="$(APP_DIR)" \
-		./scripts/rebuild-candidate.sh --install "$(DMG)"
+		./scripts/rebuild-candidate.sh --install $(if $(strip $(DMG)),"$(DMG)")
 
 inspect-upstream:
 	@echo "[make] Inspecting upstream DMG"
@@ -282,7 +287,7 @@ pacman: maybe-build-updater
 
 appimage:
 	@echo "[make] Building AppImage"
-	MAX_BUILD_THREADS="$(MAX_BUILD_THREADS)" PACKAGE_VERSION="$(or $(PACKAGE_VERSION),)" ./scripts/build-appimage.sh
+	MAX_BUILD_THREADS="$(MAX_BUILD_THREADS)" PACKAGE_VERSION="$(or $(PACKAGE_VERSION),)" CODEX_CLI_BUNDLE_SOURCE="$(CODEX_CLI_BUNDLE_SOURCE)" ./scripts/build-appimage.sh
 
 package: maybe-build-updater
 	@echo "[make] Building native package (auto-detecting distro)"
@@ -314,39 +319,35 @@ install:
 			echo "[make] No pacman package found. Run 'make pacman' first." >&2; exit 1; \
 		fi; \
 		echo "[make] Installing $$pkg"; \
-		sudo pacman -U --noconfirm "$$pkg"; \
+		"$(CURDIR)/scripts/sudo-with-alert.sh" pacman -U --noconfirm "$$pkg"; \
 	elif [ "$$format" = "rpm" ] && command -v dnf >/dev/null 2>&1; then \
 		rpm="$${RPM:-$$(latest_matching_file "$(RPM_GLOB)")}"; \
 		if [ -z "$$rpm" ]; then \
 			echo "[make] No RPM package found. Run 'make rpm' first." >&2; exit 1; \
 		fi; \
 		echo "[make] Installing $$rpm"; \
-		sudo dnf install -y "$$rpm"; \
+		"$(CURDIR)/scripts/sudo-with-alert.sh" dnf install -y "$$rpm"; \
 	elif [ "$$format" = "rpm" ] && command -v zypper >/dev/null 2>&1; then \
 		rpm="$${RPM:-$$(latest_matching_file "$(RPM_GLOB)")}"; \
 		if [ -z "$$rpm" ]; then \
 			echo "[make] No RPM package found. Run 'make rpm' first." >&2; exit 1; \
 		fi; \
 		echo "[make] Installing $$rpm"; \
-		sudo zypper --non-interactive --no-gpg-checks install -y "$$rpm"; \
+		"$(CURDIR)/scripts/sudo-with-alert.sh" zypper --non-interactive --no-gpg-checks install -y "$$rpm"; \
 	elif [ "$$format" = "rpm" ]; then \
 		rpm="$${RPM:-$$(latest_matching_file "$(RPM_GLOB)")}"; \
 		if [ -z "$$rpm" ]; then \
 			echo "[make] No RPM package found. Run 'make rpm' first." >&2; exit 1; \
 		fi; \
 		echo "[make] Installing $$rpm"; \
-		sudo rpm -Uvh "$$rpm"; \
+		"$(CURDIR)/scripts/sudo-with-alert.sh" rpm -Uvh "$$rpm"; \
 	elif [ "$$format" = "deb" ]; then \
 		deb="$${DEB:-$$(latest_matching_file "$(DEB_GLOB)")}"; \
 		if [ -z "$$deb" ]; then \
 			echo "[make] No Debian package found. Run 'make deb' first." >&2; exit 1; \
 		fi; \
 		echo "[make] Installing $$deb"; \
-		if command -v apt-get >/dev/null 2>&1; then \
-			sudo apt-get install -y "$$deb"; \
-		else \
-			sudo dpkg -i "$$deb"; \
-		fi; \
+		"$(CURDIR)/scripts/sudo-with-alert.sh" dpkg -i "$$deb"; \
 	else \
 		echo "[make] No supported package manager found (dpkg, rpm, zypper, or pacman)." >&2; exit 1; \
 	fi

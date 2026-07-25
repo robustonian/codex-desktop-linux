@@ -1,17 +1,17 @@
 # codex-wrapper-updater
 
 Optional Linux feature that adds a **separate** in-app update path for the
-Codex Desktop Linux wrapper: this repository's Linux patches, bundled features,
+ChatGPT Desktop for Linux wrapper: this repository's Linux patches, bundled features,
 packaging glue, launcher, and `codex-update-manager`.
 
-This is intentionally distinct from the upstream Codex app update path. The
+This is intentionally distinct from the upstream ChatGPT app update path. The
 upstream path tracks the official macOS DMG. This feature tracks newer builds of
 `codex-desktop-linux` itself.
 
 ## User-facing behavior
 
-- Settings -> General shows **Check for Codex Desktop Linux updates**.
-- Settings -> General also shows **Ask which features to enable on update**.
+- Settings -> Linux desktop shows **Check for ChatGPT Desktop for Linux updates**.
+- Settings -> Linux desktop also shows **Ask which features to enable on update**.
 - Both settings are off/on independently: wrapper update checks are off by
   default, and the feature picker prompt defaults on when this feature is built.
 - When wrapper update checks are on, `codex-update-manager` may check the
@@ -51,19 +51,16 @@ features the rebuild stages.
 - Feature ids that are currently enabled but absent from the candidate catalog
   are preserved.
 - The special **(Don't ask again on future updates)** row, or turning off
-  **Settings -> General -> Ask which features to enable on update**, suppresses
+  **Settings -> Linux desktop -> Ask which features to enable on update**, suppresses
   future prompts.
 - Cancelling the dialog keeps the current feature set and still proceeds with
   the update.
 - No display, no dialog tool, no recorded candidate catalog, or a dialog launch
   failure skips the prompt and leaves the current feature set unchanged.
 
-## Toolbar states
+## Update button states
 
-- A **SHA chip** shows the installed short commit when build metadata is
-  available (a git-ref-style pill, e.g. `5fcfea9`), so you can see which build
-  is running.
-- The action chip is color-coded:
+- The action button is color-coded:
   - **green Update** means a genuinely newer upstream build is available.
   - **amber dev mode** (non-clickable) means the installed build appears to be
     ahead of the tracked remote, so updating would be a downgrade; the update
@@ -79,7 +76,7 @@ not a required compatibility patch for every Linux build. Core only provides the
 generic Linux feature loader and hook runner. This feature owns:
 
 - the in-app wrapper update button;
-- the Settings -> General runtime opt-ins;
+- the Settings -> Linux desktop runtime opt-ins;
 - the main-process bridge handler;
 - the pending-update marker;
 - the retry/apply hook;
@@ -105,9 +102,8 @@ When enabled, the feature contributes three patch descriptors:
   `codex-linux-wrapper-updater` bridge handler.
 - `webview-runtime`: injects the webview runtime that creates and refreshes the
   top-right **Update** button.
-- `settings-toggle`: patches the settings asset. Current upstream builds use
-  `general-settings-*.js`; older builds may still use
-  `keybinds-settings-linux.js`.
+- `settings-toggle`: patches the current Linux desktop settings asset,
+  `linux-desktop-settings-linux.js`.
 
 The feature also stages the same runtime hook twice:
 
@@ -247,10 +243,10 @@ Verify the settings patch landed in the installed webview bundle:
 
 ```bash
 rg "CodexLinuxWrapperUpdatesSetting|CodexLinuxFeaturePickerOnUpdateSetting|get-global-state|set-global-state" \
-  /opt/codex-desktop/content/webview/assets/general-settings-*.js
+  /opt/codex-desktop/content/webview/assets/linux-desktop-settings-linux.js
 ```
 
-Toggle the settings in Settings -> General, then verify:
+Toggle the settings in Settings -> Linux desktop, then verify:
 
 ```bash
 rg "codex-linux-wrapper-updates-enabled|codex-linux-feature-picker-on-update" \
@@ -273,7 +269,7 @@ upstream typed settings API, the app will reject the Linux-only keys.
 
 If the **Update** button does not appear, check:
 
-- the Settings -> General wrapper update toggle is on;
+- the Settings -> Linux desktop wrapper update toggle is on;
 - `check-wrapper --json` records `candidate_wrapper_commit`;
 - `~/.local/state/codex-update-manager/state.json` contains the candidate;
 - the installed build includes `codex-wrapper-updater` in
@@ -281,7 +277,7 @@ If the **Update** button does not appear, check:
 
 If the feature picker does not appear before the update:
 
-- the Settings -> General feature picker toggle may be off;
+- the Settings -> Linux desktop feature picker toggle may be off;
 - the app may not have a graphical display session;
 - neither `zenity` nor `kdialog` may be installed;
 - the recorded wrapper candidate may not include a readable feature catalog;
