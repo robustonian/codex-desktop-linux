@@ -17,19 +17,14 @@ codex_packaged_runtime_prelaunch_background() {
         return 0
     fi
 
-    systemctl --user import-environment \
-        PATH \
-        DISPLAY \
-        WAYLAND_DISPLAY \
-        DBUS_SESSION_BUS_ADDRESS \
-        XAUTHORITY \
-        XDG_RUNTIME_DIR \
-        HYPRLAND_INSTANCE_SIGNATURE \
-        YDOTOOL_SOCKET >/dev/null 2>&1 || true
+    local import_path="${CODEX_LINUX_USER_PATH-${PATH:-}}"
 
-    if command -v dbus-update-activation-environment >/dev/null 2>&1; then
-        dbus-update-activation-environment --systemd \
+    (
+        export PATH="$import_path"
+
+        systemctl --user import-environment \
             PATH \
+            HOMEBREW_PREFIX \
             DISPLAY \
             WAYLAND_DISPLAY \
             DBUS_SESSION_BUS_ADDRESS \
@@ -37,7 +32,20 @@ codex_packaged_runtime_prelaunch_background() {
             XDG_RUNTIME_DIR \
             HYPRLAND_INSTANCE_SIGNATURE \
             YDOTOOL_SOCKET >/dev/null 2>&1 || true
-    fi
+
+        if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+            dbus-update-activation-environment --systemd \
+                PATH \
+                HOMEBREW_PREFIX \
+                DISPLAY \
+                WAYLAND_DISPLAY \
+                DBUS_SESSION_BUS_ADDRESS \
+                XAUTHORITY \
+                XDG_RUNTIME_DIR \
+                HYPRLAND_INSTANCE_SIGNATURE \
+                YDOTOOL_SOCKET >/dev/null 2>&1 || true
+        fi
+    )
 
     if ! systemctl --user is-enabled codex-update-manager.service >/dev/null 2>&1; then
         return 0

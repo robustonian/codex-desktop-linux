@@ -48,6 +48,15 @@ pub enum CliStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+/// Installation channel inferred for a user-installed Codex CLI.
+pub enum CliInstallChannel {
+    Standalone,
+    Homebrew,
+    Npm,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 /// Artifact paths tracked across update checks, rebuilds, and installation.
 pub struct ArtifactPaths {
@@ -83,11 +92,17 @@ pub struct PersistedState {
     #[serde(default)]
     pub rollback_blocked_candidate_version: Option<String>,
     #[serde(default)]
+    pub rollback_blocked_dmg_sha256: Option<String>,
+    #[serde(default)]
     pub cli_path: Option<PathBuf>,
     #[serde(default)]
-    pub cli_installed_version: Option<String>,
+    pub cli_install_channel: Option<CliInstallChannel>,
     #[serde(default)]
-    pub cli_latest_version: Option<String>,
+    pub cli_installed_version: Option<String>,
+    #[serde(default, alias = "cli_latest_version")]
+    pub cli_official_latest_version: Option<String>,
+    #[serde(default)]
+    pub cli_package_manager_latest_version: Option<String>,
     #[serde(default)]
     pub cli_status: CliStatus,
     #[serde(default)]
@@ -138,9 +153,12 @@ impl PersistedState {
             waiting_for_app_exit_auto_install: false,
             last_known_good_version: None,
             rollback_blocked_candidate_version: None,
+            rollback_blocked_dmg_sha256: None,
             cli_path: None,
+            cli_install_channel: None,
             cli_installed_version: None,
-            cli_latest_version: None,
+            cli_official_latest_version: None,
+            cli_package_manager_latest_version: None,
             cli_status: CliStatus::Unknown,
             cli_last_check_at: None,
             cli_last_verified_at: None,
@@ -264,6 +282,7 @@ mod tests {
         state.installed_version = "2026.03.24+deadbeef".to_string();
         state.status = UpdateStatus::WaitingForAppExit;
         state.candidate_version = Some("2026.03.25+feedface".to_string());
+        state.rollback_blocked_dmg_sha256 = Some("full-rollback-dmg-sha256".to_string());
         state.notified_events.insert("ready_to_install".to_string());
         state.waiting_for_app_exit_auto_install = true;
         state.save(&path)?;
@@ -276,6 +295,10 @@ mod tests {
             Some("2026.03.25+feedface")
         );
         assert!(loaded.notified_events.contains("ready_to_install"));
+        assert_eq!(
+            loaded.rollback_blocked_dmg_sha256.as_deref(),
+            Some("full-rollback-dmg-sha256")
+        );
         assert!(!loaded.auto_install_on_app_exit);
         assert!(loaded.waiting_for_app_exit_auto_install);
         Ok(())
@@ -305,9 +328,73 @@ mod tests {
         let loaded = PersistedState::load_or_default(&path, true)?;
         assert_eq!(loaded.cli_status, CliStatus::Unknown);
         assert_eq!(loaded.cli_installed_version, None);
-        assert_eq!(loaded.cli_latest_version, None);
+        assert_eq!(loaded.cli_official_latest_version, None);
+        assert_eq!(loaded.cli_package_manager_latest_version, None);
         assert_eq!(loaded.cli_error_message, None);
         assert!(!loaded.waiting_for_app_exit_auto_install);
+        Ok(())
+    }
+
+    #[test]
+    fn loads_legacy_rollback_block_without_dmg_hash() -> Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("state.json");
+        fs::write(
+            &path,
+            r#"{
+  "installed_version": "2026.03.24+deadbeef",
+  "candidate_version": null,
+  "status": "idle",
+  "last_check_at": null,
+  "last_successful_check_at": null,
+  "remote_headers_fingerprint": null,
+  "dmg_sha256": null,
+  "artifact_paths": {"dmg_path": null, "workspace_dir": null, "deb_path": null},
+  "error_message": null,
+  "notified_events": [],
+  "auto_install_on_app_exit": true,
+  "rollback_blocked_candidate_version": "2026.03.25+badcafe0"
+}"#,
+        )?;
+
+        let loaded = PersistedState::load_or_default(&path, true)?;
+
+        assert_eq!(
+            loaded.rollback_blocked_candidate_version.as_deref(),
+            Some("2026.03.25+badcafe0")
+        );
+        assert_eq!(loaded.rollback_blocked_dmg_sha256, None);
+        Ok(())
+    }
+
+    #[test]
+    fn loads_legacy_cli_latest_version_into_official_latest() -> Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("state.json");
+        fs::write(
+            &path,
+            r#"{
+  "installed_version": "2026.03.24+deadbeef",
+  "candidate_version": null,
+  "status": "idle",
+  "last_check_at": null,
+  "last_successful_check_at": null,
+  "remote_headers_fingerprint": null,
+  "dmg_sha256": null,
+  "artifact_paths": {"dmg_path": null, "workspace_dir": null, "deb_path": null},
+  "error_message": null,
+  "notified_events": [],
+  "auto_install_on_app_exit": true,
+  "cli_latest_version": "0.42.1"
+}"#,
+        )?;
+
+        let loaded = PersistedState::load_or_default(&path, true)?;
+        assert_eq!(
+            loaded.cli_official_latest_version.as_deref(),
+            Some("0.42.1")
+        );
+        assert_eq!(loaded.cli_package_manager_latest_version, None);
         Ok(())
     }
 

@@ -21,6 +21,7 @@ use crate::windows::{
     window_permission_hint, WindowFocusResult, WindowInfo, WindowTarget,
     GNOME_SHELL_INTROSPECT_BACKEND,
 };
+use crate::ydotool;
 use anyhow::Result;
 use rmcp::{
     handler::server::wrapper::{Json, Parameters},
@@ -30,16 +31,21 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    env,
+    env, fs,
     future::Future,
-    os::unix::net::{UnixDatagram, UnixStream},
-    path::PathBuf,
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{FileTypeExt, MetadataExt},
+        net::{UnixDatagram, UnixStream},
+    },
+    path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    net::UnixStream as TokioUnixStream,
     process::{Child as TokioChild, Command as TokioCommand},
     time::{sleep, timeout},
 };
@@ -51,6 +57,9 @@ const KDE_CLIPBOARD_DBUS_TIMEOUT: Duration = Duration::from_secs(3);
 const KDE_KLIPPER_SERVICE: &str = "org.kde.klipper";
 const KDE_KLIPPER_PATH: &str = "/klipper";
 const KDE_KLIPPER_INTERFACE: &str = "org.kde.klipper.klipper";
+const AVATAR_CURSOR_SOCKET_NAME: &str = "computer-use-cursor.sock";
+const AVATAR_CURSOR_SOCKET_MAX_BYTES: usize = 100;
+const AVATAR_CURSOR_NOTIFY_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Default)]
 pub struct ComputerUseLinux {
@@ -649,13 +658,13 @@ impl ComputerUseLinux {
             == Some(true)
         {
             return Json(with_notes(
-                ActionOutput {
+                pointer_action_result(ActionOutput {
                     ok: true,
                     implemented: true,
                     action: "click".to_string(),
                     message: "Action sent through the uinput absolute pointer.".to_string(),
                     received,
-                },
+                }),
                 off_screen_note.clone(),
             ));
         }
@@ -671,13 +680,13 @@ impl ComputerUseLinux {
             {
                 Ok(()) => {
                     return Json(with_notes(
-                        ActionOutput {
+                        pointer_action_result(ActionOutput {
                             ok: true,
                             implemented: true,
                             action: "click".to_string(),
                             message: "Action sent through the remote desktop portal.".to_string(),
                             received,
-                        },
+                        }),
                         off_screen_note.clone(),
                     ));
                 }
@@ -696,14 +705,14 @@ impl ComputerUseLinux {
                 {
                     Ok(()) => {
                         return Json(with_notes(
-                            ActionOutput {
+                            pointer_action_result(ActionOutput {
                                 ok: true,
                                 implemented: true,
                                 action: "click".to_string(),
                                 message: "Action sent through the remote desktop portal."
                                     .to_string(),
                                 received,
-                            },
+                            }),
                             off_screen_note.clone(),
                         ));
                     }
@@ -724,7 +733,7 @@ impl ComputerUseLinux {
         ])
         .await;
         Json(with_notes(
-            action_result("click", result, received),
+            pointer_action_result(action_result("click", result, received)),
             off_screen_note,
         ))
     }
@@ -930,13 +939,13 @@ impl ComputerUseLinux {
             match portal_scroll(&session, target_point, direction, units).await {
                 Ok(()) => {
                     return Json(with_notes(
-                        ActionOutput {
+                        pointer_action_result(ActionOutput {
                             ok: true,
                             implemented: true,
                             action: "scroll".to_string(),
                             message: "Action sent through the remote desktop portal.".to_string(),
                             received,
-                        },
+                        }),
                         off_screen_note.clone(),
                     ));
                 }
@@ -948,14 +957,14 @@ impl ComputerUseLinux {
                     match portal_scroll(&session, target_point, direction, units).await {
                         Ok(()) => {
                             return Json(with_notes(
-                                ActionOutput {
+                                pointer_action_result(ActionOutput {
                                     ok: true,
                                     implemented: true,
                                     action: "scroll".to_string(),
                                     message: "Action sent through the remote desktop portal."
                                         .to_string(),
                                     received,
-                                },
+                                }),
                                 off_screen_note.clone(),
                             ));
                         }
@@ -989,7 +998,7 @@ impl ComputerUseLinux {
         sequence.push(wheel_mousemove_args(dx, dy));
         let result = run_ydotool_sequence(&sequence).await;
         Json(with_notes(
-            action_result("scroll", result, received),
+            pointer_action_result(action_result("scroll", result, received)),
             off_screen_note,
         ))
     }
@@ -1027,13 +1036,13 @@ impl ComputerUseLinux {
             .ok()
             .flatten();
             if dragged == Some(true) {
-                return Json(ActionOutput {
+                return Json(pointer_action_result(ActionOutput {
                     ok: true,
                     implemented: true,
                     action: "drag".to_string(),
                     message: "Action sent through the uinput absolute pointer.".to_string(),
                     received,
-                });
+                }));
             }
         }
         if let Some(session) = self.cached_portal_pointer_session() {
@@ -1047,13 +1056,13 @@ impl ComputerUseLinux {
             .await
             {
                 Ok(()) => {
-                    return Json(ActionOutput {
+                    return Json(pointer_action_result(ActionOutput {
                         ok: true,
                         implemented: true,
                         action: "drag".to_string(),
                         message: "Action sent through the remote desktop portal.".to_string(),
                         received,
-                    });
+                    }));
                 }
                 Err(_) => self.clear_portal_pointer_session(),
             }
@@ -1069,13 +1078,13 @@ impl ComputerUseLinux {
                 .await
                 {
                     Ok(()) => {
-                        return Json(ActionOutput {
+                        return Json(pointer_action_result(ActionOutput {
                             ok: true,
                             implemented: true,
                             action: "drag".to_string(),
                             message: "Action sent through the remote desktop portal.".to_string(),
                             received,
-                        });
+                        }));
                     }
                     Err(_) => self.clear_portal_pointer_session(),
                 },
@@ -1090,7 +1099,9 @@ impl ComputerUseLinux {
             vec!["click".to_string(), "0x80".to_string()],
         ])
         .await;
-        Json(action_result("drag", result, received))
+        Json(pointer_action_result(action_result(
+            "drag", result, received,
+        )))
     }
 
     #[tool(
@@ -1905,8 +1916,9 @@ impl ComputerUseLinux {
     }
 
     // The Wayland remote-desktop portal is now a *fallback* for input: when a
-    // working `ydotoold` socket is present we prefer ydotool, because it injects
-    // input without a permission prompt. GNOME refuses to persist remote-desktop
+    // compatible ydotool CLI and working `ydotoold` socket are present we prefer
+    // ydotool, because it injects input without a permission prompt. GNOME
+    // refuses to persist remote-desktop
     // grants (`org.freedesktop.portal.Error: Remote desktop sessions cannot
     // persist`), so the portal would otherwise re-prompt on every new session.
     // `COMPUTER_USE_LINUX_FORCE_YDOTOOL_*=1` always uses ydotool;
@@ -1926,7 +1938,10 @@ impl ComputerUseLinux {
         ]) {
             return self.is_wayland_session();
         }
-        self.is_wayland_session() && ydotool_socket().is_none()
+        should_prefer_portal_backend_by_default(
+            self.is_wayland_session(),
+            ydotool_backend_available(),
+        )
     }
 
     fn should_prefer_portal_keyboard_backend(&self) -> bool {
@@ -1942,7 +1957,11 @@ impl ComputerUseLinux {
         ]) {
             return self.is_wayland_session() && !self.is_kde_wayland_session();
         }
-        self.is_wayland_session() && !self.is_kde_wayland_session() && ydotool_socket().is_none()
+        !self.is_kde_wayland_session()
+            && should_prefer_portal_backend_by_default(
+                self.is_wayland_session(),
+                ydotool_backend_available(),
+            )
     }
 
     fn should_prefer_kde_clipboard_text_backend(&self) -> bool {
@@ -3129,6 +3148,166 @@ fn action_result(
     }
 }
 
+fn valid_runtime_component(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn avatar_cursor_identity_from_cmdline(cmdline: &[u8]) -> (Option<String>, Option<String>) {
+    let executable = cmdline.split(|byte| *byte == 0).next().unwrap_or_default();
+    if Path::new(std::ffi::OsStr::from_bytes(executable)).file_name()
+        != Some(std::ffi::OsStr::new("electron"))
+    {
+        return (None, None);
+    }
+    let mut app_id = None;
+    let mut instance_id = None;
+    for argument in cmdline.split(|byte| *byte == 0) {
+        let Ok(argument) = std::str::from_utf8(argument) else {
+            continue;
+        };
+        if let Some(value) = argument.strip_prefix("--app-id=") {
+            if valid_runtime_component(value) {
+                app_id = Some(value.to_string());
+            }
+        }
+        let Some(value) = argument.strip_prefix("--user-data-dir=") else {
+            continue;
+        };
+        let components = Path::new(value)
+            .components()
+            .filter_map(|component| component.as_os_str().to_str())
+            .collect::<Vec<_>>();
+        for window in components.windows(3) {
+            if window[0] == "instances"
+                && valid_runtime_component(window[1])
+                && window[2] == "electron-user-data"
+            {
+                instance_id = Some(window[1].to_string());
+            }
+        }
+    }
+    (app_id, instance_id)
+}
+
+fn proc_parent_pid(pid: &str) -> Option<u32> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("PPid:")?.trim().parse::<u32>().ok())
+}
+
+fn avatar_cursor_parent_identity() -> (Option<String>, Option<String>) {
+    let mut pid = proc_parent_pid("self");
+    for _ in 0..8 {
+        let Some(current_pid) = pid.filter(|pid| *pid > 1) else {
+            break;
+        };
+        if let Ok(cmdline) = fs::read(format!("/proc/{current_pid}/cmdline")) {
+            let identity = avatar_cursor_identity_from_cmdline(&cmdline);
+            if identity.0.is_some() {
+                return identity;
+            }
+        }
+        pid = proc_parent_pid(&current_pid.to_string());
+    }
+    (None, None)
+}
+
+fn avatar_cursor_socket_path_from(
+    runtime_dir: Option<&str>,
+    app_id: Option<&str>,
+    legacy_app_id: Option<&str>,
+    instance_id: Option<&str>,
+) -> Option<PathBuf> {
+    let runtime_dir = runtime_dir?.trim();
+    let runtime_dir = Path::new(runtime_dir);
+    if !runtime_dir.is_absolute() {
+        return None;
+    }
+
+    let app_id = app_id
+        .or(legacy_app_id)
+        .map(str::trim)
+        .filter(|value| valid_runtime_component(value))
+        .unwrap_or("codex-desktop");
+    let instance_id = instance_id.map(str::trim).filter(|value| !value.is_empty());
+    if instance_id.is_some_and(|value| !valid_runtime_component(value)) {
+        return None;
+    }
+
+    let mut path = runtime_dir.join(app_id);
+    if let Some(instance_id) = instance_id {
+        path.push("instances");
+        path.push(instance_id);
+    }
+    path.push(AVATAR_CURSOR_SOCKET_NAME);
+    (path.as_os_str().as_bytes().len() <= AVATAR_CURSOR_SOCKET_MAX_BYTES).then_some(path)
+}
+
+fn avatar_cursor_socket_path() -> Option<PathBuf> {
+    let runtime_dir = env::var("XDG_RUNTIME_DIR").ok();
+    let app_id = env::var("CODEX_LINUX_APP_ID").ok();
+    let legacy_app_id = env::var("CODEX_APP_ID").ok();
+    let instance_id = env::var("CODEX_LINUX_INSTANCE_ID").ok();
+    let parent_identity = (app_id.is_none() && legacy_app_id.is_none() || instance_id.is_none())
+        .then(avatar_cursor_parent_identity)
+        .unwrap_or_default();
+    avatar_cursor_socket_path_from(
+        runtime_dir.as_deref(),
+        app_id.as_deref().or(parent_identity.0.as_deref()),
+        legacy_app_id.as_deref(),
+        instance_id.as_deref().or(parent_identity.1.as_deref()),
+    )
+}
+
+async fn send_avatar_cursor_signal(path: &Path) -> bool {
+    let Ok(socket_metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    let Some(current_uid) = fs::metadata("/proc/self")
+        .ok()
+        .map(|metadata| metadata.uid())
+    else {
+        return false;
+    };
+    if !socket_metadata.file_type().is_socket()
+        || socket_metadata.uid() != current_uid
+        || socket_metadata.mode() & 0o077 != 0
+    {
+        return false;
+    }
+    let Ok(Ok(mut stream)) =
+        timeout(AVATAR_CURSOR_NOTIFY_TIMEOUT, TokioUnixStream::connect(path)).await
+    else {
+        return false;
+    };
+    matches!(
+        timeout(AVATAR_CURSOR_NOTIFY_TIMEOUT, stream.write_all(b"pointer\n"),).await,
+        Ok(Ok(()))
+    )
+}
+
+fn notify_avatar_cursor() {
+    let Some(path) = avatar_cursor_socket_path() else {
+        return;
+    };
+    tokio::spawn(async move {
+        let _ = send_avatar_cursor_signal(&path).await;
+    });
+}
+
+fn pointer_action_result(output: ActionOutput) -> ActionOutput {
+    if output.ok {
+        notify_avatar_cursor();
+    }
+    output
+}
+
 fn action_result_with_focus(
     action: &str,
     result: std::result::Result<Vec<Output>, String>,
@@ -3281,6 +3460,7 @@ async fn run_ydotool_sequence(
 }
 
 async fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
+    ydotool::ensure_supported()?;
     let mut command = TokioCommand::new("ydotool");
     command.args(args);
     if let Some(socket) = ydotool_socket() {
@@ -3291,7 +3471,13 @@ async fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
 
     match command.spawn() {
         Ok(child) => match wait_for_ydotool_output(child).await {
-            Ok(output) if output.status.success() => Ok(output),
+            Ok(output) if output.status.success() => {
+                if let Some(error) = ydotool::cli_error(&output.stderr) {
+                    Err(error)
+                } else {
+                    Ok(output)
+                }
+            }
             Ok(output) => Err(ydotool_output_error(output)),
             Err(error) => Err(error),
         },
@@ -3300,6 +3486,7 @@ async fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
 }
 
 async fn run_ydotool_type_text(text: &str) -> std::result::Result<Output, String> {
+    ydotool::ensure_supported()?;
     let mut command = TokioCommand::new("ydotool");
     command.args(["type", "--file", "-"]);
     if let Some(socket) = ydotool_socket() {
@@ -3320,7 +3507,11 @@ async fn run_ydotool_type_text(text: &str) -> std::result::Result<Output, String
             let output =
                 wait_for_ydotool_output_with_timeout(child, ydotool_type_timeout(text)).await?;
             if output.status.success() {
-                Ok(output)
+                if let Some(error) = ydotool::cli_error(&output.stderr) {
+                    Err(error)
+                } else {
+                    Ok(output)
+                }
             } else {
                 Err(ydotool_output_error(output))
             }
@@ -3539,6 +3730,28 @@ fn ydotool_socket() -> Option<String> {
 
     connectable_ydotool_socket_from(fallback_ydotool_socket_candidates())
         .map(|path| path.display().to_string())
+}
+
+fn ydotool_backend_available() -> bool {
+    ydotool_backend_available_from(
+        ydotool_socket_connectable(),
+        ydotool::ensure_supported().is_ok(),
+    )
+}
+
+fn ydotool_socket_connectable() -> bool {
+    if let Some(socket) = explicit_ydotool_socket() {
+        return ydotool_socket_connects(&PathBuf::from(socket));
+    }
+    connectable_ydotool_socket_from(fallback_ydotool_socket_candidates()).is_some()
+}
+
+fn ydotool_backend_available_from(socket_available: bool, cli_supported: bool) -> bool {
+    socket_available && cli_supported
+}
+
+fn should_prefer_portal_backend_by_default(is_wayland: bool, ydotool_available: bool) -> bool {
+    is_wayland && !ydotool_available
 }
 
 fn explicit_ydotool_socket() -> Option<String> {
@@ -3793,6 +4006,101 @@ mod tests {
                 None => std::env::remove_var(self.key),
             }
         }
+    }
+
+    #[test]
+    fn avatar_cursor_socket_path_is_instance_scoped_and_bounded() {
+        assert_eq!(
+            avatar_cursor_socket_path_from(
+                Some("/run/user/1000"),
+                Some("codex-desktop"),
+                None,
+                Some("secondary"),
+            ),
+            Some(PathBuf::from(
+                "/run/user/1000/codex-desktop/instances/secondary/computer-use-cursor.sock",
+            )),
+        );
+        assert_eq!(
+            avatar_cursor_socket_path_from(Some("relative"), Some("codex-desktop"), None, None,),
+            None,
+        );
+        assert_eq!(
+            avatar_cursor_socket_path_from(
+                Some("/run/user/1000"),
+                Some("codex-desktop"),
+                None,
+                Some("../escape"),
+            ),
+            None,
+        );
+        assert_eq!(
+            avatar_cursor_socket_path_from(
+                Some(&format!("/run/user/1000/{}", "x".repeat(100))),
+                Some("codex-desktop"),
+                None,
+                None,
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn avatar_cursor_identity_uses_electron_app_and_instance_arguments() {
+        assert_eq!(
+            avatar_cursor_identity_from_cmdline(
+                b"/opt/codex/electron\0--app-id=codex-cua-lab\0--user-data-dir=/home/user/.local/state/codex-cua-lab/instances/port-5176/electron-user-data\0",
+            ),
+            (
+                Some("codex-cua-lab".to_string()),
+                Some("port-5176".to_string()),
+            ),
+        );
+        assert_eq!(
+            avatar_cursor_identity_from_cmdline(
+                b"/opt/codex/electron\0--app-id=../escape\0--user-data-dir=/tmp/instances/../electron-user-data\0",
+            ),
+            (None, None),
+        );
+        assert_eq!(
+            avatar_cursor_identity_from_cmdline(b"/bin/bash\0--app-id=codex-desktop\0"),
+            (None, None),
+        );
+        assert_eq!(
+            avatar_cursor_identity_from_cmdline(
+                b"/opt/codex/electron\0--app-id=codex-desktop\0--user-data-dir=/home/instances/alice/.local/state/codex-desktop/electron-user-data\0",
+            ),
+            (Some("codex-desktop".to_string()), None),
+        );
+    }
+
+    #[tokio::test]
+    async fn avatar_cursor_signal_uses_the_private_unix_stream_protocol() {
+        let root = std::env::temp_dir().join(format!(
+            "computer-use-avatar-cursor-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let socket = root.join("cursor.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+
+        assert!(send_avatar_cursor_signal(&socket).await);
+        let (mut stream, _) = timeout(Duration::from_secs(1), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut payload = [0_u8; 8];
+        stream.read_exact(&mut payload).await.unwrap();
+        assert_eq!(&payload, b"pointer\n");
+
+        drop(listener);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn node(index: u32, bounds: Option<Bounds>) -> AccessibilityNode {
@@ -4515,6 +4823,25 @@ mod tests {
                 "930".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn legacy_ydotool_socket_does_not_suppress_portal_fallback() {
+        let legacy_ydotool_available = ydotool_backend_available_from(true, false);
+        let current_ydotool_available = ydotool_backend_available_from(true, true);
+
+        assert!(should_prefer_portal_backend_by_default(
+            true,
+            legacy_ydotool_available
+        ));
+        assert!(!should_prefer_portal_backend_by_default(
+            true,
+            current_ydotool_available
+        ));
+        assert!(!should_prefer_portal_backend_by_default(
+            false,
+            legacy_ydotool_available
+        ));
     }
 
     #[test]

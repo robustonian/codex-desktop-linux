@@ -10,6 +10,10 @@ import sys
 import urllib.parse
 
 
+USER_STYLESHEET_ENDPOINT = "/__codex_user_stylesheet.css"
+MAX_USER_STYLESHEET_BYTES = 256 * 1024
+
+
 def _install_parent_death_signal():
     # Ensure the kernel terminates this process if the launcher (parent) exits
     # without invoking its cleanup trap (SIGKILL, OOM, crash). Without this,
@@ -56,6 +60,39 @@ class CodexWebviewHandler(http.server.SimpleHTTPRequestHandler):
             if header in self.headers:
                 del self.headers[header]
         return super().send_head()
+
+    def user_stylesheet_path(self):
+        configured = os.environ.get("CODEX_LINUX_WEBVIEW_USER_STYLESHEET", "").strip()
+        if not configured:
+            configured = os.environ.get("CODEX_LINUX_WEBVIEW_USER_STYLESHEET_DEFAULT", "").strip()
+        if not configured:
+            return None
+        return os.path.expanduser(os.path.expandvars(configured))
+
+    def serve_user_stylesheet(self):
+        payload = b""
+        try:
+            css_path = self.user_stylesheet_path()
+            if css_path is None or not os.path.isfile(css_path):
+                raise OSError("user stylesheet is missing or is not a file")
+            with open(css_path, "rb") as handle:
+                payload = handle.read(MAX_USER_STYLESHEET_BYTES + 1)
+            if len(payload) > MAX_USER_STYLESHEET_BYTES:
+                payload = b""
+        except OSError:
+            payload = b""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/css; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        if payload:
+            self.wfile.write(payload)
+
+    def do_GET(self):
+        if self.normalized_request_path() == USER_STYLESHEET_ENDPOINT:
+            self.serve_user_stylesheet()
+            return
+        return super().do_GET()
 
     def end_headers(self):
         self.send_header("Cache-Control", "no-store, max-age=0")

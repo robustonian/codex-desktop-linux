@@ -7,8 +7,10 @@ const {
 const { patchStatusFromChange } = require("../../../../../lib/patch-report.js");
 const {
   applyBrowserUseNodeReplApprovalAssets,
+  applyLinuxBundledPluginCopyPermissionsPatch,
+  applyLinuxBundledPluginReconcileStaleSnapshotPatch,
   applyLinuxBrowserUseRouteLivenessPatch,
-  applyLinuxChromeExtensionStatusPatch,
+  applyLinuxBrowserUseSocketDirectoryPatch,
 } = require("../../../../impl/main-process/browser.js");
 const { applyLinuxChromePluginAutoInstallPatch } = require("../../../../impl/chrome-plugin.js");
 
@@ -38,17 +40,31 @@ module.exports = [
     }),
   }),
   mainBundlePatch({
+    id: "linux-bundled-plugin-reconcile-stale-snapshot",
+    phase: "main-bundle",
+    order: 164,
+    ciPolicy: "optional",
+    apply: applyLinuxBundledPluginReconcileStaleSnapshotPatch,
+  }),
+  mainBundlePatch({
+    id: "linux-bundled-plugin-copy-permissions",
+    phase: "main-bundle",
+    order: 165,
+    ciPolicy: "optional",
+    apply: applyLinuxBundledPluginCopyPermissionsPatch,
+  }),
+  mainBundlePatch({
+    id: "linux-browser-use-socket-directory",
+    phase: "main-bundle",
+    order: 168,
+    ciPolicy: "optional",
+    apply: applyLinuxBrowserUseSocketDirectoryPatch,
+  }),
+  mainBundlePatch({
     id: "linux-browser-use-route-liveness",
     phase: "main-bundle",
     order: 170,
     ciPolicy: "optional",
     apply: applyLinuxBrowserUseRouteLivenessPatch,
-  }),
-  mainBundlePatch({
-    id: "linux-chrome-extension-status",
-    phase: "main-bundle",
-    order: 180,
-    ciPolicy: "optional",
-    apply: applyLinuxChromeExtensionStatusPatch,
   }),
 ];

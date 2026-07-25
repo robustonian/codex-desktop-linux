@@ -143,12 +143,21 @@ run_container_job() {
         -e "CI_PACKAGE_VERSION=$CI_PACKAGE_VERSION"
         -e "PACKAGE_VERSION=$CI_PACKAGE_VERSION"
         -e "CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-always}"
-        -e "UPSTREAM_DMG_URL=${UPSTREAM_DMG_URL:-https://persistent.oaistatic.com/codex-app-prod/Codex.dmg}"
+        -e "UPSTREAM_DMG_URL=${UPSTREAM_DMG_URL:-https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg}"
         -e "UPSTREAM_DMG_PATH=${UPSTREAM_DMG_PATH:-/tmp/codex-upstream-ci/Codex.dmg}"
         -v "$REPO_DIR:/work"
         -v "$CI_CACHE_DIR:/ci-cache"
         -w /work
     )
+
+    # Linked worktrees keep only a pointer in /work/.git. Mount the shared Git
+    # metadata at its original absolute path so git ls-files/diff work inside
+    # the container without copying or mutating the user's primary checkout.
+    if [ -f "$REPO_DIR/.git" ]; then
+        local git_common_dir
+        git_common_dir="$(git -C "$REPO_DIR" rev-parse --path-format=absolute --git-common-dir)"
+        args+=(-v "$git_common_dir:$git_common_dir:ro")
+    fi
 
     if [ -n "${CI_DMG_PATH:-}" ]; then
         args+=(-e "CI_DMG_PATH=$CI_DMG_PATH")

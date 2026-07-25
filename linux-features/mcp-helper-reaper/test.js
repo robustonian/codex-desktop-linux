@@ -25,13 +25,15 @@ function writeExecutable(file, body) {
 }
 
 function hostTool(name) {
-  for (const dir of ["/usr/bin", "/bin"]) {
+  for (const dir of (process.env.PATH || "").split(path.delimiter)) {
+    if (!dir || !path.isAbsolute(dir)) continue;
     const candidate = path.join(dir, name);
-    if (fs.existsSync(candidate)) {
-      return candidate;
-    }
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      if (fs.statSync(candidate).isFile()) return candidate;
+    } catch {}
   }
-  return name;
+  throw new Error(`could not resolve executable from PATH: ${name}`);
 }
 
 function symlinkHostTools(targetDir, names) {
@@ -56,7 +58,7 @@ function run(command, args, options = {}) {
   return result;
 }
 
-test("stage hook installs Rust reaper, launcher hooks, and idempotent node_repl wrapper", () => {
+test("stage hook installs the orphan reaper without wrapping node_repl", () => {
   const tempDir = makeTempDir("codex-mcp-helper-reaper-stage-");
   const appDir = path.join(tempDir, "app");
   const workDir = path.join(tempDir, "work");
@@ -84,16 +86,14 @@ test("stage hook installs Rust reaper, launcher hooks, and idempotent node_repl 
   assert.equal(fs.statSync(path.join(installedRoot, "mcp-helper-reaper", "install-session-hook.sh")).mode & 0o111, 0o111);
   assert.equal(fs.statSync(path.join(installedRoot, "cold-start.d", "mcp-helper-reaper")).mode & 0o111, 0o111);
   assert.equal(fs.statSync(path.join(installedRoot, "after-exit.d", "mcp-helper-reaper")).mode & 0o111, 0o111);
-  assert.match(fs.readFileSync(nodeRepl, "utf8"), /mcp-helper-reaper-node-repl-wrapper/);
-  assert.match(
-    fs.readFileSync(path.join(appDir, "resources", "node_repl.codex-linux-original"), "utf8"),
-    /original node_repl/,
-  );
+  assert.match(fs.readFileSync(nodeRepl, "utf8"), /original node_repl/);
+  assert.equal(fs.existsSync(path.join(appDir, "resources", "node_repl.codex-linux-original")), false);
+  assert.equal(fs.existsSync(path.join(installedRoot, "mcp-helper-reaper", "node-repl-wrapper.sh")), false);
 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
-test("stage hook refreshes stale node_repl backup after non-fresh rebuild", () => {
+test("stage hook restores a node_repl wrapper left by the previous feature version", () => {
   const tempDir = makeTempDir("codex-mcp-helper-reaper-refresh-");
   const appDir = path.join(tempDir, "app");
   const workDir = path.join(tempDir, "work");
@@ -103,7 +103,11 @@ test("stage hook refreshes stale node_repl backup after non-fresh rebuild", () =
   fs.mkdirSync(path.dirname(nodeRepl), { recursive: true });
   fs.mkdirSync(workDir, { recursive: true });
   writeExecutable(source, "#!/usr/bin/env bash\nexit 0\n");
-  writeExecutable(nodeRepl, "#!/usr/bin/env bash\necho first node_repl\n");
+  writeExecutable(
+    nodeRepl,
+    "#!/usr/bin/env bash\n# mcp-helper-reaper-node-repl-wrapper\nexit 0\n",
+  );
+  writeExecutable(originalNodeRepl, "#!/usr/bin/env bash\necho original node_repl\n");
 
   const env = {
     SCRIPT_DIR: REPO_ROOT,
@@ -114,12 +118,10 @@ test("stage hook refreshes stale node_repl backup after non-fresh rebuild", () =
   };
 
   run("bash", [STAGE], { env });
-  writeExecutable(nodeRepl, "#!/usr/bin/env bash\necho refreshed node_repl\n");
-  run("bash", [STAGE], { env });
 
-  assert.match(fs.readFileSync(nodeRepl, "utf8"), /mcp-helper-reaper-node-repl-wrapper/);
-  assert.match(fs.readFileSync(originalNodeRepl, "utf8"), /refreshed node_repl/);
-  assert.doesNotMatch(fs.readFileSync(originalNodeRepl, "utf8"), /first node_repl/);
+  assert.match(fs.readFileSync(nodeRepl, "utf8"), /original node_repl/);
+  assert.doesNotMatch(fs.readFileSync(nodeRepl, "utf8"), /mcp-helper-reaper-node-repl-wrapper/);
+  assert.equal(fs.existsSync(originalNodeRepl), false);
 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
@@ -141,7 +143,6 @@ test("stage hook finds cargo in HOME cargo bin when PATH omits it", () => {
   fs.mkdirSync(path.dirname(nodeRepl), { recursive: true });
   symlinkHostTools(fakeBin, ["bash", "cat", "chmod", "grep", "install", "mkdir", "mv"]);
   for (const file of [
-    "node-repl-wrapper.sh",
     "install-session-hook.sh",
     "cold-start-hook.sh",
     "after-exit-hook.sh",
@@ -184,7 +185,8 @@ chmod 0755 target/release/codex-mcp-helper-reaper
     fs.existsSync(path.join(appDir, ".codex-linux", "mcp-helper-reaper", "codex-mcp-helper-reaper")),
     true,
   );
-  assert.match(fs.readFileSync(nodeRepl, "utf8"), /mcp-helper-reaper-node-repl-wrapper/);
+  assert.match(fs.readFileSync(nodeRepl, "utf8"), /original node_repl/);
+  assert.equal(fs.existsSync(path.join(appDir, "resources", "node_repl.codex-linux-original")), false);
 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });

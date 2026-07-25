@@ -1,3 +1,47 @@
+codex_capture_original_ld_library_path() {
+    # Packaged runtimes may extend LD_LIBRARY_PATH after this point. Main-process
+    # host children use this three-state snapshot instead of inheriting those paths.
+    # HOST is populated later from the login shell; inherited values are stale or
+    # user-controlled internal state and must never override this fresh snapshot.
+    unset CODEX_LINUX_HOST_LD_LIBRARY_PATH_STATE CODEX_LINUX_HOST_LD_LIBRARY_PATH_VALUE
+    if [ "${LD_LIBRARY_PATH+x}" != x ]; then
+        CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_STATE="unset"
+        CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_VALUE=""
+    elif [ -z "$LD_LIBRARY_PATH" ]; then
+        CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_STATE="empty"
+        CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_VALUE=""
+    else
+        CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_STATE="value"
+        CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_VALUE="$LD_LIBRARY_PATH"
+    fi
+    export CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_STATE CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_VALUE
+}
+
+codex_restore_original_ld_library_path() {
+    local state="${CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_STATE:-}"
+    local value="${CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_VALUE:-}"
+
+    unset CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_STATE CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_VALUE
+    unset CODEX_LINUX_HOST_LD_LIBRARY_PATH_STATE CODEX_LINUX_HOST_LD_LIBRARY_PATH_VALUE
+    case "$state" in
+        unset) unset LD_LIBRARY_PATH ;;
+        empty) export LD_LIBRARY_PATH="" ;;
+        value) export LD_LIBRARY_PATH="$value" ;;
+    esac
+}
+
+codex_exec_host_command() {
+    codex_restore_original_ld_library_path
+    exec "$@"
+}
+
+codex_run_host_command() (
+    codex_exec_host_command "$@"
+)
+
+# Capture before package-specific launcher patches add application runtime paths.
+codex_capture_original_ld_library_path
+
 resolve_script_dir() {
     local source="${BASH_SOURCE[0]}"
     local dir
@@ -32,6 +76,17 @@ CODEX_LINUX_SETTINGS_FILE="$APP_SETTINGS_FILE"
 CODEX_LINUX_FEATURES_DIR="$SCRIPT_DIR/.codex-linux/features"
 export CODEX_HOME CODEX_LINUX_APP_ID CODEX_LINUX_APP_DISPLAY_NAME CODEX_LINUX_WEBVIEW_PORT CODEX_LINUX_SETTINGS_FILE CODEX_LINUX_FEATURES_DIR
 APP_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/$CODEX_LINUX_APP_ID"
+
+configure_runtime_tmpdir() {
+    [ -z "${TMPDIR:-}" ] || return 0
+
+    TMPDIR="$APP_STATE_DIR/tmp"
+    mkdir -p "$TMPDIR"
+    chmod 700 "$TMPDIR"
+    export TMPDIR
+}
+
+configure_runtime_tmpdir
 APP_PID_FILE="$APP_STATE_DIR/app.pid"
 WEBVIEW_PID_FILE="$APP_STATE_DIR/webview.pid"
 LAUNCH_ACTION_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$APP_STATE_DIR}/$CODEX_LINUX_APP_ID"
@@ -53,6 +108,13 @@ MULTI_LAUNCH_ACTIVE=0
 CODEX_LINUX_INSTANCE_ID=""
 CODEX_LINUX_CODEX_PROFILE=""
 LAUNCHER_ARGS=()
+
+# Multi-launch requests are one launcher invocation wide. Keep the public
+# compatibility flag long enough to parse this invocation, but do not leak it
+# into Electron or descendants where it would turn later normal launches into
+# additional side-by-side instances.
+CODEX_MULTI_LAUNCH_REQUEST="${CODEX_MULTI_LAUNCH:-}"
+unset CODEX_MULTI_LAUNCH
 
 # Internal marker consumed by patched Electron bundles; never trust inheritance.
 unset CODEX_LINUX_MULTI_LAUNCH
@@ -143,7 +205,7 @@ choose_multi_launch_port() {
         fi
     done
 
-    echo "No free Codex Desktop webview port found in CODEX_MULTI_LAUNCH_PORT_RANGE=$range" >&2
+    echo "No free ChatGPT Desktop webview port found in CODEX_MULTI_LAUNCH_PORT_RANGE=$range" >&2
     return 1
 }
 
@@ -152,7 +214,7 @@ parse_launcher_args() {
     local profile
 
     LAUNCHER_ARGS=()
-    if early_truthy_env_value "${CODEX_MULTI_LAUNCH:-}"; then
+    if early_truthy_env_value "$CODEX_MULTI_LAUNCH_REQUEST"; then
         MULTI_LAUNCH_REQUESTED=1
     fi
 
@@ -232,6 +294,40 @@ configure_multi_launch_instance() {
 configure_multi_launch_instance "$@"
 WEBVIEW_ORIGIN="http://127.0.0.1:$CODEX_LINUX_WEBVIEW_PORT"
 
+resolve_webview_renderer_url() {
+    local webview_index="$WEBVIEW_DIR/index.html"
+    local index_sha256
+
+    if [ ! -f "$webview_index" ]; then
+        printf '%s/\n' "$WEBVIEW_ORIGIN"
+        return 0
+    fi
+    if ! index_sha256="$(sha256sum "$webview_index" 2>/dev/null | awk '{print $1}')" ||
+       [[ ! "$index_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+        return 1
+    fi
+
+    printf '%s/?v=%s\n' "$WEBVIEW_ORIGIN" "$index_sha256"
+}
+
+select_webview_renderer_url() {
+    WEBVIEW_RENDERER_URL_OVERRIDE_ACTIVE=0
+    if early_truthy_env_value "${CODEX_LINUX_ALLOW_RENDERER_URL_OVERRIDE:-}" &&
+       [ -n "${ELECTRON_RENDERER_URL:-}" ]; then
+        WEBVIEW_RENDERER_URL_OVERRIDE_ACTIVE=1
+        WEBVIEW_RENDERER_URL="$ELECTRON_RENDERER_URL"
+        return 0
+    fi
+
+    if ! WEBVIEW_RENDERER_URL="$(resolve_webview_renderer_url)"; then
+        launcher_notice "$CODEX_LINUX_APP_DISPLAY_NAME could not fingerprint $WEBVIEW_DIR/index.html; install coreutils and rebuild the app."
+        return 1
+    fi
+}
+
+WEBVIEW_RENDERER_URL=""
+WEBVIEW_RENDERER_URL_OVERRIDE_ACTIVE=0
+
 mkdir -p "$LOG_DIR" "$APP_CONFIG_DIR" "$APP_STATE_DIR" "$LAUNCH_ACTION_RUNTIME_DIR"
 chmod 700 "$LAUNCH_ACTION_RUNTIME_DIR" 2>/dev/null || true
 export CODEX_DESKTOP_LAUNCH_ACTION_SOCKET="$LAUNCH_ACTION_SOCKET"
@@ -240,8 +336,11 @@ ADOPTED_WEBVIEW_PID=""
 ELECTRON_PID=""
 RUNNING_APP_PID=""
 WARM_START=0
-LAUNCHER_LOCK_FD_OPEN=0
+LAUNCHER_LOCK_HELD=0
 LAUNCHER_LOCK_TIMED_OUT=0
+LAUNCHER_LOCK_HELPER_PID=""
+LAUNCHER_LOCK_HELPER_START_TIME=""
+LAUNCHER_LOCK_STATUS_PATH=""
 
 if [[ "${LAUNCHER_ARGS[0]:-}" == "--help" || "${LAUNCHER_ARGS[0]:-}" == "-h" ]]; then
     cat <<HELP
@@ -287,7 +386,7 @@ Environment:
   CODEX_FORCE_RENDERER_ACCESSIBILITY=auto|0|1
                               Override --force-renderer-accessibility; auto forces it only when assistive
                               technology is detected and never under WSLg or native wayland-gpu
-  CODEX_MULTI_LAUNCH=1        Treat normal launches like --new-instance
+  CODEX_MULTI_LAUNCH=1        Treat this launcher invocation like --new-instance
   CODEX_MULTI_LAUNCH_PORT_RANGE=START-END
                               Port allocation range for --new-instance (default: CODEX_WEBVIEW_PORT through +4)
 
@@ -365,6 +464,50 @@ make_tree_owner_writable() {
     chmod -R u+rwX "$path" 2>/dev/null || true
 }
 
+make_path_owner_trusted() {
+    local path
+
+    for path in "$@"; do
+        [ ! -L "$path" ] || return 1
+        [ -e "$path" ] || continue
+        chmod u+rwX,go-w "$path" 2>/dev/null || return 1
+    done
+}
+
+make_tree_owner_trusted() {
+    local path="$1"
+
+    [ ! -L "$path" ] || return 1
+    [ -e "$path" ] || return 0
+    if find "$path" -xdev -type l -print -quit 2>/dev/null | grep -q .; then
+        return 1
+    fi
+    chmod -R u+rwX,go-w "$path" 2>/dev/null || return 1
+}
+
+path_has_unsafe_write() {
+    local path
+
+    for path in "$@"; do
+        if [ -L "$path" ]; then
+            return 0
+        fi
+        [ -e "$path" ] || continue
+        if find "$path" -maxdepth 0 -perm /022 -print -quit 2>/dev/null | grep -q .; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+tree_has_unsafe_write() {
+    local path="$1"
+
+    [ ! -L "$path" ] || return 0
+    [ -e "$path" ] || return 1
+    find "$path" -xdev \( -type l -o -perm /022 \) -print -quit 2>/dev/null | grep -q .
+}
+
 remove_tree_if_exists() {
     local path="$1"
 
@@ -396,6 +539,37 @@ fix_bundled_marketplace_tmp_permissions() {
     find "$marketplace_tmp_root" -type f -exec chmod u+rw {} + 2>/dev/null || true
 }
 
+prepare_bundled_marketplace_tmp_paths() {
+    local codex_home="${CODEX_HOME:-$HOME/.codex}"
+    local marketplace_tmp_root="$codex_home/.tmp/bundled-marketplaces"
+    local scope="${1:-root}"
+    local path
+    local -a paths=(
+        "$codex_home"
+        "$codex_home/.tmp"
+        "$marketplace_tmp_root"
+    )
+
+    if [ "$scope" = "full" ]; then
+        paths+=(
+            "$marketplace_tmp_root/openai-bundled"
+            "$marketplace_tmp_root/openai-bundled/.agents"
+            "$marketplace_tmp_root/openai-bundled/.agents/plugins"
+            "$marketplace_tmp_root/openai-bundled/plugins"
+        )
+    fi
+
+    for path in "${paths[@]}"; do
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            [ -d "$path" ] && [ ! -L "$path" ] || return 1
+        else
+            (umask 0077; mkdir -p "$path") || return 1
+        fi
+        make_path_owner_trusted "$path" || return 1
+        ! path_has_unsafe_write "$path" || return 1
+    done
+}
+
 clear_bundled_marketplace_tmp_cache() {
     local codex_home="${CODEX_HOME:-$HOME/.codex}"
     local marketplace_tmp_root="$codex_home/.tmp/bundled-marketplaces"
@@ -406,17 +580,6 @@ clear_bundled_marketplace_tmp_cache() {
         [ -e "$path" ] || continue
         remove_tree_if_exists "$path"
     done
-}
-
-monitor_bundled_marketplace_tmp_permissions() {
-    (
-        local i=0
-        while [ "$i" -lt 300 ]; do
-            fix_bundled_marketplace_tmp_permissions
-            sleep 0.1
-            i=$((i + 1))
-        done
-    ) &
 }
 
 import_graphical_env_entry() {
@@ -594,16 +757,37 @@ export_packaged_runtime_env() {
     fi
 }
 
+path_without_entry() {
+    local path_value="$1"
+    local entry_to_remove="$2"
+    local remaining
+    local entry
+    local result=""
+    local separator=""
+
+    remaining="$path_value:"
+    while [ -n "$remaining" ]; do
+        entry="${remaining%%:*}"
+        remaining="${remaining#*:}"
+        if [ "$entry" != "$entry_to_remove" ]; then
+            result="$result$separator$entry"
+            separator=:
+        fi
+    done
+
+    printf '%s\n' "$result"
+}
+
 prepend_managed_node_runtime_to_path() {
     [ -x "$MANAGED_NODE_BIN_DIR/node" ] || return 0
 
-    if [ -z "${CODEX_LINUX_USER_PATH+x}" ]; then
-        export CODEX_LINUX_USER_PATH="${PATH:-}"
-    fi
+    local current_path="${PATH:-}"
+    CODEX_LINUX_USER_PATH="$(path_without_entry "${CODEX_LINUX_USER_PATH-$current_path}" "$MANAGED_NODE_BIN_DIR")"
+    export CODEX_LINUX_USER_PATH
 
-    case ":$PATH:" in
-        *":$MANAGED_NODE_BIN_DIR:"*) ;;
-        *) export PATH="$MANAGED_NODE_BIN_DIR:$PATH" ;;
+    case "$current_path" in
+        "$MANAGED_NODE_BIN_DIR"|"$MANAGED_NODE_BIN_DIR":*) ;;
+        *) export PATH="$MANAGED_NODE_BIN_DIR${current_path:+:$current_path}" ;;
     esac
     export CODEX_MANAGED_NODE_RUNTIME_DIR="$SCRIPT_DIR/resources/node-runtime"
 }
@@ -659,7 +843,7 @@ run_feature_prelaunch_hooks() {
         CODEX_LINUX_LAUNCHER_CMD="${CODEX_LINUX_LAUNCHER_CMD:-$SCRIPT_DIR/start.sh}" \
         CODEX_LINUX_FEATURE_HOOK_PHASE="prelaunch" \
         CODEX_UPDATE_MANAGER_PATH="${CODEX_UPDATE_MANAGER_PATH:-}" \
-            "$hook" "$SCRIPT_DIR" "$APP_STATE_DIR" "$LOG_DIR"
+            codex_run_host_command "$hook" "$SCRIPT_DIR" "$APP_STATE_DIR" "$LOG_DIR"
     done
 }
 
@@ -714,13 +898,22 @@ stage_bundled_marketplace_metadata() {
     local codex_home="${CODEX_HOME:-$HOME/.codex}"
     local marketplace_root="$codex_home/.tmp/bundled-marketplaces/openai-bundled"
     local marketplace_plugins_dir="$marketplace_root/.agents/plugins"
+    local marketplace_target="$marketplace_plugins_dir/marketplace.json"
+    local marketplace_temp=""
 
     [ -f "$source_marketplace" ] || return 0
     mkdir -p "$marketplace_plugins_dir" "$marketplace_root/plugins"
-    rm -f "$marketplace_plugins_dir/marketplace.json"
-    cp "$source_marketplace" "$marketplace_plugins_dir/marketplace.json" && \
-        chmod u+w "$marketplace_plugins_dir/marketplace.json" || \
+    marketplace_temp="$(mktemp "$marketplace_plugins_dir/.marketplace.json.tmp.XXXXXX")" || {
         echo "Bundled marketplace metadata sync failed; continuing with existing marketplace cache."
+        return 0
+    }
+    if cp "$source_marketplace" "$marketplace_temp" && \
+       chmod u+w "$marketplace_temp" && \
+       mv -fT -- "$marketplace_temp" "$marketplace_target"; then
+        return 0
+    fi
+    rm -f -- "$marketplace_temp"
+    echo "Bundled marketplace metadata sync failed; continuing with existing marketplace cache."
 }
 
 sync_browser_use_bundled_plugin_cache() {
@@ -799,6 +992,169 @@ chrome_extension_host_arch() {
         aarch64|arm64) echo "arm64" ;;
         *) return 1 ;;
     esac
+}
+
+write_chrome_native_host_launcher() {
+    local cache_root="$1"
+    local launcher_path="$cache_root/native-host"
+    local tmp_path
+
+    make_path_owner_trusted "$cache_root" || return 1
+    tmp_path="$(mktemp "$cache_root/.native-host.tmp.XXXXXX")" || return 1
+    if ! printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        'set -euo pipefail' \
+        'CODEX_CHROME_NATIVE_HOST_LAUNCHER_V2=1' \
+        'cache_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"' \
+        'run_proxy_probe() {' \
+        '    local output_file timeout_file probe_pid watchdog_pid rc=0 self_pid' \
+        '    command -v setsid >/dev/null 2>&1 || return 1' \
+        '    [ -r /proc/self/stat ] || return 1' \
+        '    output_file="$(mktemp "${TMPDIR:-/tmp}/codex-chrome-proxy-probe.XXXXXX")" || return 1' \
+        '    timeout_file="$(mktemp "${TMPDIR:-/tmp}/codex-chrome-proxy-timeout.XXXXXX")" || {' \
+        '        rm -f -- "$output_file"' \
+        '        return 1' \
+        '    }' \
+        '    self_pid=${BASHPID:-$$}' \
+        '    setsid "$@" >"$output_file" 2>/dev/null &' \
+        '    probe_pid=$!' \
+        '    (' \
+        '        sleep 0.5' \
+        '        [ -r "/proc/$probe_pid/stat" ] || exit 0' \
+        '        local stat_line rest' \
+        '        stat_line=$(< "/proc/$probe_pid/stat") || exit 0' \
+        '        rest=${stat_line##*) }' \
+        '        set -- $rest' \
+        '        [ "${2:-}" = "$self_pid" ] || exit 0' \
+        '        printf 1 > "$timeout_file"' \
+        '        if kill -0 "$probe_pid" 2>/dev/null; then' \
+        '            kill -TERM -- "-$probe_pid" 2>/dev/null || kill -TERM "$probe_pid" 2>/dev/null || true' \
+        '            sleep 0.1' \
+        '            kill -KILL -- "-$probe_pid" 2>/dev/null || kill -KILL "$probe_pid" 2>/dev/null || true' \
+        '        fi' \
+        '    ) >/dev/null 2>&1 &' \
+        '    watchdog_pid=$!' \
+        '    wait "$probe_pid" || rc=$?' \
+        '    if [ -s "$timeout_file" ]; then' \
+        '        wait "$watchdog_pid" 2>/dev/null || true' \
+        '        rc=124' \
+        '    else' \
+        '        kill "$watchdog_pid" 2>/dev/null || true' \
+        '        wait "$watchdog_pid" 2>/dev/null || true' \
+        '    fi' \
+        '    if [ "$rc" -eq 0 ]; then' \
+        '        cat "$output_file"' \
+        '    fi' \
+        '    rm -f -- "$output_file" "$timeout_file"' \
+        '    return "$rc"' \
+        '}' \
+        'http_proxy_inherited=0' \
+        'https_proxy_inherited=0' \
+        'all_proxy_inherited=0' \
+        'no_proxy_inherited=0' \
+        '[ -z "${HTTP_PROXY+x}" ] && [ -z "${http_proxy+x}" ] || http_proxy_inherited=1' \
+        '[ -z "${HTTPS_PROXY+x}" ] && [ -z "${https_proxy+x}" ] || https_proxy_inherited=1' \
+        '[ -z "${ALL_PROXY+x}" ] && [ -z "${all_proxy+x}" ] || all_proxy_inherited=1' \
+        '[ -z "${NO_PROXY+x}" ] && [ -z "${no_proxy+x}" ] || no_proxy_inherited=1' \
+        'while IFS="=" read -r name value; do' \
+        '    case "$name" in' \
+        '        HTTP_PROXY|http_proxy) [ "$http_proxy_inherited" -eq 1 ] || export "$name=$value" ;;' \
+        '        HTTPS_PROXY|https_proxy) [ "$https_proxy_inherited" -eq 1 ] || export "$name=$value" ;;' \
+        '        ALL_PROXY|all_proxy) [ "$all_proxy_inherited" -eq 1 ] || export "$name=$value" ;;' \
+        '        NO_PROXY|no_proxy) [ "$no_proxy_inherited" -eq 1 ] || export "$name=$value" ;;' \
+        '    esac' \
+        'done < <(run_proxy_probe systemctl --user show-environment 2>/dev/null || true)' \
+        'copy_proxy_pair() {' \
+        '    local upper_name="$1" lower_name="$2"' \
+        '    if [ -z "${!upper_name+x}" ] && [ -n "${!lower_name+x}" ]; then' \
+        '        export "$upper_name=${!lower_name}"' \
+        '    elif [ -z "${!lower_name+x}" ] && [ -n "${!upper_name+x}" ]; then' \
+        '        export "$lower_name=${!upper_name}"' \
+        '    fi' \
+        '}' \
+        'copy_proxy_family() {' \
+        '    local source_upper="$1" source_lower="$2" target_upper="$3" target_lower="$4" value' \
+        '    [ -z "${!target_upper+x}" ] && [ -z "${!target_lower+x}" ] || return 0' \
+        '    if [ -n "${!source_upper+x}" ]; then' \
+        '        value="${!source_upper}"' \
+        '    elif [ -n "${!source_lower+x}" ]; then' \
+        '        value="${!source_lower}"' \
+        '    else' \
+        '        return 0' \
+        '    fi' \
+        '    export "$target_upper=$value" "$target_lower=$value"' \
+        '}' \
+        'read_gnome_proxy_value() {' \
+        '    local schema="$1" key="$2" value' \
+        '    value="$(run_proxy_probe gsettings get "$schema" "$key" 2>/dev/null)" || return 1' \
+        '    value="$(printf "%s" "$value" | tr -d "\047")"' \
+        '    printf "%s\\n" "$value"' \
+        '}' \
+        'read_gnome_proxy_ignore_hosts() {' \
+        '    local value' \
+        '    value="$(run_proxy_probe gsettings get org.gnome.system.proxy ignore-hosts 2>/dev/null)" || return 1' \
+        '    value="${value#@as }"' \
+        '    value="${value#[}"' \
+        '    value="${value%]}"' \
+        '    value="$(printf "%s" "$value" | tr -d "\047" | sed "s/, */,/g")"' \
+        '    printf "%s\\n" "$value"' \
+        '}' \
+        'set_gnome_proxy_pair() {' \
+        '    local upper_name="$1" lower_name="$2" schema="$3" scheme="$4"' \
+        '    local host port value' \
+        '    [ -z "${!upper_name+x}" ] && [ -z "${!lower_name+x}" ] || return 0' \
+        '    host="$(read_gnome_proxy_value "$schema" host)" || return 0' \
+        '    port="$(read_gnome_proxy_value "$schema" port)" || return 0' \
+        '    [ -n "$host" ] || return 0' \
+        '    case "$port" in ""|*[!0-9]*) return 0 ;; esac' \
+        '    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 0' \
+        '    case "$host" in \[*\]) ;; *:*) host="[$host]" ;; esac' \
+        '    value="$scheme://$host:$port"' \
+        '    [ "$scheme" != socks5 ] || value="$value/"' \
+        '    export "$upper_name=$value" "$lower_name=$value"' \
+        '}' \
+        'set_gnome_no_proxy_pair() {' \
+        '    local value' \
+        '    [ -z "${NO_PROXY+x}" ] && [ -z "${no_proxy+x}" ] || return 0' \
+        '    value="$(read_gnome_proxy_ignore_hosts)" || return 0' \
+        '    [ -n "$value" ] || return 0' \
+        '    export "NO_PROXY=$value" "no_proxy=$value"' \
+        '}' \
+        'copy_proxy_pair HTTP_PROXY http_proxy' \
+        'copy_proxy_pair HTTPS_PROXY https_proxy' \
+        'copy_proxy_pair ALL_PROXY all_proxy' \
+        'copy_proxy_pair NO_PROXY no_proxy' \
+        'gnome_proxy_mode="$(read_gnome_proxy_value org.gnome.system.proxy mode 2>/dev/null || true)"' \
+        'if [ "$gnome_proxy_mode" = manual ]; then' \
+        '    set_gnome_proxy_pair HTTP_PROXY http_proxy org.gnome.system.proxy.http http' \
+        '    gnome_use_same_proxy="$(read_gnome_proxy_value org.gnome.system.proxy use-same-proxy 2>/dev/null || true)"' \
+        '    if [ "$gnome_use_same_proxy" = true ]; then' \
+        '        copy_proxy_family HTTP_PROXY http_proxy HTTPS_PROXY https_proxy' \
+        '        copy_proxy_family HTTP_PROXY http_proxy ALL_PROXY all_proxy' \
+        '    else' \
+        '        set_gnome_proxy_pair HTTPS_PROXY https_proxy org.gnome.system.proxy.https http' \
+        '        set_gnome_proxy_pair ALL_PROXY all_proxy org.gnome.system.proxy.socks socks5' \
+        '    fi' \
+        '    set_gnome_no_proxy_pair' \
+        'fi' \
+        'case "$(uname -m)" in' \
+        '    x86_64) extension_arch=x64 ;;' \
+        '    aarch64|arm64) extension_arch=arm64 ;;' \
+        '    *) exit 1 ;;' \
+        'esac' \
+        'host_path="$cache_root/latest/extension-host/linux/$extension_arch/extension-host"' \
+        'exec "$host_path" "$@"' > "$tmp_path"; then
+        rm -f -- "$tmp_path"
+        return 1
+    fi
+    if [ -d "$launcher_path" ] && [ ! -L "$launcher_path" ]; then
+        remove_tree_if_exists "$launcher_path"
+    fi
+    if ! chmod 0755 "$tmp_path" || ! mv -fT -- "$tmp_path" "$launcher_path"; then
+        rm -f -- "$tmp_path"
+        return 1
+    fi
+    printf '%s\n' "$launcher_path"
 }
 
 write_chrome_native_host_manifests() {
@@ -908,6 +1264,7 @@ sync_chrome_bundled_plugin_cache() {
     local marketplace_plugin_link
     local host_path
     local needs_copy=1
+    local cache_was_untrusted=0
 
     [ -f "$plugin_json" ] || return 0
     [ -d "$source_plugin" ] || return 0
@@ -923,6 +1280,17 @@ sync_chrome_bundled_plugin_cache() {
     [ -f "$source_client" ] || return 0
     [ -f "$source_install_manifest" ] || return 0
 
+    if path_has_unsafe_write \
+        "$SCRIPT_DIR" \
+        "$SCRIPT_DIR/resources" \
+        "$SCRIPT_DIR/resources/plugins" \
+        "$SCRIPT_DIR/resources/plugins/openai-bundled" \
+        "$SCRIPT_DIR/resources/plugins/openai-bundled/plugins" \
+        "$source_plugin" || tree_has_unsafe_write "$source_plugin"; then
+        echo "Chrome bundled plugin source is not trusted; skipping cache and native-host manifest sync."
+        return 0
+    fi
+
     version="$(bundled_plugin_version "$plugin_json" 2>/dev/null || true)"
     [ -n "$version" ] || return 0
 
@@ -932,7 +1300,27 @@ sync_chrome_bundled_plugin_cache() {
     cache_client="$cache_plugin/scripts/browser-client.mjs"
     cache_install_manifest="$cache_plugin/scripts/installManifest.mjs"
 
-    if [ -f "$cache_plugin/.codex-plugin/plugin.json" ] && \
+    if path_has_unsafe_write \
+        "$codex_home" \
+        "$codex_home/plugins" \
+        "$codex_home/plugins/cache" \
+        "$codex_home/plugins/cache/openai-bundled" \
+        "$cache_root" || tree_has_unsafe_write "$cache_plugin"; then
+        cache_was_untrusted=1
+    fi
+
+    if ! make_path_owner_trusted \
+        "$codex_home" \
+        "$codex_home/plugins" \
+        "$codex_home/plugins/cache" \
+        "$codex_home/plugins/cache/openai-bundled" \
+        "$cache_root"; then
+        echo "Chrome plugin cache ancestors could not be hardened; skipping cache and native-host manifest sync."
+        return 0
+    fi
+
+    if [ "$cache_was_untrusted" -eq 0 ] && \
+        [ -f "$cache_plugin/.codex-plugin/plugin.json" ] && \
         [ -f "$cache_host" ] && \
         [ -f "$cache_client" ] && \
         [ -f "$cache_install_manifest" ] && \
@@ -965,9 +1353,23 @@ sync_chrome_bundled_plugin_cache() {
         tmp_plugin="$cache_parent/.chrome-$version.tmp.$$"
         remove_tree_if_exists "$tmp_plugin"
         mkdir -p "$cache_parent"
+        if ! make_path_owner_trusted \
+            "$codex_home" \
+            "$codex_home/plugins" \
+            "$codex_home/plugins/cache" \
+            "$codex_home/plugins/cache/openai-bundled" \
+            "$cache_root" \
+            "$cache_parent"; then
+            echo "Chrome plugin cache parent could not be hardened; skipping cache and native-host manifest sync."
+            return 0
+        fi
 
         if cp -R "$source_plugin" "$tmp_plugin"; then
-            make_tree_owner_writable "$tmp_plugin"
+            if ! make_tree_owner_trusted "$tmp_plugin"; then
+                remove_tree_if_exists "$tmp_plugin"
+                echo "Chrome plugin cache copy could not be hardened; continuing without a new cache."
+                return 0
+            fi
             find "$tmp_plugin" -type f -name '*:com.apple.*' -delete
             remove_tree_if_exists "$cache_plugin"
             mv "$tmp_plugin" "$cache_plugin"
@@ -979,6 +1381,10 @@ sync_chrome_bundled_plugin_cache() {
         fi
     fi
 
+    if ! make_tree_owner_trusted "$cache_plugin"; then
+        echo "Chrome plugin cache could not be hardened; skipping native-host manifest sync."
+        return 0
+    fi
     replace_symlink "$version" "$cache_root/latest"
 
     marketplace_root="$codex_home/.tmp/bundled-marketplaces/openai-bundled"
@@ -987,8 +1393,8 @@ sync_chrome_bundled_plugin_cache() {
     mkdir -p "$marketplace_plugins_dir" "$marketplace_root/plugins"
     replace_symlink "$cache_root/latest" "$marketplace_plugin_link"
 
-    host_path="$cache_root/latest/extension-host/linux/$extension_arch/extension-host"
-    [ -x "$host_path" ] || return 0
+    [ -x "$cache_root/latest/extension-host/linux/$extension_arch/extension-host" ] || return 0
+    host_path="$(write_chrome_native_host_launcher "$cache_root")" || return 0
     write_chrome_native_host_manifests "$host_path" "$cache_root/latest" || \
         echo "Chrome native host manifest sync failed; continuing with existing browser manifests."
 }
@@ -1142,6 +1548,7 @@ sync_extra_bundled_plugin_cache() {
     local cache_plugin
     local cache_parent
     local tmp_plugin
+    local backup_plugin
     local marketplace_root
     local marketplace_plugins_dir
     local marketplace_plugin_link
@@ -1167,28 +1574,66 @@ sync_extra_bundled_plugin_cache() {
         cache_plugin="$cache_root/$version"
         cache_parent="$(dirname "$cache_plugin")"
         tmp_plugin="$cache_parent/.$plugin_name-$version.tmp.$$"
-        remove_tree_if_exists "$tmp_plugin"
-        mkdir -p "$cache_parent"
+        backup_plugin="$cache_parent/.$plugin_name-$version.backup.$$"
+        if ! remove_tree_if_exists "$tmp_plugin" || \
+           ! remove_tree_if_exists "$backup_plugin" || \
+           ! mkdir -p "$cache_parent"; then
+            echo "Extra bundled plugin cache preparation failed for $plugin_name; continuing with existing cache."
+            continue
+        fi
 
         if cp -R "$source_plugin" "$tmp_plugin"; then
             make_tree_owner_writable "$tmp_plugin"
-            find "$tmp_plugin" -type f -name '*:com.apple.*' -delete
-            remove_tree_if_exists "$cache_plugin"
-            mv "$tmp_plugin" "$cache_plugin"
+            if ! find "$tmp_plugin" -type f -name '*:com.apple.*' -delete; then
+                remove_tree_if_exists "$tmp_plugin" || true
+                echo "Extra bundled plugin cache cleanup failed for $plugin_name; continuing with existing cache."
+                continue
+            fi
+            if [ -e "$cache_plugin" ] || [ -L "$cache_plugin" ]; then
+                if ! mv -T -- "$cache_plugin" "$backup_plugin"; then
+                    remove_tree_if_exists "$tmp_plugin" || true
+                    echo "Extra bundled plugin cache sync failed for $plugin_name; existing cache was preserved."
+                    continue
+                fi
+            else
+                backup_plugin=""
+            fi
+            if ! mv -T -- "$tmp_plugin" "$cache_plugin"; then
+                remove_tree_if_exists "$tmp_plugin" || true
+                if [ -n "$backup_plugin" ]; then
+                    if mv -T -- "$backup_plugin" "$cache_plugin"; then
+                        echo "Extra bundled plugin cache sync failed for $plugin_name; previous cache was restored."
+                    else
+                        echo "Extra bundled plugin cache sync failed for $plugin_name and the previous cache could not be restored."
+                    fi
+                else
+                    echo "Extra bundled plugin cache sync failed for $plugin_name; continuing without a new cache."
+                fi
+                continue
+            fi
+            if [ -n "$backup_plugin" ]; then
+                remove_tree_if_exists "$backup_plugin" || \
+                    echo "Extra bundled plugin cache backup cleanup failed for $plugin_name: $backup_plugin"
+            fi
             echo "Extra bundled plugin cache synced from bundled resources: $cache_plugin"
         else
-            remove_tree_if_exists "$tmp_plugin"
+            remove_tree_if_exists "$tmp_plugin" || true
             echo "Extra bundled plugin cache sync failed for $plugin_name; continuing with existing cache."
             continue
         fi
 
-        replace_symlink "$version" "$cache_root/latest"
+        if ! replace_symlink "$version" "$cache_root/latest"; then
+            echo "Extra bundled plugin latest link failed for $plugin_name; continuing with the staged cache."
+            continue
+        fi
 
         marketplace_root="$codex_home/.tmp/bundled-marketplaces/openai-bundled"
         marketplace_plugins_dir="$marketplace_root/.agents/plugins"
         marketplace_plugin_link="$marketplace_root/plugins/$plugin_dir_name"
-        mkdir -p "$marketplace_plugins_dir" "$marketplace_root/plugins"
-        replace_symlink "$cache_root/latest" "$marketplace_plugin_link"
+        if ! mkdir -p "$marketplace_plugins_dir" "$marketplace_root/plugins" || \
+           ! replace_symlink "$cache_root/latest" "$marketplace_plugin_link"; then
+            echo "Extra bundled plugin marketplace link failed for $plugin_name; continuing with the staged cache."
+        fi
     done
 }
 
@@ -1245,7 +1690,7 @@ run_cold_start_hooks() {
             CODEX_LINUX_LAUNCHER_CMD="${CODEX_LINUX_LAUNCHER_CMD:-$SCRIPT_DIR/start.sh}" \
             CODEX_LINUX_FEATURE_HOOK_PHASE="cold-start" \
             CODEX_UPDATE_MANAGER_PATH="${CODEX_UPDATE_MANAGER_PATH:-}" \
-            "$hook" "$SCRIPT_DIR" "$APP_STATE_DIR" "$LOG_DIR"
+            codex_run_host_command "$hook" "$SCRIPT_DIR" "$APP_STATE_DIR" "$LOG_DIR"
         ) >>"$LOG_FILE" 2>&1 &
     done
 }
@@ -1270,7 +1715,7 @@ run_feature_after_exit_hooks() {
         CODEX_LINUX_FEATURE_HOOK_PHASE="after-exit" \
         CODEX_LINUX_ELECTRON_EXIT_STATUS="$electron_status" \
         CODEX_UPDATE_MANAGER_PATH="${CODEX_UPDATE_MANAGER_PATH:-}" \
-            "$hook" "$SCRIPT_DIR" "$APP_STATE_DIR" "$LOG_DIR" "$electron_status"
+            codex_run_host_command "$hook" "$SCRIPT_DIR" "$APP_STATE_DIR" "$LOG_DIR" "$electron_status"
         hook_status=$?
         set -e
         if [ "$hook_status" -ne 0 ]; then
@@ -1281,8 +1726,9 @@ run_feature_after_exit_hooks() {
 
 run_cli_preflight() {
     local allow_install_missing="${1:-0}"
+    local require_success="${2:-0}"
     if ! has_update_manager; then
-        if [ "$allow_install_missing" = "1" ]; then
+        if [ "$allow_install_missing" = "1" ] || [ "$require_success" = "1" ]; then
             return 1
         fi
         return 0
@@ -1292,8 +1738,9 @@ run_cli_preflight() {
         cli-preflight
         --print-path
     )
-    if [ -n "${CODEX_CLI_PATH:-}" ]; then
-        preflight_args+=(--cli-path "$CODEX_CLI_PATH")
+    local preflight_cli_path="${CODEX_CLI_SOURCE_PATH:-${CODEX_CLI_PATH:-}}"
+    if [ -n "$preflight_cli_path" ]; then
+        preflight_args+=(--cli-path "$preflight_cli_path")
     fi
     if [ "$allow_install_missing" = "1" ]; then
         preflight_args+=(--allow-install-missing)
@@ -1301,10 +1748,10 @@ run_cli_preflight() {
 
     local refreshed_path=""
     if ! refreshed_path="$(run_update_manager "${preflight_args[@]}")"; then
-        if [ "$allow_install_missing" = "1" ]; then
+        if [ "$allow_install_missing" = "1" ] || [ "$require_success" = "1" ]; then
             return 1
         fi
-        notify_error "Codex CLI prelaunch check failed. Continuing with the current CLI state. Check the launcher and updater logs if Codex Desktop misbehaves."
+        notify_error "Codex CLI prelaunch check failed. Continuing with the current CLI state. Check the launcher and updater logs if ChatGPT Desktop misbehaves."
         return 0
     fi
 
@@ -1321,8 +1768,9 @@ run_cli_preflight_background() {
 
     (
         local -a args=(cli-preflight --print-path)
-        if [ -n "${CODEX_CLI_PATH:-}" ]; then
-            args+=(--cli-path "$CODEX_CLI_PATH")
+        local preflight_cli_path="${CODEX_CLI_SOURCE_PATH:-${CODEX_CLI_PATH:-}}"
+        if [ -n "$preflight_cli_path" ]; then
+            args+=(--cli-path "$preflight_cli_path")
         fi
         if ! run_update_manager "${args[@]}" >/dev/null 2>&1; then
             echo "Codex CLI background preflight failed. Continuing with the current CLI."
@@ -1330,261 +1778,23 @@ run_cli_preflight_background() {
     ) &
 }
 
-configure_codex_profile_cli_path() {
-    [ -n "$CODEX_LINUX_CODEX_PROFILE" ] || return 0
-    [ -n "${CODEX_CLI_PATH:-}" ] || return 0
-
-    local real_cli="${CODEX_LINUX_PROFILED_CLI_PATH:-$CODEX_CLI_PATH}"
-    local wrapper_dir="$APP_STATE_DIR/profile-cli"
-    local wrapper_path="$wrapper_dir/codex"
-
-    mkdir -p "$wrapper_dir"
-    cat > "$wrapper_path" <<'SCRIPT'
-#!/usr/bin/env bash
-set -euo pipefail
-
-if [ -z "${CODEX_LINUX_PROFILED_CLI_PATH:-}" ] || [ -z "${CODEX_LINUX_CODEX_PROFILE:-}" ]; then
-    echo "Codex Desktop profile wrapper is missing launcher environment." >&2
-    exit 1
-fi
-
-codex_debug_prompt_input_allows_profile() {
-    while [ "$#" -gt 0 ]; do
-        case "$1" in
-            -c|--config|--enable|--disable)
-                shift
-                [ "$#" -gt 0 ] || return 1
-                shift
-                ;;
-            --config=*|--enable=*|--disable=*)
-                shift
-                ;;
-            -h|--help|--)
-                return 1
-                ;;
-            prompt-input)
-                return 0
-                ;;
-            *)
-                return 1
-                ;;
-        esac
-    done
-
-    return 1
+run_cli_launch_path_helper() {
+    python3 "$SCRIPT_DIR/.codex-linux/cli-launch-path.py" "$1"
 }
 
-codex_args_are_app_server() {
-    local command=""
+verify_cli_launch_path() {
+    local selected_path="${CODEX_CLI_PATH:-}"
+    local verified_path=""
 
-    while [ "$#" -gt 0 ]; do
-        case "$1" in
-            --)
-                return 1
-                ;;
-            -c|--config|--enable|--disable|--remote|--remote-auth-token-env|-i|--image|-m|--model|--local-provider|-s|--sandbox|-C|--cd|--add-dir|-a|--ask-for-approval|-p|--profile)
-                shift
-                [ "$#" -gt 0 ] || return 1
-                shift
-                ;;
-            --config=*|--enable=*|--disable=*|--remote=*|--remote-auth-token-env=*|--image=*|--model=*|--local-provider=*|--sandbox=*|--cd=*|--add-dir=*|--ask-for-approval=*|--profile=*)
-                shift
-                ;;
-            --oss|--strict-config|--dangerously-bypass-approvals-and-sandbox|--dangerously-bypass-hook-trust|--search|--no-alt-screen)
-                shift
-                ;;
-            -h|--help|-V|--version)
-                return 1
-                ;;
-            -*)
-                return 1
-                ;;
-            *)
-                command="$1"
-                break
-                ;;
-        esac
-    done
-
-    [ "$command" = "app-server" ]
-}
-
-codex_write_profile_config_overrides() {
-    python3 - "$CODEX_LINUX_CODEX_PROFILE" "${CODEX_HOME:-}" <<'PY'
-import json
-import math
-import pathlib
-import re
-import sys
-import tomllib
-
-profile = sys.argv[1]
-codex_home_arg = sys.argv[2]
-codex_home = pathlib.Path(codex_home_arg) if codex_home_arg else pathlib.Path.home() / ".codex"
-profile_file = codex_home / f"{profile}.config.toml"
-config_file = codex_home / "config.toml"
-
-try:
-    if profile_file.is_file():
-        data = tomllib.loads(profile_file.read_text(encoding="utf-8"))
-    else:
-        root = tomllib.loads(config_file.read_text(encoding="utf-8"))
-        profiles = root.get("profiles", {})
-        data = profiles.get(profile) if isinstance(profiles, dict) else None
-except FileNotFoundError:
-    data = None
-except tomllib.TOMLDecodeError as exc:
-    print(f"Failed to parse Codex profile '{profile}': {exc}", file=sys.stderr)
-    sys.exit(1)
-
-if not isinstance(data, dict):
-    print(
-        f"Codex profile '{profile}' was not found in {profile_file} or {config_file}",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-
-plain_key_re = re.compile(r"^[A-Za-z0-9_-]+$")
-
-
-def toml_key_part(value):
-    value = str(value)
-    if plain_key_re.match(value):
-        return value
-    return json.dumps(value)
-
-
-def toml_value(value):
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, str):
-        return json.dumps(value)
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, float):
-        if math.isfinite(value):
-            return repr(value)
-        return json.dumps(str(value))
-    if isinstance(value, (list, tuple)):
-        return "[" + ", ".join(toml_value(item) for item in value) + "]"
-    if isinstance(value, dict):
-        parts = [
-            f"{toml_key_part(key)} = {toml_value(item)}"
-            for key, item in value.items()
-        ]
-        return "{ " + ", ".join(parts) + " }"
-    if hasattr(value, "isoformat"):
-        return json.dumps(value.isoformat())
-    return json.dumps(str(value))
-
-
-def flatten(prefix, value):
-    if isinstance(value, dict):
-        for key, item in value.items():
-            next_prefix = [*prefix, str(key)]
-            if isinstance(item, dict):
-                yield from flatten(next_prefix, item)
-            else:
-                yield ".".join(toml_key_part(part) for part in next_prefix), item
-    else:
-        yield ".".join(toml_key_part(part) for part in prefix), value
-
-
-for key, value in flatten([], data):
-    if key:
-        print(f"{key}={toml_value(value)}")
-PY
-}
-
-codex_exec_app_server_with_profile_overrides() {
-    local overrides_file
-    local override
-    local -a profile_config_args=()
-
-    overrides_file="$(mktemp "${TMPDIR:-/tmp}/codex-profile-overrides.XXXXXX")" || exit 1
-    if ! codex_write_profile_config_overrides > "$overrides_file"; then
-        rm -f "$overrides_file"
-        exit 1
+    [ -n "$selected_path" ] || return 1
+    if ! verified_path="$(run_cli_launch_path_helper "$selected_path")"; then
+        return 1
     fi
+    [ -n "$verified_path" ] || return 1
 
-    while IFS= read -r override; do
-        [ -n "$override" ] || continue
-        profile_config_args+=("-c" "$override")
-    done < "$overrides_file"
-    rm -f "$overrides_file"
-
-    if [ "${#profile_config_args[@]}" -eq 0 ]; then
-        exec "$CODEX_LINUX_PROFILED_CLI_PATH" "$@"
-    fi
-
-    exec "$CODEX_LINUX_PROFILED_CLI_PATH" "${profile_config_args[@]}" "$@"
-}
-
-codex_args_allow_profile() {
-    local command=""
-
-    while [ "$#" -gt 0 ]; do
-        case "$1" in
-            --)
-                return 0
-                ;;
-            -c|--config|--enable|--disable|--remote|--remote-auth-token-env|-i|--image|-m|--model|--local-provider|-s|--sandbox|-C|--cd|--add-dir|-a|--ask-for-approval|-p|--profile)
-                shift
-                [ "$#" -gt 0 ] || return 0
-                shift
-                ;;
-            --config=*|--enable=*|--disable=*|--remote=*|--remote-auth-token-env=*|--image=*|--model=*|--local-provider=*|--sandbox=*|--cd=*|--add-dir=*|--ask-for-approval=*|--profile=*)
-                shift
-                ;;
-            --oss|--strict-config|--dangerously-bypass-approvals-and-sandbox|--dangerously-bypass-hook-trust|--search|--no-alt-screen)
-                shift
-                ;;
-            -h|--help|-V|--version)
-                return 1
-                ;;
-            -*)
-                return 0
-                ;;
-            *)
-                command="$1"
-                shift
-                break
-                ;;
-        esac
-    done
-
-    case "$command" in
-        ""|exec|e|review|resume|archive|delete|unarchive|fork|mcp|sandbox)
-            return 0
-            ;;
-        debug)
-            codex_debug_prompt_input_allows_profile "$@"
-            ;;
-        login|logout|plugin|mcp-server|app-server|remote-control|completion|update|doctor|apply|a|cloud|exec-server|features|help|version)
-            return 1
-            ;;
-        *)
-            return 0
-            ;;
-    esac
-}
-
-if codex_args_allow_profile "$@"; then
-    exec "$CODEX_LINUX_PROFILED_CLI_PATH" --profile "$CODEX_LINUX_CODEX_PROFILE" "$@"
-fi
-
-if codex_args_are_app_server "$@"; then
-    codex_exec_app_server_with_profile_overrides "$@"
-fi
-
-exec "$CODEX_LINUX_PROFILED_CLI_PATH" "$@"
-SCRIPT
-    chmod 700 "$wrapper_path"
-
-    CODEX_LINUX_PROFILED_CLI_PATH="$real_cli"
-    CODEX_CLI_PATH="$wrapper_path"
-    export CODEX_LINUX_PROFILED_CLI_PATH CODEX_LINUX_CODEX_PROFILE CODEX_CLI_PATH
-    echo "Using Codex profile: $CODEX_LINUX_CODEX_PROFILE"
+    CODEX_CLI_SOURCE_PATH="$selected_path"
+    CODEX_CLI_PATH="$verified_path"
+    export CODEX_CLI_SOURCE_PATH CODEX_CLI_PATH
 }
 
 is_interactive_terminal() {
@@ -1655,10 +1865,64 @@ resolve_notification_icon() {
     echo "$APP_NOTIFICATION_ICON_NAME"
 }
 
+cached_codex_cli_path() {
+    local state_file="${XDG_STATE_HOME:-$HOME/.local/state}/codex-update-manager/state.json"
+    [ -r "$state_file" ] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+
+    python3 - "$state_file" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        value = json.load(handle).get("cli_path")
+except Exception:
+    sys.exit(1)
+if isinstance(value, str) and value:
+    print(value)
+PY
+}
+
+find_fnm_codex_cli() {
+    local candidate root
+
+    if [ -n "${FNM_MULTISHELL_PATH:-}" ]; then
+        candidate="$FNM_MULTISHELL_PATH/bin/codex"
+        if [ -x "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    fi
+
+    for root in \
+        "${FNM_DIR:-}" \
+        "${XDG_DATA_HOME:-$HOME/.local/share}/fnm" \
+        "$HOME/.fnm"
+    do
+        [ -n "$root" ] || continue
+        candidate="$root/aliases/default/bin/codex"
+        if [ -x "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 find_codex_cli() {
     if command -v codex >/dev/null 2>&1; then
         command -v codex
         return 0
+    fi
+
+    if [ -n "${HOMEBREW_PREFIX:-}" ]; then
+        local homebrew_candidate="$HOMEBREW_PREFIX/bin/codex"
+        if [ -x "$homebrew_candidate" ]; then
+            echo "$homebrew_candidate"
+            return 0
+        fi
     fi
 
     local nvm_dir="${NVM_DIR:-}"
@@ -1681,13 +1945,18 @@ find_codex_cli() {
 
     local candidate
     for candidate in \
+        "$(cached_codex_cli_path || true)" \
         "$HOME/.bun/bin/codex" \
+        "$HOME/.codex-cli-npm/bin/codex" \
         "$HOME/.npm-global/bin/codex" \
         "${XDG_CONFIG_HOME:-$HOME/.config}/nvm/versions/node/current/bin/codex" \
         "${XDG_CONFIG_HOME:-$HOME/.config}/nvm/versions/node"/*/bin/codex \
         "$HOME/.nvm/versions/node/current/bin/codex" \
         "$HOME/.nvm/versions/node"/*/bin/codex \
+        "$(find_fnm_codex_cli || true)" \
         "$HOME/.local/share/pnpm/codex" \
+        "$HOME/.linuxbrew/bin/codex" \
+        "/home/linuxbrew/.linuxbrew/bin/codex" \
         "$HOME/.local/bin/codex" \
         "/usr/local/bin/codex" \
         "/usr/bin/codex"
@@ -1717,7 +1986,8 @@ pid_parent_matches() {
 
 codex_cli_version_probe() {
     local output_file="$1"
-    shift
+    local stderr_file="$2"
+    shift 2
     local marker="${output_file}.timed-out"
     local probe_pid
     local watchdog_pid
@@ -1728,7 +1998,7 @@ codex_cli_version_probe() {
     rm -f "$marker"
     ( trap - EXIT
       { exec 9>&-; } 2>/dev/null || true
-      exec "$@" >"$output_file" 2>/dev/null
+      codex_exec_host_command "$@" >"$output_file" 2>"$stderr_file"
     ) &
     probe_pid="$!"
     # The watchdog (and its sleep child, which outlives the kill below) must
@@ -1779,7 +2049,7 @@ codex_cli_version() {
 
     for version_arg in --version version; do
         : > "$probe_file"
-        if codex_cli_version_probe "$probe_file" "$cli_path" "$version_arg"; then
+        if codex_cli_version_probe "$probe_file" /dev/null "$cli_path" "$version_arg"; then
             output="$(sed -n '1,3p' "$probe_file" 2>/dev/null || true)"
             version="$(printf '%s\n' "$output" | sed -nE '
 s/^v?([0-9]+([.][0-9]+)+(-[0-9A-Za-z.-]+)?([+][0-9A-Za-z.-]+)?)([^0-9A-Za-z._+-].*)?$/\1/p
@@ -1800,6 +2070,35 @@ s/.*[^0-9A-Za-z._+-]v?([0-9]+([.][0-9]+)+(-[0-9A-Za-z.-]+)?([+][0-9A-Za-z.-]+)?)
     done
 
     rm -f "$probe_file" "${probe_file}.timed-out"
+    return 1
+}
+
+codex_cli_missing_optional_dependency() {
+    local cli_path="$1"
+    local output_file
+    local stderr_file
+    local probe_status
+
+    [ -n "$cli_path" ] || return 1
+    [ -x "$cli_path" ] || return 1
+    output_file="$(mktemp "${TMPDIR:-/tmp}/codex-cli-output.XXXXXX" 2>/dev/null)" || return 1
+    stderr_file="$(mktemp "${TMPDIR:-/tmp}/codex-cli-error.XXXXXX" 2>/dev/null)" || {
+        rm -f "$output_file"
+        return 1
+    }
+
+    if codex_cli_version_probe "$output_file" "$stderr_file" "$cli_path" --version; then
+        probe_status=0
+    else
+        probe_status=$?
+    fi
+    if [ "$probe_status" -ne 0 ] && [ "$probe_status" -ne 124 ] && \
+        grep -Eq 'Missing optional dependency[[:space:]]*@openai/codex-linux-(x64|arm64)([[:space:].,:;)]|$)' "$output_file" "$stderr_file"; then
+        rm -f "$output_file" "$stderr_file" "${output_file}.timed-out"
+        return 0
+    fi
+
+    rm -f "$output_file" "$stderr_file" "${output_file}.timed-out"
     return 1
 }
 
@@ -1825,7 +2124,7 @@ notify_error() {
     icon="$(resolve_notification_icon)"
     echo "$message"
     if command -v notify-send >/dev/null 2>&1; then
-        notify-send \
+        codex_run_host_command notify-send \
             -a "$CODEX_LINUX_APP_DISPLAY_NAME" \
             -i "$icon" \
             -h "string:desktop-entry:$CODEX_LINUX_APP_ID" \
@@ -1880,7 +2179,7 @@ export_feature_runtime_env() {
 
 run_update_manager() {
     resolve_update_manager_path || return 127
-    "$CODEX_UPDATE_MANAGER_PATH" "$@"
+    codex_run_host_command "$CODEX_UPDATE_MANAGER_PATH" "$@"
 }
 
 pid_is_current_user() {
@@ -1961,6 +2260,34 @@ pid_environ_lines() {
     local pid="$1"
     [ -r "/proc/$pid/environ" ] || return 0
     tr '\0' '\n' 2>/dev/null < "/proc/$pid/environ" || true
+}
+
+pid_environ_value() {
+    local pid="$1"
+    local key="$2"
+    local entry
+
+    [ -r "/proc/$pid/environ" ] || return 1
+    while IFS= read -r -d '' entry; do
+        case "$entry" in
+            "$key="*) printf '%s\n' "${entry#*=}"; return 0 ;;
+        esac
+    done < "/proc/$pid/environ" 2>/dev/null
+    return 1
+}
+
+pid_start_time() {
+    local pid="$1"
+    local stat_line
+    local rest
+
+    [ -r "/proc/$pid/stat" ] || return 1
+    stat_line=$(< "/proc/$pid/stat") || return 1
+    rest=${stat_line##*) }
+    set -- $rest
+    # /proc/<pid>/stat field 22 is token 20 after stripping pid and comm.
+    [ -n "${20:-}" ] || return 1
+    printf '%s\n' "${20}"
 }
 
 pid_matches_executable() {
@@ -2097,45 +2424,6 @@ pid_summary() {
     printf 'pid=%s exe=%s cmd=%s' "$pid" "${exe:-unknown}" "${cmdline:-unknown}"
 }
 
-pid_is_orphaned_runtime_process() {
-    local pid="$1"
-    local cmdline
-    local arg0
-
-    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
-    [ "$pid" != "$$" ] || return 1
-    [ -d "/proc/$pid" ] || return 1
-
-    arg0="$(pid_cmdline_arg0_path "$pid")"
-    case "$arg0" in
-        "$SCRIPT_DIR/electron"|"$SCRIPT_DIR/electron "*)
-            pid_is_current_user "$pid" || return 1
-            pid_matches_app_identity "$pid" || return 1
-            pid_is_electron_helper "$pid"
-            ;;
-        "$SCRIPT_DIR/chrome_crashpad_handler"|"$SCRIPT_DIR/chrome_crashpad_handler "*|"$SCRIPT_DIR/resources/node-runtime/bin/node"|"$SCRIPT_DIR/resources/node-runtime/bin/node "*|"$SCRIPT_DIR/resources/node_repl"|"$SCRIPT_DIR/resources/node_repl "*)
-            pid_is_current_user "$pid" || return 1
-            pid_matches_app_identity "$pid" || return 1
-            return 0
-            ;;
-        *)
-            case "$arg0" in
-                "$SCRIPT_DIR"/*) ;;
-                *) return 1 ;;
-            esac
-            cmdline="$(pid_cmdline "$pid")"
-            case "$cmdline" in
-                *"$SCRIPT_DIR/resources/node-runtime/bin/node"*|*"$SCRIPT_DIR/resources/node_repl"*)
-                    pid_is_current_user "$pid" || return 1
-                    pid_matches_app_identity "$pid" || return 1
-                    return 0
-                    ;;
-            esac
-            return 1
-            ;;
-    esac
-}
-
 detect_cross_install_conflict() {
     local pid
     local install_dir
@@ -2148,7 +2436,7 @@ detect_cross_install_conflict() {
 
     install_dir="$(pid_install_dir "$pid" 2>/dev/null || echo "unknown")"
     detail="Another $CODEX_LINUX_APP_DISPLAY_NAME is already running from $install_dir (pid $pid), while this launcher is $SCRIPT_DIR. Both use app id '$CODEX_LINUX_APP_ID', webview port $CODEX_LINUX_WEBVIEW_PORT, config $APP_CONFIG_DIR, and state $APP_STATE_DIR. Close the other app, or launch one build with a side-by-side CODEX_APP_ID/CODEX_LINUX_APP_ID or --new-instance."
-    echo "Foreign Codex Desktop process: $(pid_summary "$pid")"
+    echo "Foreign ChatGPT Desktop process: $(pid_summary "$pid")"
     notify_error "$detail"
     exit 1
 }
@@ -2167,12 +2455,12 @@ set_detected_running_app() {
     if ! linux_setting_enabled "codex-linux-warm-start-enabled" 1; then
         WARM_START=0
         echo "Warm-start handoff disabled by $APP_SETTINGS_FILE"
-        echo "Detected running Codex Desktop pid=$RUNNING_APP_PID; preserving liveness marker for second-instance handoff"
+        echo "Detected running ChatGPT Desktop pid=$RUNNING_APP_PID; preserving liveness marker for second-instance handoff"
         return 0
     fi
 
     WARM_START=1
-    echo "Detected running Codex Desktop pid=$RUNNING_APP_PID; using warm-start handoff"
+    echo "Detected running ChatGPT Desktop pid=$RUNNING_APP_PID; using warm-start handoff"
 }
 
 running_app_is_active() {
@@ -2204,6 +2492,184 @@ detect_warm_start() {
         WARM_START=0
         echo "Warm-start handoff disabled by $APP_SETTINGS_FILE"
     fi
+}
+
+running_app_uses_renderer_url_override() {
+    local allow_override
+    local renderer_url
+
+    running_app_is_active || return 1
+    allow_override="$(pid_environ_value "$RUNNING_APP_PID" CODEX_LINUX_ALLOW_RENDERER_URL_OVERRIDE 2>/dev/null || true)"
+    truthy_env_value "$allow_override" || return 1
+    renderer_url="$(pid_environ_value "$RUNNING_APP_PID" ELECTRON_RENDERER_URL 2>/dev/null || true)"
+    [ -n "$renderer_url" ] || return 1
+    renderer_url_override_is_active && return 0
+    [ "$renderer_url" != "$WEBVIEW_RENDERER_URL" ]
+}
+
+terminate_stale_electron_with_pidfd() {
+    local pid="$1"
+    local expected_start_time
+
+    pid_matches_executable "$pid" "$SCRIPT_DIR/electron" || return 1
+    expected_start_time="$(pid_start_time "$pid")" || return 1
+
+    python3 - \
+        "$pid" \
+        "$expected_start_time" \
+        "$SCRIPT_DIR/electron" \
+        "$CODEX_LINUX_APP_ID" \
+        "$CODEX_LINUX_INSTANCE_ID" \
+        "$MULTI_LAUNCH_ACTIVE" <<'PY'
+import os
+import select
+import signal
+import sys
+
+pid = int(sys.argv[1])
+expected_start_time = sys.argv[2]
+expected_executable = sys.argv[3]
+expected_app_id = sys.argv[4]
+expected_instance_id = sys.argv[5]
+expected_multi_launch = sys.argv[6] == "1"
+
+if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+    print("pidfd APIs are unavailable; refusing to terminate the stale Electron process", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    pidfd = os.pidfd_open(pid, 0)
+except OSError as exc:
+    print(f"could not open pidfd for stale Electron pid {pid}: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as handle:
+        stat_fields = handle.read().rsplit(") ", 1)[1].split()
+    actual_start_time = stat_fields[19]
+    with open(f"/proc/{pid}/status", "r", encoding="utf-8") as handle:
+        status_lines = handle.read().splitlines()
+    uid_line = next(line for line in status_lines if line.startswith("Uid:"))
+    actual_uid = int(uid_line.split()[1])
+    with open(f"/proc/{pid}/cmdline", "rb") as handle:
+        cmdline = [part for part in handle.read().split(b"\0") if part]
+    with open(f"/proc/{pid}/environ", "rb") as handle:
+        environ_entries = [part for part in handle.read().split(b"\0") if b"=" in part]
+except (OSError, IndexError, StopIteration, ValueError) as exc:
+    print(f"could not revalidate stale Electron pid {pid}: {exc}", file=sys.stderr)
+    os.close(pidfd)
+    sys.exit(1)
+
+environ = {}
+for entry in environ_entries:
+    key, value = entry.split(b"=", 1)
+    environ[os.fsdecode(key)] = os.fsdecode(value)
+
+identity_matches = (
+    actual_start_time == expected_start_time
+    and actual_uid == os.geteuid()
+    and bool(cmdline)
+    and os.fsdecode(cmdline[0]) == expected_executable
+    and not any(part.startswith(b"--type=") for part in cmdline[1:])
+    and expected_app_id in {
+        environ.get("CODEX_LINUX_APP_ID"),
+        environ.get("CODEX_APP_ID"),
+    }
+)
+if expected_multi_launch:
+    identity_matches = identity_matches and environ.get("CODEX_LINUX_INSTANCE_ID") == expected_instance_id
+else:
+    identity_matches = identity_matches and environ.get("CODEX_LINUX_MULTI_LAUNCH") != "1"
+
+if not identity_matches:
+    print(f"stale Electron pid {pid} failed identity revalidation", file=sys.stderr)
+    os.close(pidfd)
+    sys.exit(1)
+
+poller = select.poll()
+poller.register(pidfd, select.POLLIN)
+try:
+    signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+except ProcessLookupError:
+    os.close(pidfd)
+    sys.exit(0)
+except OSError as exc:
+    print(f"could not terminate stale Electron pid {pid}: {exc}", file=sys.stderr)
+    os.close(pidfd)
+    sys.exit(1)
+
+if not poller.poll(2000):
+    try:
+        signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError as exc:
+        print(f"could not kill stale Electron pid {pid}: {exc}", file=sys.stderr)
+        os.close(pidfd)
+        sys.exit(1)
+    if not poller.poll(1000):
+        print(f"stale Electron pid {pid} did not exit", file=sys.stderr)
+        os.close(pidfd)
+        sys.exit(1)
+
+os.close(pidfd)
+PY
+}
+
+recover_unhealthy_running_app() {
+    running_app_is_active || return 0
+
+    if running_app_uses_renderer_url_override; then
+        echo "Skipping packaged webview recovery because an explicit renderer URL override is active"
+        return 0
+    fi
+    webview_origin_is_reachable && return 0
+
+    if webview_port_is_open; then
+        notify_error "$CODEX_LINUX_APP_DISPLAY_NAME packaged webview origin is unhealthy, but port $CODEX_LINUX_WEBVIEW_PORT is occupied. Keeping the live Electron process untouched. Close it manually and retry."
+        exit 1
+    fi
+
+    echo "Detected live Electron pid=$RUNNING_APP_PID with an unavailable packaged webview origin; preparing a safe cold-start recovery"
+    acquire_launcher_lock
+    if [ "$LAUNCHER_LOCK_HELD" -ne 1 ] || [ "$LAUNCHER_LOCK_TIMED_OUT" -eq 1 ]; then
+        release_launcher_lock
+        notify_error "$CODEX_LINUX_APP_DISPLAY_NAME could not lock launcher state for safe webview recovery. Keeping the live Electron process untouched; close it manually and retry."
+        exit 1
+    fi
+
+    refresh_launch_state_quick
+    if ! running_app_is_active; then
+        WARM_START=0
+        reconcile_runtime_state
+        return 0
+    fi
+    if running_app_uses_renderer_url_override; then
+        release_launcher_lock
+        echo "Skipping packaged webview recovery because the running app uses an explicit renderer URL override"
+        return 0
+    fi
+    if webview_origin_is_reachable; then
+        release_launcher_lock
+        echo "Packaged webview origin recovered while waiting for launcher state"
+        return 0
+    fi
+    if webview_port_is_open; then
+        release_launcher_lock
+        notify_error "$CODEX_LINUX_APP_DISPLAY_NAME packaged webview port became occupied during recovery. Keeping the live Electron process untouched; close it manually and retry."
+        exit 1
+    fi
+
+    if ! terminate_stale_electron_with_pidfd "$RUNNING_APP_PID"; then
+        release_launcher_lock
+        notify_error "$CODEX_LINUX_APP_DISPLAY_NAME could not safely verify and stop stale Electron pid $RUNNING_APP_PID. Close it manually and retry."
+        exit 1
+    fi
+
+    echo "Stopped identity-verified stale Electron pid=$RUNNING_APP_PID; continuing with a cold start"
+    WARM_START=0
+    RUNNING_APP_PID=""
+    rm -f "$APP_PID_FILE" "$WEBVIEW_PID_FILE" "$LAUNCH_ACTION_SOCKET"
 }
 
 send_warm_start_launch_action() {
@@ -2390,7 +2856,7 @@ stop_owned_webview_server() {
     fi
 
     if running_app_is_active && [ -n "$pid" ] && pid_is_webview_server "$pid"; then
-        echo "Preserving webview server pid=$pid owned by running Codex Desktop pid=$RUNNING_APP_PID"
+        echo "Preserving webview server pid=$pid owned by running ChatGPT Desktop pid=$RUNNING_APP_PID"
         return 0
     fi
 
@@ -2480,7 +2946,7 @@ adopt_existing_webview_server() {
     if pid="$(owned_webview_server_pid)"; then
         if running_app_is_active; then
             ADOPTED_WEBVIEW_PID="$pid"
-            echo "Reusing webview server pid=$pid owned by running Codex Desktop pid=$RUNNING_APP_PID"
+            echo "Reusing webview server pid=$pid owned by running ChatGPT Desktop pid=$RUNNING_APP_PID"
         else
             STARTED_WEBVIEW_PID="$pid"
         fi
@@ -2497,7 +2963,7 @@ adopt_discovered_webview_server() {
         echo "$pid" > "$WEBVIEW_PID_FILE"
         if running_app_is_active; then
             ADOPTED_WEBVIEW_PID="$pid"
-            echo "Reusing webview server pid=$pid owned by running Codex Desktop pid=$RUNNING_APP_PID"
+            echo "Reusing webview server pid=$pid owned by running ChatGPT Desktop pid=$RUNNING_APP_PID"
         else
             STARTED_WEBVIEW_PID="$pid"
             echo "Adopted existing webview server pid=$pid dir=$WEBVIEW_DIR"
@@ -2508,12 +2974,29 @@ adopt_discovered_webview_server() {
     return 1
 }
 
+renderer_url_override_is_active() {
+    [ "${WEBVIEW_RENDERER_URL_OVERRIDE_ACTIVE:-0}" -eq 1 ]
+}
+
+require_webview_entrypoint() {
+    local webview_index="$WEBVIEW_DIR/index.html"
+
+    if [ ! -f "$webview_index" ]; then
+        notify_error "$CODEX_LINUX_APP_DISPLAY_NAME webview bundle is incomplete: missing $webview_index. Rebuild the app with ./install.sh before launching."
+        exit 1
+    fi
+}
+
 start_webview_server() {
     WEBVIEW_STARTUP_PENDING=0
 
-    if [ ! -d "$WEBVIEW_DIR" ] || [ ! "$(ls -A "$WEBVIEW_DIR" 2>/dev/null)" ]; then
+    if renderer_url_override_is_active; then
+        echo "Skipping packaged webview setup because ELECTRON_RENDERER_URL override is enabled"
+        log_phase "webview_override"
         return 0
     fi
+
+    require_webview_entrypoint
 
     if adopt_existing_webview_server; then
         if webview_origin_is_reachable; then
@@ -2523,7 +3006,7 @@ start_webview_server() {
         fi
 
         if running_app_is_active; then
-            notify_error "Codex Desktop webview server is already running for pid $RUNNING_APP_PID, but origin validation failed. Keeping the live app untouched."
+            notify_error "ChatGPT Desktop webview server is already running for pid $RUNNING_APP_PID, but origin validation failed. Keeping the live app untouched."
             exit 1
         fi
     fi
@@ -2617,68 +3100,6 @@ clear_stale_pid_file() {
     if [ -z "$pid" ] || ! pid_matches_executable "$pid" "$SCRIPT_DIR/electron"; then
         rm -f "$APP_PID_FILE"
     fi
-}
-
-reap_orphaned_runtime_processes() {
-    local pid
-    local proc_cmdline
-    local pids=()
-    local still_running=0
-
-    for proc_cmdline in /proc/[0-9]*/cmdline; do
-        [ -r "$proc_cmdline" ] || continue
-        pid="${proc_cmdline#/proc/}"
-        pid="${pid%/cmdline}"
-        if pid_is_orphaned_runtime_process "$pid"; then
-            pids+=("$pid")
-        fi
-    done
-
-    [ "${#pids[@]}" -gt 0 ] || return 0
-
-    for pid in "${pids[@]}"; do
-        if [ -d "/proc/$pid" ]; then
-            echo "Stopping orphaned Codex runtime process after stale launch state: $(pid_summary "$pid")"
-            kill "$pid" 2>/dev/null || true
-        fi
-    done
-
-    for _ in $(seq 1 20); do
-        still_running=0
-        for pid in "${pids[@]}"; do
-            if kill -0 "$pid" 2>/dev/null; then
-                still_running=1
-                break
-            fi
-        done
-        [ "$still_running" -eq 0 ] && return 0
-        sleep 0.05
-    done
-
-    for pid in "${pids[@]}"; do
-        if kill -0 "$pid" 2>/dev/null; then
-            echo "WARN: orphaned Codex runtime process is still running after SIGTERM; sending SIGKILL: $(pid_summary "$pid")"
-            kill -9 "$pid" 2>/dev/null || true
-        fi
-    done
-
-    for _ in $(seq 1 10); do
-        still_running=0
-        for pid in "${pids[@]}"; do
-            if kill -0 "$pid" 2>/dev/null; then
-                still_running=1
-                break
-            fi
-        done
-        [ "$still_running" -eq 0 ] && return 0
-        sleep 0.05
-    done
-
-    for pid in "${pids[@]}"; do
-        if kill -0 "$pid" 2>/dev/null; then
-            echo "WARN: orphaned Codex runtime process is still running after SIGKILL: $(pid_summary "$pid")"
-        fi
-    done
 }
 
 reconcile_runtime_state() {
@@ -2881,7 +3302,7 @@ electron_enable_features_arg() {
 
 write_user_electron_flags_template() {
     cat > "$USER_ELECTRON_FLAGS_FILE" <<'EOF'
-# Codex Desktop Linux launch flags.
+# ChatGPT Desktop for Linux launch flags.
 # Uncomment one flag per line. Existing files are never overwritten.
 # Lines starting with # and blank lines are ignored.
 # Shell syntax, quotes, variables, and inline comments are not evaluated.
@@ -3479,7 +3900,7 @@ run_feature_launcher_hooks() {
             CODEX_LINUX_FEATURES_DIR="$CODEX_LINUX_FEATURES_DIR" \
             CODEX_LINUX_LAUNCHER_LOG="$LOG_FILE" \
             CODEX_LINUX_FEATURE_HOOK_PHASE=launcher \
-            "$hook" "${ELECTRON_ARGS[@]}"
+            codex_run_host_command "$hook" "${ELECTRON_ARGS[@]}"
         )"; then
             :
         else
@@ -3707,41 +4128,167 @@ launcher_lock_wait_seconds() {
 # Serialize the running-app detection -> Electron spawn -> app.pid write
 # critical section across concurrent launchers. Without this, two launches
 # racing through detection can both cold-start, and the loser's cleanup later
-# deletes the survivor's app.pid marker, making it undetectable. Fd 9 must not
-# survive into Electron or plugin children, otherwise a stale child can keep the
-# flock alive after this launcher has moved on.
+# deletes the survivor's app.pid marker, making it undetectable. A dedicated
+# parent-death-bound helper owns the flock so no launcher child can inherit it.
 acquire_launcher_lock() {
     local wait_seconds
+    local status=""
+    local attempts
 
-    command -v flock >/dev/null 2>&1 || return 0
+    [ "$LAUNCHER_LOCK_HELD" -eq 0 ] || return 0
     LAUNCHER_LOCK_TIMED_OUT=0
-    exec 9>"$APP_STATE_DIR/launcher.lock" || return 0
-    LAUNCHER_LOCK_FD_OPEN=1
-    if flock -n 9; then
+    wait_seconds="$(launcher_lock_wait_seconds)"
+    LAUNCHER_LOCK_STATUS_PATH="$APP_STATE_DIR/.launcher.lock.status.$$"
+    rm -f "$LAUNCHER_LOCK_STATUS_PATH"
+
+    # A dedicated helper owns the flock, so arbitrary launcher children never
+    # inherit the locked file description. PR_SET_PDEATHSIG releases it even
+    # when the launcher is SIGKILLed while a hook or cache worker survives.
+    ( trap - EXIT
+      exec python3 - \
+          "$$" \
+          "$APP_STATE_DIR/launcher.lock" \
+          "$wait_seconds" \
+          "$LAUNCHER_LOCK_STATUS_PATH" <<'PY'
+import ctypes
+import ctypes.util
+import fcntl
+import os
+import signal
+import sys
+import time
+
+parent_pid = int(sys.argv[1])
+lock_path, wait_text, status_path = sys.argv[2:]
+wait_seconds = int(wait_text)
+
+libc_name = ctypes.util.find_library("c") or "libc.so.6"
+try:
+    libc = ctypes.CDLL(libc_name, use_errno=True)
+    if libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0:
+        sys.exit(1)
+except OSError:
+    sys.exit(1)
+if os.getppid() != parent_pid:
+    sys.exit(1)
+
+def release_lock(_signum, _frame):
+    raise SystemExit(0)
+
+
+signal.signal(signal.SIGTERM, release_lock)
+signal.signal(signal.SIGUSR1, release_lock)
+lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
+try:
+    deadline = time.monotonic() + wait_seconds
+    locked = False
+    while True:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+            break
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+
+    with open(status_path, "w", encoding="utf-8") as status_file:
+        status_file.write("locked\n" if locked else "timeout\n")
+
+    if locked:
+        while True:
+            signal.pause()
+finally:
+    os.close(lock_fd)
+    try:
+        os.unlink(status_path)
+    except FileNotFoundError:
+        pass
+PY
+    ) >/dev/null 2>&1 &
+    LAUNCHER_LOCK_HELPER_PID=$!
+    LAUNCHER_LOCK_HELPER_START_TIME="$(pid_start_time "$LAUNCHER_LOCK_HELPER_PID" 2>/dev/null || true)"
+    if [ -z "$LAUNCHER_LOCK_HELPER_START_TIME" ]; then
+        LAUNCHER_LOCK_TIMED_OUT=1
         return 0
     fi
 
-    wait_seconds="$(launcher_lock_wait_seconds)"
-    launcher_notice "Another $CODEX_LINUX_APP_DISPLAY_NAME launcher is holding $APP_STATE_DIR/launcher.lock; waiting up to ${wait_seconds}s."
+    attempts=$((wait_seconds * 20 + 20))
+    for _ in $(seq 1 "$attempts"); do
+        if [ -s "$LAUNCHER_LOCK_STATUS_PATH" ]; then
+            status="$(cat "$LAUNCHER_LOCK_STATUS_PATH" 2>/dev/null || true)"
+            break
+        fi
+        kill -0 "$LAUNCHER_LOCK_HELPER_PID" 2>/dev/null || break
+        sleep 0.05
+    done
 
-    if ! flock -w "$wait_seconds" 9; then
+    if [ "$status" != "locked" ]; then
         LAUNCHER_LOCK_TIMED_OUT=1
-        launcher_notice "WARN: timed out waiting for launcher.lock after ${wait_seconds}s; continuing after a quick state refresh."
-    else
-        echo "Acquired launcher lock after waiting"
+        if stop_launcher_lock_helper; then
+            wait "$LAUNCHER_LOCK_HELPER_PID" 2>/dev/null || true
+        fi
+        LAUNCHER_LOCK_HELPER_PID=""
+        LAUNCHER_LOCK_HELPER_START_TIME=""
+        rm -f "$LAUNCHER_LOCK_STATUS_PATH"
+        launcher_notice "WARN: timed out waiting for launcher.lock after ${wait_seconds}s; refusing to start another app process."
+        return 0
     fi
+
+    LAUNCHER_LOCK_HELD=1
+    if ! launcher_lock_helper_is_active; then
+        LAUNCHER_LOCK_HELD=0
+        if stop_launcher_lock_helper; then
+            wait "$LAUNCHER_LOCK_HELPER_PID" 2>/dev/null || true
+        fi
+        LAUNCHER_LOCK_HELPER_PID=""
+        LAUNCHER_LOCK_HELPER_START_TIME=""
+        LAUNCHER_LOCK_TIMED_OUT=1
+        rm -f "$LAUNCHER_LOCK_STATUS_PATH"
+        return 0
+    fi
+    rm -f "$LAUNCHER_LOCK_STATUS_PATH"
 }
 
-close_launcher_lock_fd_for_child() {
-    [ "$LAUNCHER_LOCK_FD_OPEN" -eq 1 ] || return 0
-    { exec 9>&-; } 2>/dev/null || true
+launcher_lock_helper_is_active() {
+    local actual_start_time
+    local cmdline
+
+    [ "$LAUNCHER_LOCK_HELD" -eq 1 ] || return 1
+    [[ "$LAUNCHER_LOCK_HELPER_PID" =~ ^[0-9]+$ ]] || return 1
+    actual_start_time="$(pid_start_time "$LAUNCHER_LOCK_HELPER_PID" 2>/dev/null || true)"
+    [ -n "$actual_start_time" ] && [ "$actual_start_time" = "$LAUNCHER_LOCK_HELPER_START_TIME" ] || return 1
+    pid_parent_matches "$LAUNCHER_LOCK_HELPER_PID" "${BASHPID:-$$}" || return 1
+    cmdline="$(pid_cmdline "$LAUNCHER_LOCK_HELPER_PID")"
+    [[ "$cmdline" == *" $APP_STATE_DIR/launcher.lock "*" $LAUNCHER_LOCK_STATUS_PATH"* ]]
+}
+
+stop_launcher_lock_helper() {
+    local actual_start_time
+    local cmdline
+
+    [[ "$LAUNCHER_LOCK_HELPER_PID" =~ ^[0-9]+$ ]] || return 1
+    actual_start_time="$(pid_start_time "$LAUNCHER_LOCK_HELPER_PID" 2>/dev/null || true)"
+    [ -n "$actual_start_time" ] && [ "$actual_start_time" = "$LAUNCHER_LOCK_HELPER_START_TIME" ] || return 1
+    pid_parent_matches "$LAUNCHER_LOCK_HELPER_PID" "${BASHPID:-$$}" || return 1
+    cmdline="$(pid_cmdline "$LAUNCHER_LOCK_HELPER_PID")"
+    [[ "$cmdline" == *" $APP_STATE_DIR/launcher.lock "*" $LAUNCHER_LOCK_STATUS_PATH"* ]] || return 1
+    kill -TERM "$LAUNCHER_LOCK_HELPER_PID" 2>/dev/null || ! kill -0 "$LAUNCHER_LOCK_HELPER_PID" 2>/dev/null
 }
 
 release_launcher_lock() {
-    [ "$LAUNCHER_LOCK_FD_OPEN" -eq 1 ] || return 0
-    flock -u 9 2>/dev/null || true
-    { exec 9>&-; } 2>/dev/null || true
-    LAUNCHER_LOCK_FD_OPEN=0
+    [ "$LAUNCHER_LOCK_HELD" -eq 1 ] || return 0
+    LAUNCHER_LOCK_HELD=0
+    if [ -n "$LAUNCHER_LOCK_HELPER_PID" ]; then
+        if stop_launcher_lock_helper; then
+            wait "$LAUNCHER_LOCK_HELPER_PID" 2>/dev/null || true
+        else
+            echo "WARN: launcher lock helper did not exit after a verified release signal" >&2
+        fi
+    fi
+    LAUNCHER_LOCK_HELPER_PID=""
+    LAUNCHER_LOCK_HELPER_START_TIME=""
+    rm -f "$LAUNCHER_LOCK_STATUS_PATH"
 }
 
 refresh_launch_state() {
@@ -3758,6 +4305,36 @@ refresh_launch_state_quick() {
     RUNNING_APP_PID=""
     if pid="$(find_running_app_pid)"; then
         set_detected_running_app "$pid"
+    fi
+}
+
+prepare_launch_state_under_lock() {
+    running_app_is_active && return 0
+
+    acquire_launcher_lock
+    if [ "$LAUNCHER_LOCK_HELD" -ne 1 ] || [ "$LAUNCHER_LOCK_TIMED_OUT" -eq 1 ]; then
+        release_launcher_lock
+        notify_error "$CODEX_LINUX_APP_DISPLAY_NAME could not acquire launcher state within the configured timeout. No new app process was started; retry after the current launch finishes."
+        exit 1
+    fi
+
+    log_phase "launcher_lock_ready"
+    refresh_launch_state_quick
+    log_phase "launch_state_refreshed_under_lock"
+    recover_unhealthy_running_app
+
+    # A healthy app discovered while waiting owns its webview already. Cold
+    # starts keep the lock through webview readiness and app.pid publication.
+    if running_app_is_active; then
+        release_launcher_lock
+    fi
+}
+
+require_active_launcher_lock() {
+    [ "$LAUNCHER_LOCK_HELD" -eq 1 ] || return 0
+    if ! launcher_lock_helper_is_active; then
+        notify_error "$CODEX_LINUX_APP_DISPLAY_NAME lost launcher serialization before Electron startup. No app process was started; retry the launch."
+        exit 1
     fi
 }
 
@@ -3787,14 +4364,14 @@ launch_electron() {
     if [ "$ELECTRON_GPU_COMPOSITING_DISABLED" = "0" ] && [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
         echo "Rendering hint: if the side panel flickers or appears transparent on Wayland, retry with CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=1"
     fi
+    require_active_launcher_lock
     (
-        close_launcher_lock_fd_for_child
         unset ELECTRON_RUN_AS_NODE
         exec "$SCRIPT_DIR/electron" "${ELECTRON_LAUNCH_ARGS[@]}" "${ELECTRON_ARGS[@]}"
     ) &
     ELECTRON_PID=$!
     if [ -n "${RUNNING_APP_PID:-}" ] && pid_matches_executable "$RUNNING_APP_PID" "$SCRIPT_DIR/electron"; then
-        echo "Preserving Codex Desktop pid=$RUNNING_APP_PID liveness marker for second-instance handoff"
+        echo "Preserving ChatGPT Desktop pid=$RUNNING_APP_PID liveness marker for second-instance handoff"
     else
         echo "$ELECTRON_PID" > "$APP_PID_FILE"
     fi
@@ -3819,6 +4396,12 @@ if [ "$LAUNCHER_DIAGNOSE_SCALING" -eq 1 ]; then
     print_scaling_diagnostics
     exit 0
 fi
+select_webview_renderer_url || exit 1
+if renderer_url_override_is_active; then
+    echo "External renderer URL override active"
+else
+    echo "Packaged webview renderer URL: $WEBVIEW_RENDERER_URL"
+fi
 register_url_scheme_handlers
 log_phase "initial_launch_state_refresh_start"
 refresh_launch_state
@@ -3827,6 +4410,9 @@ trap cleanup_launcher EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
+
+recover_unhealthy_running_app
+prepare_launch_state_under_lock
 
 if send_warm_start_launch_action "${LAUNCHER_ARGS[@]}"; then
     echo "Sent launch args over warm-start IPC"
@@ -3837,7 +4423,7 @@ elif [ "$WARM_START" -eq 1 ]; then
 fi
 
 if using_second_instance_handoff; then
-    echo "Detected running Codex Desktop pid=$RUNNING_APP_PID; using Electron second-instance handoff"
+    echo "Detected running ChatGPT Desktop pid=$RUNNING_APP_PID; using Electron second-instance handoff"
     log_phase "second_instance_handoff_ready"
 elif needs_cold_start; then
     log_phase "feature_prelaunch_start"
@@ -3858,38 +4444,63 @@ if [ -z "${CODEX_CLI_PATH:-}" ]; then
     log_phase "cli_lookup"
 fi
 export CHROME_DESKTOP="${CHROME_DESKTOP:-$CODEX_LINUX_APP_ID.desktop}"
-if truthy_env_value "${CODEX_LINUX_PIN_RENDERER_URL:-}" && ! truthy_env_value "${CODEX_LINUX_ALLOW_RENDERER_URL_OVERRIDE:-}"; then
-    if [ -n "${ELECTRON_RENDERER_URL:-}" ] && [ "$ELECTRON_RENDERER_URL" != "$WEBVIEW_ORIGIN/" ]; then
+if ! renderer_url_override_is_active; then
+    if [ -n "${ELECTRON_RENDERER_URL:-}" ] && [ "$ELECTRON_RENDERER_URL" != "$WEBVIEW_RENDERER_URL" ]; then
         echo "Ignoring inherited ELECTRON_RENDERER_URL; set CODEX_LINUX_ALLOW_RENDERER_URL_OVERRIDE=1 to allow overrides"
     fi
-    export ELECTRON_RENDERER_URL="$WEBVIEW_ORIGIN/"
+    export ELECTRON_RENDERER_URL="$WEBVIEW_RENDERER_URL"
 else
-    export ELECTRON_RENDERER_URL="${ELECTRON_RENDERER_URL:-$WEBVIEW_ORIGIN/}"
+    export ELECTRON_RENDERER_URL="$WEBVIEW_RENDERER_URL"
 fi
 
 if needs_cold_start && [ -z "$CODEX_CLI_PATH" ]; then
     if is_interactive_terminal; then
         if prompt_install_missing_cli; then
             if ! run_cli_preflight 1; then
-                notify_error "Codex CLI installation was attempted but did not succeed. Retry by reopening the app, or install it manually with: npm i -g @openai/codex or npm i -g --prefix ~/.local @openai/codex"
+                notify_error "Codex CLI installation was attempted but did not succeed. Retry by reopening the app, or install into a fresh safe prefix: (umask 0022; npm i -g --include=optional --prefix ~/.codex-cli-npm @openai/codex)"
                 exit 1
             fi
         fi
     elif ! run_gui_cli_prompt; then
-        notify_error "Codex CLI is required but is not installed. Reopen the app to retry the automatic install flow, or install it manually with: npm i -g @openai/codex or npm i -g --prefix ~/.local @openai/codex"
+        notify_error "Codex CLI is required but is not installed. Reopen the app to retry the automatic install flow, or install into a fresh safe prefix: (umask 0022; npm i -g --include=optional --prefix ~/.codex-cli-npm @openai/codex)"
         exit 1
     fi
 fi
 
 if needs_cold_start && [ -z "$CODEX_CLI_PATH" ]; then
-    notify_error "Codex CLI is required but is not installed. Reopen the app to retry the automatic install flow, or install it manually with: npm i -g @openai/codex or npm i -g --prefix ~/.local @openai/codex"
+    notify_error "Codex CLI is required but is not installed. Reopen the app to retry the automatic install flow, or install into a fresh safe prefix: (umask 0022; npm i -g --include=optional --prefix ~/.codex-cli-npm @openai/codex)"
     exit 1
 fi
 
+if [ -n "$CODEX_CLI_PATH" ]; then
+    if ! verify_cli_launch_path; then
+        notify_error "The selected Codex CLI path does not resolve to an executable file. Reinstall the CLI or set CODEX_CLI_PATH to a working executable."
+        exit 1
+    fi
+    log_phase "cli_launch_path_verified"
+fi
+
 if needs_cold_start; then
+    cli_repair_required=0
+    if codex_cli_missing_optional_dependency "$CODEX_CLI_PATH"; then
+        cli_repair_required=1
+    fi
     if [ "${CODEX_SYNC_CLI_PREFLIGHT:-0}" = "1" ]; then
-        run_cli_preflight 0
-        log_phase "cli_preflight_sync"
+        if ! run_cli_preflight 0 "$cli_repair_required"; then
+            notify_error "The selected Codex CLI is missing its Linux optional dependency and could not be repaired automatically. Reinstall it with: npm i -g --include=optional @openai/codex@latest or npm i -g --include=optional --prefix ~/.local @openai/codex@latest"
+            exit 1
+        fi
+        if [ "$cli_repair_required" = "1" ]; then
+            log_phase "cli_preflight_repair_sync"
+        else
+            log_phase "cli_preflight_sync"
+        fi
+    elif [ "$cli_repair_required" = "1" ]; then
+        if ! run_cli_preflight 0 1; then
+            notify_error "The selected Codex CLI is missing its Linux optional dependency and could not be repaired automatically. Reinstall it with: npm i -g --include=optional @openai/codex@latest or npm i -g --include=optional --prefix ~/.local @openai/codex@latest"
+            exit 1
+        fi
+        log_phase "cli_preflight_repair_sync"
     else
         run_cli_preflight_background
         log_phase "cli_preflight_backgrounded"
@@ -3900,12 +4511,16 @@ configure_codex_profile_cli_path
 export_packaged_runtime_env
 if needs_cold_start; then
     log_phase "cold_start_cache_sync_start"
+    if ! prepare_bundled_marketplace_tmp_paths; then
+        notify_error "Bundled plugin staging paths are not trusted. Refusing to start Electron."
+        exit 1
+    fi
     clear_bundled_marketplace_tmp_cache
+    if ! prepare_bundled_marketplace_tmp_paths full; then
+        notify_error "Bundled plugin staging paths are not trusted. Refusing to start Electron."
+        exit 1
+    fi
     log_phase "bundled_marketplace_tmp_cleared"
-    # The runtime marketplace is populated asynchronously and can briefly
-    # recreate read-only plugin cache trees before the sync below replaces them.
-    monitor_bundled_marketplace_tmp_permissions
-    log_phase "bundled_marketplace_tmp_monitor_started"
     stage_bundled_marketplace_metadata
     log_phase "bundled_marketplace_metadata_staged"
     sync_browser_use_bundled_plugin_cache &
@@ -3934,17 +4549,6 @@ if needs_cold_start; then
 fi
 resolve_browser_use_runtime_env
 log_phase "browser_use_runtime_env_resolved"
-
-if needs_cold_start; then
-    acquire_launcher_lock
-    log_phase "launcher_lock_ready"
-    refresh_launch_state_quick
-    log_phase "launch_state_refreshed_under_lock"
-    if [ "$LAUNCHER_LOCK_TIMED_OUT" -eq 1 ]; then
-        reap_orphaned_runtime_processes
-        detect_cross_install_conflict
-    fi
-fi
 
 log_codex_cli_path
 echo "Using managed Node.js runtime=${CODEX_MANAGED_NODE_RUNTIME_DIR:-$SCRIPT_DIR/resources/node-runtime}"

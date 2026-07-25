@@ -75,10 +75,19 @@ Equivalent direct commands:
 
 The default path stores upstream DMG headers, plus a hash of the upstream URL,
 next to `Codex.dmg` and refreshes the cached file when that upstream fingerprint
-changes. `--fresh` still forces a cache removal before rebuilding, and an
+changes. Every command builds a sibling candidate and runs the shared
+[upstream DMG acceptance profile](upstream-dmg-acceptance.md) before replacing
+`codex-app/`. A rejected or inconclusive candidate leaves the working app
+unchanged. Acceptance checks only configured Linux Features and rejects drift
+in any enabled feature; disable that feature before retrying if necessary.
+Replacing an existing app uses an atomic directory exchange plus a recovery
+journal, so interruption cannot leave the canonical install path missing. If
+the filesystem does not support atomic exchange, promotion stops without
+changing the working app.
+`--fresh` still forces a cache removal before rebuilding, and an
 explicit `DMG=/path/to/Codex.dmg` uses that file exactly.
-Native install shortcuts use `--fresh --reuse-dmg`, so they clean the generated
-app directory while still reusing the cached DMG when upstream metadata matches.
+Native install shortcuts use `--fresh --reuse-dmg`, so they build a clean
+candidate while still reusing the cached DMG when upstream metadata matches.
 
 For deterministic test rounds, set `CODEX_DMG_REFRESH_MODE=pinned`. Pinned mode
 reuses the existing cached `Codex.dmg` verbatim, skips upstream metadata checks,
@@ -131,6 +140,10 @@ CODEX_MULTI_LAUNCH_PORT_RANGE=5175-5199 ./codex-app/start.sh --new-instance
 CODEX_MULTI_LAUNCH=1 CODEX_MULTI_LAUNCH_PORT_RANGE=5175-5199 ./codex-app/start.sh
 ```
 
+`CODEX_MULTI_LAUNCH=1` applies only to that launcher invocation. The launcher
+does not forward it into Electron, so a normal launch from an app descendant
+does not recursively create another side-by-side instance.
+
 ## Package Formats
 
 After `make build-app` or `make build-app-fresh`, build a package from
@@ -164,7 +177,23 @@ make appimage
 The AppImage flow does not include `codex-update-manager`, the systemd user
 service, polkit policy, or the native-package update builder.
 
-When upstream Codex Desktop changes:
+To make a local AppImage self-contained, install the CLI with its optional
+Linux package and pass the package directory to the AppImage build:
+
+```bash
+cli_prefix="$HOME/.cache/codex-desktop-linux/appimage-cli"
+npm install --prefix "$cli_prefix" --include=optional @openai/codex
+CODEX_CLI_BUNDLE_SOURCE="$cli_prefix/node_modules/@openai/codex" make appimage
+```
+
+The build copies only `@openai/codex` and the matching Linux architecture
+package on x86-64 and ARM64. It does not fetch packages itself. The bundled CLI
+is used when `CODEX_CLI_PATH` is unset and takes precedence over a host
+installation. This adds the native CLI payload to the AppImage, which is several
+hundred MiB for current releases. Rebuild the AppImage when you want to update
+the embedded CLI.
+
+When upstream ChatGPT Desktop changes:
 
 ```bash
 git pull --ff-only

@@ -5,7 +5,7 @@ const path = require("node:path");
 
 function requireName(source, moduleName) {
   const escaped = moduleName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = source.match(new RegExp(`([A-Za-z_$][\\w$]*)=require\\(\`${escaped}\`\\)`));
+  const match = source.match(new RegExp(`([A-Za-z_$][\\w$]*)=require\\("${escaped}"\\)`));
   return match?.[1] ?? null;
 }
 
@@ -16,17 +16,6 @@ const DEVICE_KEY_GUARD_REPLACEMENT =
   "if(process.platform===`linux`)return codexLinuxRemoteControlDeviceKeyClient();if(process.platform!==`darwin`)throw Error(`Remote control device keys are only available on macOS`);";
 const DEVICE_KEY_REQUIRE_NEEDLE =
   /(?:var|let|const)\s+[A-Za-z_$][\w$]*=\(0,[A-Za-z_$][\w$]*\.createRequire\)\(__filename\),[A-Za-z_$][\w$]*=`remote-control-device-key\.node`/u;
-const REMOTE_CONTROL_VISIBILITY_NEEDLE =
-  "function a({remoteControlConnectionsState:e,slingshotEnabled:t}){return t&&(e?.available??!0)&&e?.accessRequired!==!0}";
-const REMOTE_CONTROL_VISIBILITY_REPLACEMENT =
-  "function a({remoteControlConnectionsState:e,slingshotEnabled:t}){let n=typeof navigator!=`undefined`&&navigator.userAgent.includes(`Linux`);return n||t&&(e?.available??!0)&&e?.accessRequired!==!0}";
-const REMOTE_CONTROL_VISIBILITY_PREVIOUS_REPLACEMENT =
-  "function a({remoteControlConnectionsState:e,slingshotEnabled:t}){let n=typeof navigator!=`undefined`&&navigator.userAgent.includes(`Linux`);return(n||t)&&(n||(e?.available??!0))&&e?.accessRequired!==!0}";
-const REMOTE_CONTROL_VISIBILITY_OLD_REPLACEMENT =
-  "function a({remoteControlConnectionsState:e,slingshotEnabled:t}){let n=typeof navigator!=`undefined`&&navigator.userAgent.includes(`Linux`);return t&&(n||(e?.available??!0))&&e?.accessRequired!==!0}";
-const REMOTE_CONTROL_PROFILE_AVAILABILITY_MARKER = "codexLinuxRemoteControlProfileAvailability";
-const REMOTE_CONTROL_PROFILE_AVAILABILITY_NEEDLE =
-  /function ([A-Za-z_$][\w$]*)\(\{remoteControlConnectionsState:([A-Za-z_$][\w$]*),slingshotEnabled:([A-Za-z_$][\w$]*)\}\)\{let codexLinuxRemoteControlProfileAvailability=typeof navigator!=`undefined`&&navigator\.userAgent\.includes\(`Linux`\);return \3&&\(\2\?\.available\?\?!0\)&&\(codexLinuxRemoteControlProfileAvailability\|\|\2\?\.accessRequired!==!0\)\}/u;
 const REMOTE_CONTROL_SETTINGS_VISIBILITY_NEEDLE =
   /function ([A-Za-z_$][\w$]*)\(\{remoteControlConnectionsState:([A-Za-z_$][\w$]*),slingshotEnabled:([A-Za-z_$][\w$]*)\}\)\{return \3&&\(\2\?\.available\?\?!0\)(?:&&\2\?\.accessRequired!==!0)?\}/u;
 const REMOTE_CONTROL_SETTINGS_UX_MARKER = "codexLinuxRemoteControlSettingsTabs";
@@ -48,23 +37,22 @@ const REMOTE_MOBILE_UNKNOWN_TURN_MARKER = "codexLinuxRemoteMobileHydrateUnknownT
 const REMOTE_MOBILE_NOTIFICATION_QUEUE_MARKER = "codexLinuxRemoteMobileNotificationQueue";
 const REMOTE_MOBILE_IN_FLIGHT_HYDRATION_MARKER = "codexLinuxRemoteMobileHydrationInFlight";
 const REMOTE_MOBILE_LATE_EVENT_HYDRATION_MARKER = "codexLinuxRemoteMobileHydrateLateEvent";
+const REMOTE_MOBILE_REASONING_SUMMARY_MARKER = "codexLinuxRemoteMobileReasoningSummaryNone";
+const REMOTE_MOBILE_COMPLETED_ITEM_MARKER = "codexLinuxCompletedItemExists=";
 const REMOTE_CONTROL_ENABLEMENT_BRIDGE_MARKER = "codexLinuxRemoteControlEnablementBridge";
 const REMOTE_CONTROL_ENABLE_FOR_HOST_PARAMS_MARKER = "codexLinuxRemoteControlEnableForHostParams";
 const REMOTE_CONTROL_AUTO_CONNECT_CLEANUP_MARKER = "codexLinuxRemoteControlAutoConnectCleanup";
 const REMOTE_CONTROL_SELF_AUTO_CONNECT_MARKER = "codexLinuxRemoteControlSelfAutoConnect";
 const REMOTE_MOBILE_ACTIVE_STATUS_MARKER = "codexLinuxRemoteMobileActiveStatus";
 const REMOTE_CONTROL_STATUS_READ_GUARD_MARKER = "codexLinuxRemoteControlShouldReadStatus";
+const REMOTE_CONTROL_STATUS_WAIT_MARKER = "codexLinuxRemoteControlStatusWaitMs";
 const REMOTE_CONTROL_REVOKE_SETUP_RESET_MARKER = "codexLinuxRemoteControlResetMobileSetupAfterRevoke";
+const REMOTE_CONTROL_VISIBILITY_MARKER = "codexLinuxRemoteControlVisibilityEnabled";
+const REMOTE_CONTROL_COPY_MARKER = "codexLinuxRemoteControlCopy";
 const REMOTE_MOBILE_APP_SERVER_REMOTE_CONTROL_MARKER = "codexLinuxRemoteMobileAppServerArgs";
-const REMOTE_MOBILE_APP_SERVER_ARGS_NEEDLE = "args:[`app-server`,`--analytics-default-enabled`]";
-const REMOTE_MOBILE_PROJECTLESS_REMOTE_TASK_MARKER = "codexLinuxRemoteMobileProjectlessRemoteTaskId";
-const REMOTE_CONTROL_SELECTED_TAB_NEEDLE =
-  "function rr({selectedConnectionsTab:e,showControlThisMacTab:t,showRemoteControlConnectionsSection:n,showTabbedSshPage:r}){return n?e===`control-this-mac`&&!t||e===`ssh`&&!r?`access-other-devices`:e:`ssh`}";
-const REMOTE_CONTROL_SELECTED_TAB_REPLACEMENT =
-  "function rr({selectedConnectionsTab:e,showControlThisMacTab:t,showRemoteControlConnectionsSection:n,showTabbedSshPage:r}){let i=typeof navigator!=`undefined`&&navigator.userAgent.includes(`Linux`);if(i){if(!n)return`ssh`;if(e===`control-this-mac`&&!t)return`access-other-devices`;if(e===`ssh`&&!r)return`access-other-devices`;return e}return n?e===`control-this-mac`&&!t||e===`ssh`&&!r?`access-other-devices`:e:`ssh`}";
-const REMOTE_CONTROL_SELECTED_TAB_REGEX =
-  /function ([A-Za-z_$][\w$]*)\(\{selectedConnectionsTab:([A-Za-z_$][\w$]*),showControlThisMacTab:([A-Za-z_$][\w$]*),showRemoteControlConnectionsSection:([A-Za-z_$][\w$]*),showTabbedSshPage:([A-Za-z_$][\w$]*)\}\)\{return \4\?\2===`control-this-mac`&&!\3\|\|\2===`ssh`&&!\5\?`access-other-devices`:\2:`ssh`\}/u;
-const REMOTE_CONTROL_SELECTED_TAB_MARKER = "codexLinuxRemoteControlSelectedTab";
+const REMOTE_MOBILE_APP_SERVER_ARGS_NEEDLE =
+  "[`-c`,`features.code_mode_host=true`,`app-server`,`--analytics-default-enabled`]";
+const REMOTE_CONTROL_APP_INITIAL_ASSET_PATTERN = /^app-initial-[^.]+\.js$/u;
 const REMOTE_CONTROL_LINUX_COPY_REPLACEMENTS = [
   ["defaultMessage:`Mac`", "defaultMessage:`Linux`"],
   ["Keep this Mac awake", "Keep this Linux desktop awake"],
@@ -81,6 +69,8 @@ const REMOTE_CONTROL_LINUX_COPY_REPLACEMENTS = [
   ["Control Mac apps from your phone", "Control Linux apps from your phone"],
   ["Let Codex control the apps on your Mac.", "Let Codex control apps on this Linux desktop."],
   ["Let Codex control the apps on your Mac", "Let Codex control apps on this Linux desktop"],
+  ["Let ChatGPT control apps on your Mac", "Let ChatGPT control apps on this Linux desktop"],
+  ["connected to ChatGPT on a Mac", "connected to ChatGPT on this Linux desktop"],
   ["Connect a device to this Mac", "Connect a device to this Linux desktop"],
   ["Connect your phone to this Mac", "Connect your phone to this Linux desktop"],
   ["Add device to control this Mac remotely", "Add a device to control this Linux desktop remotely"],
@@ -88,7 +78,6 @@ const REMOTE_CONTROL_LINUX_COPY_REPLACEMENTS = [
   ["this Mac", "this Linux desktop"],
   ["local Mac", "local Linux desktop"],
 ];
-const CLIENT_ACCOUNT_COMPAT_MARKER = "codexLinuxRemoteControlAccountMatches";
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -101,56 +90,74 @@ function replaceOnce(source, needle, replacement) {
   return source.replace(needle, replacement);
 }
 
-function linuxRemoteControlClientAccountCompatibilityHelpers(loadEnrollmentFn, enrollmentKeyFn) {
+function linuxDeviceKeyProviderSource({ childProcessVar, cryptoVar, fsVar, pathVar }) {
   return [
-    "function codexLinuxRemoteControlEnrollmentAccountUserIds(e){",
-    "return[...new Set([e.tokenAccountUserId,e.tokenAuthUserId].filter(e=>e!=null))]",
-    "}",
-    "function codexLinuxRemoteControlAccountMatches({candidateAccountId:e,candidateAccountUserId:t,candidateUserId:n,expectedAccountId:r,expectedAccountUserId:i}){",
-    "return t===i||r!=null&&e===r&&n===i",
-    "}",
-    "async function codexLinuxRemoteControlLoadEnrollment({authIdentity:e,deviceKeyClient:t,enrollmentKey:n,globalState:r}){",
-    `let i=(await Promise.all(codexLinuxRemoteControlEnrollmentAccountUserIds(e).map(async e=>{let i=${enrollmentKeyFn}(n,e);return{enrollment:await ${loadEnrollmentFn}({deviceKeyClient:t,enrollmentKey:i,globalState:r}),enrollmentRecordKey:i}}))).find(e=>e.enrollment!=null);`,
-    "return i?.enrollment==null?null:i",
-    "}",
-  ].join("");
-}
-
-function linuxDeviceKeyProviderSource({ cryptoVar, fsVar, pathVar }) {
-  return [
+    "const codexLinuxRemoteControlKeyStoreVersion=2,codexLinuxRemoteControlKeyStoreMaxBytes=1048576,codexLinuxRemoteControlKeyStoreMaxKeys=64;",
+    "function codexLinuxRemoteControlAssertOwnedRegularStat(e){if(!e.isFile())throw Error(`Linux remote control key state must be a regular file`);if(typeof process.getuid==`function`&&e.uid!==process.getuid())throw Error(`Linux remote control key state is owned by another user`);if((e.mode&511)!==384)throw Error(`Linux remote control key state permissions must be 0600`);return e}",
+    "function codexLinuxRemoteControlAssertOwnedRegularFile(e,t){let n=t.lstatSync(e);if(n.isSymbolicLink())throw Error(`Linux remote control key state must be a regular file`);return codexLinuxRemoteControlAssertOwnedRegularStat(n)}",
     "function codexLinuxRemoteControlDeviceKeyStorePath(){",
     `let codexLinuxRemoteControlConfigRoot=process.env.XDG_CONFIG_HOME&&process.env.XDG_CONFIG_HOME.trim()?process.env.XDG_CONFIG_HOME.trim():process.env.HOME?${pathVar}.join(process.env.HOME,\`.config\`):null;`,
     "if(codexLinuxRemoteControlConfigRoot==null)throw Error(`Linux remote control device keys require HOME or XDG_CONFIG_HOME`);",
-    `${fsVar}.mkdirSync(${pathVar}.join(codexLinuxRemoteControlConfigRoot,\`codex-desktop\`),{recursive:!0,mode:448});`,
-    `return ${pathVar}.join(codexLinuxRemoteControlConfigRoot,\`codex-desktop\`,\`remote-control-device-keys-v1.json\`)`,
+    `if(!${pathVar}.isAbsolute(codexLinuxRemoteControlConfigRoot))throw Error(\`Linux remote control device key config root must be absolute\`);`,
+    `let codexLinuxRemoteControlSharedConfigDirectory=${pathVar}.join(codexLinuxRemoteControlConfigRoot,\`codex-desktop\`);${fsVar}.mkdirSync(codexLinuxRemoteControlSharedConfigDirectory,{recursive:!0});`,
+    `let codexLinuxRemoteControlSharedConfigDirectoryStat=${fsVar}.lstatSync(codexLinuxRemoteControlSharedConfigDirectory);if(codexLinuxRemoteControlSharedConfigDirectoryStat.isSymbolicLink()||!codexLinuxRemoteControlSharedConfigDirectoryStat.isDirectory())throw Error(\`Linux remote control shared config path must be a regular directory\`);`,
+    "if(typeof process.getuid==`function`&&codexLinuxRemoteControlSharedConfigDirectoryStat.uid!==process.getuid())throw Error(`Linux remote control shared config directory is owned by another user`);",
+    `let codexLinuxRemoteControlKeyStoreDirectory=${pathVar}.join(codexLinuxRemoteControlSharedConfigDirectory,\`remote-control-device-keys\`);${fsVar}.mkdirSync(codexLinuxRemoteControlKeyStoreDirectory,{recursive:!0,mode:448});`,
+    `let codexLinuxRemoteControlKeyStoreDirectoryStat=${fsVar}.lstatSync(codexLinuxRemoteControlKeyStoreDirectory);if(codexLinuxRemoteControlKeyStoreDirectoryStat.isSymbolicLink()||!codexLinuxRemoteControlKeyStoreDirectoryStat.isDirectory())throw Error(\`Linux remote control device key directory must be a regular directory\`);`,
+    "if(typeof process.getuid==`function`&&codexLinuxRemoteControlKeyStoreDirectoryStat.uid!==process.getuid())throw Error(`Linux remote control device key directory is owned by another user`);",
+    "if((codexLinuxRemoteControlKeyStoreDirectoryStat.mode&511)!==448)throw Error(`Linux remote control device key directory permissions must be 0700`);",
+    `let codexLinuxRemoteControlKeyStorePath=${pathVar}.join(codexLinuxRemoteControlKeyStoreDirectory,\`remote-control-device-keys-v1.json\`),codexLinuxRemoteControlLegacyKeyStorePath=${pathVar}.join(codexLinuxRemoteControlSharedConfigDirectory,\`remote-control-device-keys-v1.json\`);`,
+    `if(!${fsVar}.existsSync(codexLinuxRemoteControlKeyStorePath)&&${fsVar}.existsSync(codexLinuxRemoteControlLegacyKeyStorePath)){let codexLinuxRemoteControlLegacyKeyStoreStat=codexLinuxRemoteControlAssertOwnedRegularFile(codexLinuxRemoteControlLegacyKeyStorePath,${fsVar});if(codexLinuxRemoteControlLegacyKeyStoreStat.size>codexLinuxRemoteControlKeyStoreMaxBytes)throw Error(\`Linux remote control device key store exceeds size limit\`);${fsVar}.renameSync(codexLinuxRemoteControlLegacyKeyStorePath,codexLinuxRemoteControlKeyStorePath)}`,
+    "return codexLinuxRemoteControlKeyStorePath",
     "}",
+    "function codexLinuxRemoteControlValidateDeviceKeyRecord(e,t){if(e==null||typeof e!=`object`||Array.isArray(e))throw Error(`Linux remote control device key record is invalid`);let n=[[e.keyId,128],[e.publicKeySpkiDerBase64,8192],[e.createdAt,64]],r=typeof e.privateKeyPkcs8Pem==`string`&&e.privateKeyPkcs8Pem.length>0&&e.privateKeyPkcs8Pem.length<=16384,i=typeof e.privateKeyCiphertextBase64==`string`&&e.privateKeyCiphertextBase64.length>0&&e.privateKeyCiphertextBase64.length<=32768,a=e.storageBackend==null||typeof e.storageBackend==`string`&&e.storageBackend.length>0&&e.storageBackend.length<=64,o=e.detectedBackend==null||typeof e.detectedBackend==`string`&&e.detectedBackend.length>0&&e.detectedBackend.length<=64;if(n.some(([e,t])=>typeof e!=`string`||e.length===0||e.length>t)||(!r&&!i)||r&&i||!a||!o||e.keyId!==t||e.algorithm!==`ecdsa_p256_sha256`||e.protectionClass!==`os_protected_nonextractable`||!Number.isFinite(Date.parse(e.createdAt)))throw Error(`Linux remote control device key record is invalid`)}",
+    "function codexLinuxRemoteControlValidateDeviceKeyStore(e){if(e==null||typeof e!=`object`||Array.isArray(e)||e.version!==codexLinuxRemoteControlKeyStoreVersion||e.keys==null||typeof e.keys!=`object`||Array.isArray(e.keys))throw Error(`Linux remote control device key store schema is invalid`);let t=Object.entries(e.keys);if(t.length>codexLinuxRemoteControlKeyStoreMaxKeys)throw Error(`Linux remote control device key store exceeds key limit`);for(let[n,r]of t)codexLinuxRemoteControlValidateDeviceKeyRecord(r,n);return e}",
     "function codexLinuxRemoteControlPublicDeviceKey(codexLinuxRemoteControlKeyRecord){",
     "return{algorithm:codexLinuxRemoteControlKeyRecord.algorithm,keyId:codexLinuxRemoteControlKeyRecord.keyId,protectionClass:codexLinuxRemoteControlKeyRecord.protectionClass,publicKeySpkiDerBase64:codexLinuxRemoteControlKeyRecord.publicKeySpkiDerBase64}",
     "}",
+    "function codexLinuxRemoteControlStorage(){",
+    "let codexLinuxRemoteControlSafeStorage=null,codexLinuxRemoteControlDetectedBackend=`unavailable`;",
+    "try{let codexLinuxRemoteControlElectron=require(`electron`),codexLinuxRemoteControlCandidate=codexLinuxRemoteControlElectron?.safeStorage;if(codexLinuxRemoteControlCandidate!=null){codexLinuxRemoteControlDetectedBackend=typeof codexLinuxRemoteControlCandidate.getSelectedStorageBackend===`function`?codexLinuxRemoteControlCandidate.getSelectedStorageBackend():`unknown`;if(codexLinuxRemoteControlDetectedBackend!==`unknown`&&codexLinuxRemoteControlDetectedBackend!==`basic_text`&&(typeof codexLinuxRemoteControlCandidate.isEncryptionAvailable!==`function`||codexLinuxRemoteControlCandidate.isEncryptionAvailable()))codexLinuxRemoteControlSafeStorage=codexLinuxRemoteControlCandidate}}catch{}",
+    "return{safeStorage:codexLinuxRemoteControlSafeStorage,detectedBackend:codexLinuxRemoteControlDetectedBackend}",
+    "}",
+    "function codexLinuxRemoteControlStorageFields(codexLinuxRemoteControlPrivateKeyPem){",
+    "let codexLinuxRemoteControlStorageState=codexLinuxRemoteControlStorage();",
+    "if(codexLinuxRemoteControlStorageState.safeStorage==null){console.warn(`WARN: Linux remote control keychain unavailable; storing device key with file permissions 0600 (detected backend: ${codexLinuxRemoteControlStorageState.detectedBackend})`);return{privateKeyPkcs8Pem:codexLinuxRemoteControlPrivateKeyPem,storageBackend:`file_0600`,detectedBackend:codexLinuxRemoteControlStorageState.detectedBackend}}",
+    "return{privateKeyCiphertextBase64:codexLinuxRemoteControlStorageState.safeStorage.encryptString(codexLinuxRemoteControlPrivateKeyPem).toString(`base64`),storageBackend:codexLinuxRemoteControlStorageState.detectedBackend,detectedBackend:codexLinuxRemoteControlStorageState.detectedBackend}",
+    "}",
+    "function codexLinuxRemoteControlPrivateKeyPem(codexLinuxRemoteControlKeyRecord){",
+    "if(typeof codexLinuxRemoteControlKeyRecord.privateKeyPkcs8Pem===`string`)return codexLinuxRemoteControlKeyRecord.privateKeyPkcs8Pem;",
+    "if(typeof codexLinuxRemoteControlKeyRecord.privateKeyCiphertextBase64!==`string`)throw Error(`Linux remote control device key has no private key material`);",
+    "let codexLinuxRemoteControlStorageState=codexLinuxRemoteControlStorage();if(codexLinuxRemoteControlStorageState.safeStorage==null)throw Error(`Linux remote control device keychain is unavailable`);",
+    "try{return codexLinuxRemoteControlStorageState.safeStorage.decryptString(Buffer.from(codexLinuxRemoteControlKeyRecord.privateKeyCiphertextBase64,`base64`))}catch(codexLinuxRemoteControlDecryptError){throw Error(`Failed to decrypt Linux remote control device key`)}",
+    "}",
     "function codexLinuxReadRemoteControlDeviceKeyStore(){",
     "let codexLinuxRemoteControlKeyStorePath=codexLinuxRemoteControlDeviceKeyStorePath();",
-    `if(!${fsVar}.existsSync(codexLinuxRemoteControlKeyStorePath))return{keys:{}};`,
-    "try{",
-    `let codexLinuxRemoteControlKeyStore=JSON.parse(${fsVar}.readFileSync(codexLinuxRemoteControlKeyStorePath,\`utf8\`));`,
-    "return codexLinuxRemoteControlKeyStore&&typeof codexLinuxRemoteControlKeyStore==`object`&&!Array.isArray(codexLinuxRemoteControlKeyStore)&&codexLinuxRemoteControlKeyStore.keys&&typeof codexLinuxRemoteControlKeyStore.keys==`object`&&!Array.isArray(codexLinuxRemoteControlKeyStore.keys)?codexLinuxRemoteControlKeyStore:{keys:{}}",
-    "}catch{return{keys:{}}}",
+    `if(!${fsVar}.existsSync(codexLinuxRemoteControlKeyStorePath))return{version:codexLinuxRemoteControlKeyStoreVersion,keys:{}};`,
+    `let codexLinuxRemoteControlKeyStoreStat=codexLinuxRemoteControlAssertOwnedRegularFile(codexLinuxRemoteControlKeyStorePath,${fsVar});if(codexLinuxRemoteControlKeyStoreStat.size>codexLinuxRemoteControlKeyStoreMaxBytes)throw Error(\`Linux remote control device key store exceeds size limit\`);`,
+    `let codexLinuxRemoteControlKeyStoreFd=${fsVar}.openSync(codexLinuxRemoteControlKeyStorePath,${fsVar}.constants.O_RDONLY|${fsVar}.constants.O_NOFOLLOW),codexLinuxRemoteControlKeyStoreText;try{codexLinuxRemoteControlKeyStoreStat=codexLinuxRemoteControlAssertOwnedRegularStat(${fsVar}.fstatSync(codexLinuxRemoteControlKeyStoreFd));if(codexLinuxRemoteControlKeyStoreStat.size>codexLinuxRemoteControlKeyStoreMaxBytes)throw Error(\`Linux remote control device key store exceeds size limit\`);let codexLinuxRemoteControlKeyStoreBuffer=Buffer.alloc(codexLinuxRemoteControlKeyStoreStat.size),codexLinuxRemoteControlKeyStoreOffset=0,codexLinuxRemoteControlKeyStoreBytesRead;while(codexLinuxRemoteControlKeyStoreOffset<codexLinuxRemoteControlKeyStoreBuffer.length&&(codexLinuxRemoteControlKeyStoreBytesRead=${fsVar}.readSync(codexLinuxRemoteControlKeyStoreFd,codexLinuxRemoteControlKeyStoreBuffer,codexLinuxRemoteControlKeyStoreOffset,codexLinuxRemoteControlKeyStoreBuffer.length-codexLinuxRemoteControlKeyStoreOffset,codexLinuxRemoteControlKeyStoreOffset))>0)codexLinuxRemoteControlKeyStoreOffset+=codexLinuxRemoteControlKeyStoreBytesRead;codexLinuxRemoteControlKeyStoreText=codexLinuxRemoteControlKeyStoreBuffer.subarray(0,codexLinuxRemoteControlKeyStoreOffset).toString(\`utf8\`)}finally{${fsVar}.closeSync(codexLinuxRemoteControlKeyStoreFd)}`,
+    "let codexLinuxRemoteControlKeyStore;try{codexLinuxRemoteControlKeyStore=JSON.parse(codexLinuxRemoteControlKeyStoreText)}catch{throw Error(`Linux remote control device key store contains invalid JSON`)}",
+    "if(codexLinuxRemoteControlKeyStore&&(codexLinuxRemoteControlKeyStore.version==null||codexLinuxRemoteControlKeyStore.version===1))codexLinuxRemoteControlKeyStore={version:codexLinuxRemoteControlKeyStoreVersion,keys:codexLinuxRemoteControlKeyStore.keys};return codexLinuxRemoteControlValidateDeviceKeyStore(codexLinuxRemoteControlKeyStore)",
     "}",
+    "function codexLinuxRemoteControlMigrateDeviceKeyStore(e){let t=codexLinuxRemoteControlStorage();if(t.safeStorage==null)return null;let n={version:codexLinuxRemoteControlKeyStoreVersion,keys:{...e.keys}},r=!1;for(let [e,i] of Object.entries(n.keys))if(typeof i.privateKeyPkcs8Pem===`string`)try{let a=codexLinuxRemoteControlStorageFields(i.privateKeyPkcs8Pem);n.keys[e]={...i,...a};delete n.keys[e].privateKeyPkcs8Pem;r=!0}catch{console.warn(`WARN: Could not migrate Linux remote control device key to safeStorage; retaining legacy file-backed key`)}return r?n:null}",
+    `function codexLinuxRemoteControlOpenKeyStoreLock(){let e=codexLinuxRemoteControlDeviceKeyStorePath()+\`.lock\`,t,n=!1;try{try{t=${fsVar}.openSync(e,${fsVar}.constants.O_RDWR|${fsVar}.constants.O_CREAT|${fsVar}.constants.O_EXCL|${fsVar}.constants.O_NOFOLLOW,384),n=!0}catch(r){if(r?.code!==\`EEXIST\`)throw r;t=${fsVar}.openSync(e,${fsVar}.constants.O_RDWR|${fsVar}.constants.O_NOFOLLOW)}n&&${fsVar}.fchmodSync(t,384),codexLinuxRemoteControlAssertOwnedRegularStat(${fsVar}.fstatSync(t));return t}catch(r){try{t!=null&&${fsVar}.closeSync(t)}catch{}throw r}}`,
+    `function codexLinuxRemoteControlResolveExecutable(codexLinuxRemoteControlExecutableName){let codexLinuxRemoteControlSearchDirectories=[...(process.env.PATH??\`\`).split(${pathVar}.delimiter),\`/run/current-system/sw/bin\`,\`/nix/var/nix/profiles/default/bin\`,\`/usr/local/bin\`,\`/usr/bin\`,\`/bin\`],codexLinuxRemoteControlSeenDirectories=new Set;for(let codexLinuxRemoteControlDirectory of codexLinuxRemoteControlSearchDirectories){if(!codexLinuxRemoteControlDirectory||!${pathVar}.isAbsolute(codexLinuxRemoteControlDirectory)||codexLinuxRemoteControlSeenDirectories.has(codexLinuxRemoteControlDirectory))continue;codexLinuxRemoteControlSeenDirectories.add(codexLinuxRemoteControlDirectory);try{let codexLinuxRemoteControlExecutablePath=${fsVar}.realpathSync(${pathVar}.join(codexLinuxRemoteControlDirectory,codexLinuxRemoteControlExecutableName)),codexLinuxRemoteControlExecutableStat=${fsVar}.statSync(codexLinuxRemoteControlExecutablePath);if(!codexLinuxRemoteControlExecutableStat.isFile())continue;${fsVar}.accessSync(codexLinuxRemoteControlExecutablePath,${fsVar}.constants.X_OK);return codexLinuxRemoteControlExecutablePath}catch{}}return null}`,
+    `function codexLinuxWithRemoteControlKeyStoreLock(codexLinuxRemoteControlLockedOperation){let codexLinuxRemoteControlLockFd=codexLinuxRemoteControlOpenKeyStoreLock(),codexLinuxRemoteControlFlockPath=codexLinuxRemoteControlResolveExecutable(\`flock\`),codexLinuxRemoteControlShellPath=codexLinuxRemoteControlResolveExecutable(\`sh\`);if(codexLinuxRemoteControlFlockPath==null||codexLinuxRemoteControlShellPath==null){${fsVar}.closeSync(codexLinuxRemoteControlLockFd);throw Error(\`Linux remote control device key store requires flock and sh\`)}return new Promise((codexLinuxRemoteControlResolve,codexLinuxRemoteControlReject)=>{let codexLinuxRemoteControlLockProcess;try{codexLinuxRemoteControlLockProcess=${childProcessVar}.spawn(codexLinuxRemoteControlFlockPath,[\`-x\`,\`-w\`,\`5\`,\`/proc/self/fd/3\`,codexLinuxRemoteControlShellPath,\`-c\`,\`printf 'ready\\n'; cat >/dev/null\`],{stdio:[\`pipe\`,\`pipe\`,\`pipe\`,codexLinuxRemoteControlLockFd]})}finally{${fsVar}.closeSync(codexLinuxRemoteControlLockFd)}let codexLinuxRemoteControlStdout=\`\`,codexLinuxRemoteControlStderr=\`\`,codexLinuxRemoteControlResult,codexLinuxRemoteControlReady=!1,codexLinuxRemoteControlOperationDone=!1,codexLinuxRemoteControlProcessDone=!1,codexLinuxRemoteControlExitCode=null,codexLinuxRemoteControlFailure=null,codexLinuxRemoteControlTimer=setTimeout(()=>{codexLinuxRemoteControlReady||(codexLinuxRemoteControlFailure=Error(\`Timed out waiting for Linux remote control device key store lock\`),codexLinuxRemoteControlOperationDone=!0,codexLinuxRemoteControlLockProcess.kill())},5500),codexLinuxRemoteControlSettle=()=>{if(!codexLinuxRemoteControlOperationDone||!codexLinuxRemoteControlProcessDone)return;codexLinuxRemoteControlFailure?codexLinuxRemoteControlReject(codexLinuxRemoteControlFailure):codexLinuxRemoteControlExitCode===0?codexLinuxRemoteControlResolve(codexLinuxRemoteControlResult):codexLinuxRemoteControlReject(Error(\`Linux remote control device key store lock failed\`))};codexLinuxRemoteControlLockProcess.stderr.on(\`data\`,codexLinuxRemoteControlChunk=>{codexLinuxRemoteControlStderr=(codexLinuxRemoteControlStderr+String(codexLinuxRemoteControlChunk)).slice(-4096)}),codexLinuxRemoteControlLockProcess.on(\`error\`,codexLinuxRemoteControlError=>{clearTimeout(codexLinuxRemoteControlTimer),codexLinuxRemoteControlFailure=codexLinuxRemoteControlError,codexLinuxRemoteControlOperationDone=!0,codexLinuxRemoteControlProcessDone=!0,codexLinuxRemoteControlSettle()}),codexLinuxRemoteControlLockProcess.on(\`close\`,codexLinuxRemoteControlCode=>{clearTimeout(codexLinuxRemoteControlTimer),codexLinuxRemoteControlExitCode=codexLinuxRemoteControlCode,codexLinuxRemoteControlProcessDone=!0,codexLinuxRemoteControlReady||(codexLinuxRemoteControlFailure=Error(codexLinuxRemoteControlStderr.trim()||\`Timed out waiting for Linux remote control device key store lock\`),codexLinuxRemoteControlOperationDone=!0),codexLinuxRemoteControlSettle()}),codexLinuxRemoteControlLockProcess.stdout.on(\`data\`,codexLinuxRemoteControlChunk=>{if(codexLinuxRemoteControlReady)return;codexLinuxRemoteControlStdout+=String(codexLinuxRemoteControlChunk);if(!codexLinuxRemoteControlStdout.includes(\`ready\\n\`))return;codexLinuxRemoteControlReady=!0,clearTimeout(codexLinuxRemoteControlTimer),Promise.resolve().then(codexLinuxRemoteControlLockedOperation).then(codexLinuxRemoteControlValue=>{codexLinuxRemoteControlResult=codexLinuxRemoteControlValue,codexLinuxRemoteControlOperationDone=!0,codexLinuxRemoteControlLockProcess.stdin.end(),codexLinuxRemoteControlSettle()},codexLinuxRemoteControlError=>{codexLinuxRemoteControlFailure=codexLinuxRemoteControlError,codexLinuxRemoteControlOperationDone=!0,codexLinuxRemoteControlLockProcess.stdin.end(),codexLinuxRemoteControlSettle()})})})}`,
     "function codexLinuxWriteRemoteControlDeviceKeyStore(codexLinuxRemoteControlKeyStore){",
-    "let codexLinuxRemoteControlKeyStorePath=codexLinuxRemoteControlDeviceKeyStorePath(),codexLinuxRemoteControlTempPath=`${codexLinuxRemoteControlKeyStorePath}.tmp-${process.pid}-${Date.now()}`;",
-    `try{${fsVar}.writeFileSync(codexLinuxRemoteControlTempPath,JSON.stringify(codexLinuxRemoteControlKeyStore,null,2)+\`\\n\`,{encoding:\`utf8\`,mode:384}),${fsVar}.chmodSync(codexLinuxRemoteControlTempPath,384),${fsVar}.renameSync(codexLinuxRemoteControlTempPath,codexLinuxRemoteControlKeyStorePath),${fsVar}.chmodSync(codexLinuxRemoteControlKeyStorePath,384)}catch(codexLinuxRemoteControlWriteError){try{${fsVar}.rmSync(codexLinuxRemoteControlTempPath,{force:!0})}catch{}throw codexLinuxRemoteControlWriteError}`,
+    `codexLinuxRemoteControlValidateDeviceKeyStore(codexLinuxRemoteControlKeyStore);let codexLinuxRemoteControlKeyStorePath=codexLinuxRemoteControlDeviceKeyStorePath(),codexLinuxRemoteControlKeyStoreDirectory=${pathVar}.dirname(codexLinuxRemoteControlKeyStorePath),codexLinuxRemoteControlTempPath=codexLinuxRemoteControlKeyStorePath+\`.tmp-\`+${cryptoVar}.randomUUID(),codexLinuxRemoteControlKeyStoreText=JSON.stringify(codexLinuxRemoteControlKeyStore,null,2)+\`\\n\`,codexLinuxRemoteControlTempFd=null,codexLinuxRemoteControlDirectoryFd=null,codexLinuxRemoteControlTempCreated=!1;if(Buffer.byteLength(codexLinuxRemoteControlKeyStoreText,\`utf8\`)>codexLinuxRemoteControlKeyStoreMaxBytes)throw Error(\`Linux remote control device key store exceeds size limit\`);`,
+    `try{codexLinuxRemoteControlTempFd=${fsVar}.openSync(codexLinuxRemoteControlTempPath,${fsVar}.constants.O_WRONLY|${fsVar}.constants.O_CREAT|${fsVar}.constants.O_EXCL|${fsVar}.constants.O_NOFOLLOW,384),codexLinuxRemoteControlTempCreated=!0,${fsVar}.writeFileSync(codexLinuxRemoteControlTempFd,codexLinuxRemoteControlKeyStoreText,\`utf8\`),${fsVar}.fsyncSync(codexLinuxRemoteControlTempFd),${fsVar}.closeSync(codexLinuxRemoteControlTempFd),codexLinuxRemoteControlTempFd=null;${fsVar}.existsSync(codexLinuxRemoteControlKeyStorePath)&&codexLinuxRemoteControlAssertOwnedRegularFile(codexLinuxRemoteControlKeyStorePath,${fsVar});${fsVar}.renameSync(codexLinuxRemoteControlTempPath,codexLinuxRemoteControlKeyStorePath),codexLinuxRemoteControlTempCreated=!1;try{codexLinuxRemoteControlDirectoryFd=${fsVar}.openSync(codexLinuxRemoteControlKeyStoreDirectory,${fsVar}.constants.O_RDONLY),${fsVar}.fsyncSync(codexLinuxRemoteControlDirectoryFd),${fsVar}.closeSync(codexLinuxRemoteControlDirectoryFd),codexLinuxRemoteControlDirectoryFd=null}catch(codexLinuxRemoteControlDirectorySyncError){try{codexLinuxRemoteControlDirectoryFd!=null&&${fsVar}.closeSync(codexLinuxRemoteControlDirectoryFd)}catch{}codexLinuxRemoteControlDirectoryFd=null;console.warn(\`WARN: Linux remote control device-key store rename committed but directory fsync failed; crash durability is not confirmed\`)}}catch(codexLinuxRemoteControlWriteError){try{codexLinuxRemoteControlTempFd!=null&&${fsVar}.closeSync(codexLinuxRemoteControlTempFd)}catch{}try{codexLinuxRemoteControlDirectoryFd!=null&&${fsVar}.closeSync(codexLinuxRemoteControlDirectoryFd)}catch{}try{codexLinuxRemoteControlTempCreated&&${fsVar}.rmSync(codexLinuxRemoteControlTempPath,{force:!0})}catch{}throw codexLinuxRemoteControlWriteError}`,
     "}",
     "function codexLinuxRemoteControlDeviceKeyClient(){return{",
     "createDeviceKey:async codexLinuxRemoteControlProtectionClass=>{",
-    "let codexLinuxRemoteControlKeyStore=codexLinuxReadRemoteControlDeviceKeyStore();",
     `let codexLinuxRemoteControlKeyPair=(0,${cryptoVar}.generateKeyPairSync)(\`ec\`,{namedCurve:\`P-256\`}),codexLinuxRemoteControlPublicKey=codexLinuxRemoteControlKeyPair.publicKey,codexLinuxRemoteControlSigningKey=codexLinuxRemoteControlKeyPair[\`private\`+\`Key\`];`,
     `let codexLinuxRemoteControlKeyId=(0,${cryptoVar}.randomUUID)(),codexLinuxRemoteControlPublicKeySpkiDerBase64=codexLinuxRemoteControlPublicKey.export({type:\`spki\`,format:\`der\`}).toString(\`base64\`),codexLinuxRemoteControlSigningKeyPkcs8Pem=codexLinuxRemoteControlSigningKey.export({type:\`pkcs8\`,format:\`pem\`});`,
-    "let codexLinuxRemoteControlKeyRecord={algorithm:`ecdsa_p256_sha256`,keyId:codexLinuxRemoteControlKeyId,protectionClass:`os_protected_nonextractable`,publicKeySpkiDerBase64:codexLinuxRemoteControlPublicKeySpkiDerBase64,privateKeyPkcs8Pem:codexLinuxRemoteControlSigningKeyPkcs8Pem,createdAt:new Date().toISOString()};",
-    "codexLinuxRemoteControlKeyStore.keys={...codexLinuxRemoteControlKeyStore.keys,[codexLinuxRemoteControlKeyId]:codexLinuxRemoteControlKeyRecord},codexLinuxWriteRemoteControlDeviceKeyStore(codexLinuxRemoteControlKeyStore);",
+    "let codexLinuxRemoteControlKeyRecord={algorithm:`ecdsa_p256_sha256`,keyId:codexLinuxRemoteControlKeyId,protectionClass:`os_protected_nonextractable`,publicKeySpkiDerBase64:codexLinuxRemoteControlPublicKeySpkiDerBase64,...codexLinuxRemoteControlStorageFields(codexLinuxRemoteControlSigningKeyPkcs8Pem),createdAt:new Date().toISOString()};",
+    "await codexLinuxWithRemoteControlKeyStoreLock(()=>{let e=codexLinuxReadRemoteControlDeviceKeyStore(),t=codexLinuxRemoteControlMigrateDeviceKeyStore(e)??e;t.version=codexLinuxRemoteControlKeyStoreVersion,t.keys={...t.keys,[codexLinuxRemoteControlKeyId]:codexLinuxRemoteControlKeyRecord},codexLinuxWriteRemoteControlDeviceKeyStore(t)});",
     "return codexLinuxRemoteControlPublicDeviceKey(codexLinuxRemoteControlKeyRecord)",
     "},",
-    "deleteDeviceKey:async codexLinuxRemoteControlKeyId=>{let codexLinuxRemoteControlKeyStore=codexLinuxReadRemoteControlDeviceKeyStore();codexLinuxRemoteControlKeyStore.keys&&delete codexLinuxRemoteControlKeyStore.keys[codexLinuxRemoteControlKeyId],codexLinuxWriteRemoteControlDeviceKeyStore(codexLinuxRemoteControlKeyStore)},",
-    "getDeviceKeyPublic:async codexLinuxRemoteControlKeyId=>{let codexLinuxRemoteControlKeyRecord=codexLinuxReadRemoteControlDeviceKeyStore().keys?.[codexLinuxRemoteControlKeyId];if(codexLinuxRemoteControlKeyRecord==null)throw Error(`Linux remote control device key not found`);return codexLinuxRemoteControlPublicDeviceKey(codexLinuxRemoteControlKeyRecord)},",
-    `signDeviceKey:async(codexLinuxRemoteControlKeyId,codexLinuxRemoteControlPayload)=>{let codexLinuxRemoteControlKeyRecord=codexLinuxReadRemoteControlDeviceKeyStore().keys?.[codexLinuxRemoteControlKeyId];if(codexLinuxRemoteControlKeyRecord==null)throw Error(\`Linux remote control device key not found\`);let codexLinuxRemoteControlSigningKey=(0,${cryptoVar}.createPrivateKey)(codexLinuxRemoteControlKeyRecord.privateKeyPkcs8Pem),codexLinuxRemoteControlSignatureDerBase64=(0,${cryptoVar}.sign)(\`sha256\`,codexLinuxRemoteControlPayload,codexLinuxRemoteControlSigningKey).toString(\`base64\`);return{algorithm:codexLinuxRemoteControlKeyRecord.algorithm,signatureDerBase64:codexLinuxRemoteControlSignatureDerBase64}}`,
+    "deleteDeviceKey:async codexLinuxRemoteControlKeyId=>codexLinuxWithRemoteControlKeyStoreLock(()=>{let e=codexLinuxReadRemoteControlDeviceKeyStore(),t=codexLinuxRemoteControlMigrateDeviceKeyStore(e)??e;delete t.keys[codexLinuxRemoteControlKeyId],codexLinuxWriteRemoteControlDeviceKeyStore(t)}),",
+    "getDeviceKeyPublic:async codexLinuxRemoteControlKeyId=>codexLinuxWithRemoteControlKeyStoreLock(()=>{let e=codexLinuxReadRemoteControlDeviceKeyStore(),t=codexLinuxRemoteControlMigrateDeviceKeyStore(e)??e;t!==e&&codexLinuxWriteRemoteControlDeviceKeyStore(t);let n=t.keys?.[codexLinuxRemoteControlKeyId];if(n==null)throw Error(`Linux remote control device key not found`);return codexLinuxRemoteControlPublicDeviceKey(n)}),",
+    `signDeviceKey:async(codexLinuxRemoteControlKeyId,codexLinuxRemoteControlPayload)=>codexLinuxWithRemoteControlKeyStoreLock(()=>{let e=codexLinuxReadRemoteControlDeviceKeyStore(),t=codexLinuxRemoteControlMigrateDeviceKeyStore(e)??e;t!==e&&codexLinuxWriteRemoteControlDeviceKeyStore(t);let n=t.keys?.[codexLinuxRemoteControlKeyId];if(n==null)throw Error(\`Linux remote control device key not found\`);let r=(0,${cryptoVar}.createPrivateKey)(codexLinuxRemoteControlPrivateKeyPem(n)),i=(0,${cryptoVar}.sign)(\`sha256\`,codexLinuxRemoteControlPayload,r).toString(\`base64\`);return{algorithm:n.algorithm,signatureDerBase64:i}})`,
     "}}",
   ].join("");
 }
@@ -163,6 +170,7 @@ function applyLinuxRemoteControlDeviceKeyPatch(source) {
   const cryptoVar = requireName(source, "node:crypto");
   const fsVar = requireName(source, "node:fs");
   const pathVar = requireName(source, "node:path");
+  const childProcessVar = "require(`node:child_process`)";
   if (cryptoVar == null || fsVar == null || pathVar == null) {
     console.warn("WARN: Could not find Node module aliases - skipping Linux remote-control device-key patch");
     return source;
@@ -174,265 +182,10 @@ function applyLinuxRemoteControlDeviceKeyPatch(source) {
     return source;
   }
 
-  const provider = linuxDeviceKeyProviderSource({ cryptoVar, fsVar, pathVar });
+  const provider = linuxDeviceKeyProviderSource({ childProcessVar, cryptoVar, fsVar, pathVar });
   return source
     .replace(insertionNeedle, `${provider}${insertionNeedle}`)
     .replace(DEVICE_KEY_GUARD, DEVICE_KEY_GUARD_REPLACEMENT);
-}
-
-function applyLinuxRemoteControlPreserveConfigPatch(source) {
-  const stripperGuardRegex =
-    /async function [A-Za-z_$][\w$]*\(\{codexHome:[A-Za-z_$][\w$]*,hostConfig:([A-Za-z_$][\w$]*),logger:[A-Za-z_$][\w$]*=[^}]*\}\)\{if\(\1\.kind===`local`\)try\{/gu;
-  const patched = source.replace(stripperGuardRegex, (needle, hostConfigVar) =>
-    needle.replace(
-      `if(${hostConfigVar}.kind===\`local\`)try{`,
-      `if(${hostConfigVar}.kind===\`local\`&&process.platform!==\`linux\`)try{`,
-    ),
-  );
-  if (patched !== source) {
-    return patched;
-  }
-
-  const alreadyPatchedRegex =
-    /async function [A-Za-z_$][\w$]*\(\{codexHome:[A-Za-z_$][\w$]*,hostConfig:([A-Za-z_$][\w$]*),logger:[A-Za-z_$][\w$]*=[^}]*\}\)\{if\(\1\.kind===`local`&&process\.platform!==`linux`\)try\{/u;
-  if (
-    alreadyPatchedRegex.test(source) ||
-    !source.includes("Removed remote_control from config before app-server start") &&
-      !source.includes("Failed to remove remote_control before app-server start")
-  ) {
-    return source;
-  }
-
-  console.warn("WARN: Could not find remote-control config stripping needle - skipping Linux remote-control config patch");
-  return source;
-}
-
-function applyLinuxRemoteControlClientAccountCompatibilityPatch(source) {
-  if (source.includes(CLIENT_ACCOUNT_COMPAT_MARKER)) {
-    return source;
-  }
-
-  if (
-    source.includes("function ep({authIdentity:e,connectionKey:t,deviceKeyClient:n,globalState:r})") &&
-    source.includes("Promise.all(tp(e).map(async e=>{let i=jf(t,e);") &&
-    source.includes("function tp(e){if(e.tokenAccountUserId==null)return[];") &&
-    source.includes("tokenAuthUserId!==e.tokenAccountUserId&&t.push(e.tokenAuthUserId)") &&
-    source.includes("u.account_user_id!==c&&!(s.tokenAccountId!=null&&s.headerChatGptAccountId===s.tokenAccountId&&s.tokenAuthUserId===u.account_user_id)")
-  ) {
-    return source;
-  }
-  if (
-    source.includes("function tp({authIdentity:e,connectionKey:t,deviceKeyClient:n,globalState:r}){let i=(await Promise.all(np(e).map(async e=>{let i=Mf(t,e);return{key:i,record:await ip({deviceKeyClient:n,enrollmentKey:i,globalState:r})}}))).find(e=>e.record!=null);return i?.record==null?null:{key:i.key,record:i.record}}") &&
-    source.includes("function np(e){if(e.tokenAccountUserId==null)return[];let t=[e.tokenAccountUserId];return e.tokenAccountId!=null&&e.headerChatGptAccountId===e.tokenAccountId&&e.tokenAuthUserId!=null&&e.tokenAuthUserId!==e.tokenAccountUserId&&t.push(e.tokenAuthUserId),t}") &&
-    source.includes("u?.key??Mf(r,c)")
-  ) {
-    return source;
-  }
-
-  // 26.527.x ships the multi-account enrollment compatibility natively (the
-  // helpers were renamed, e.g. ep->wh / tp->Th). Detect both the candidate-id
-  // list builder and the account/Auth-user compatibility check so the workaround
-  // stays a clean no-op without masking partially migrated shapes.
-  const nativeCandidateListStatementRegex =
-    /function [A-Za-z_$][\w$]*\(([A-Za-z_$][\w$]*)\)\{if\(\1\.tokenAccountUserId==null\)return\[\];let ([A-Za-z_$][\w$]*)=\[\1\.tokenAccountUserId\];(?:\1\.tokenAccountId!=null&&\1\.headerChatGptAccountId===\1\.tokenAccountId&&\1\.tokenAuthUserId!=null&&)?\1\.tokenAuthUserId!==\1\.tokenAccountUserId&&\2\.push\(\1\.tokenAuthUserId\);return \2\}/u;
-  const nativeCandidateListReturnRegex =
-    /function [A-Za-z_$][\w$]*\(([A-Za-z_$][\w$]*)\)\{if\(\1\.tokenAccountUserId==null\)return\[\];let ([A-Za-z_$][\w$]*)=\[\1\.tokenAccountUserId\];return (?:\1\.tokenAccountId!=null&&\1\.headerChatGptAccountId===\1\.tokenAccountId&&\1\.tokenAuthUserId!=null&&)?\1\.tokenAuthUserId!==\1\.tokenAccountUserId&&\2\.push\(\1\.tokenAuthUserId\),\2\}/u;
-  const nativeAccountCheckRegex =
-    /[A-Za-z_$][\w$]*\.account_user_id!==[A-Za-z_$][\w$]*&&!\([A-Za-z_$][\w$]*\.tokenAccountId!=null&&[A-Za-z_$][\w$]*\.headerChatGptAccountId===[A-Za-z_$][\w$]*\.tokenAccountId&&[A-Za-z_$][\w$]*\.tokenAuthUserId===[A-Za-z_$][\w$]*\.account_user_id\)/u;
-  if (
-    (nativeCandidateListStatementRegex.test(source) ||
-      nativeCandidateListReturnRegex.test(source)) &&
-    nativeAccountCheckRegex.test(source) &&
-    source.includes("remote_control_client_enrollment_start_account_mismatch")
-  ) {
-    return source;
-  }
-
-  if (!source.includes("Remote control enrollment start does not match current account.")) {
-    return source;
-  }
-
-  const enrollmentKeyHelperRegex = /function ([A-Za-z_$][\w$]*)\(e,t\)\{return`\$\{e\}\\n\$\{t\}`\}/u;
-  const helpersMatch = source.match(enrollmentKeyHelperRegex);
-  if (helpersMatch == null) {
-    console.warn("WARN: Could not find remote-control enrollment key helper - skipping account compatibility patch");
-    return source;
-  }
-  const enrollmentKeyFn = helpersMatch[1];
-
-  const enrollmentStartRegex = new RegExp(
-    `let ([A-Za-z_$][\\w$]*)=([A-Za-z_$][\\w$]*)\\(([A-Za-z_$][\\w$]*)\\),[\\s\\S]{0,240}?` +
-      `([A-Za-z_$][\\w$]*)=\\1\\.tokenAccountUserId(?:\\?\\?null)?(?:,[^;]{0,160})?;` +
-      `if\\(\\4==null\\)throw Error\\(\`Remote control enrollment requires the current ChatGPT account user id\\.\`\\);` +
-      `[\\s\\S]{0,240}?let ([A-Za-z_$][\\w$]*)=${enrollmentKeyFn}\\(([A-Za-z_$][\\w$]*),\\4\\),[\\s\\S]{0,120}?` +
-      `([A-Za-z_$][\\w$]*)=await ([A-Za-z_$][\\w$]*)\\(\\{deviceKeyClient:([A-Za-z_$][\\w$]*),enrollmentKey:\\5,globalState:([A-Za-z_$][\\w$]*)\\}\\),` +
-      `([A-Za-z_$][\\w$]*)=\\7,([A-Za-z_$][\\w$]*);`,
-    "u",
-  );
-  const startMatch = source.match(enrollmentStartRegex);
-  if (startMatch == null) {
-    console.warn("WARN: Could not find remote-control enrollment start shape - skipping account compatibility patch");
-    return source;
-  }
-
-  const [
-    startNeedle,
-    authIdentityVar,
-    authIdentityFn,
-    headersVar,
-    tokenAccountUserIdVar,
-    enrollmentRecordKeyVar,
-    enrollmentKeyVar,
-    loadedEnrollmentVar,
-    loadEnrollmentFn,
-    deviceKeyClientVar,
-    globalStateVar,
-    enrollmentVar,
-    tokenResponseVar,
-  ] = startMatch;
-
-  const stepUpValidatorRegex =
-    /function ([A-Za-z_$][\w$]*)\(\{accountUserId:([A-Za-z_$][\w$]*),stepUpToken:([A-Za-z_$][\w$]*)\}\)\{let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\3\);([A-Za-z_$][\w$]*)\(\{payload:\4\}\);let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\.parse\(\4\),([A-Za-z_$][\w$]*)=\7\[`https:\/\/api\.openai\.com\/auth`\],([A-Za-z_$][\w$]*)=\9\.chatgpt_account_user_id\?\?\9\.account_user_id,([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\7\);if\(\10!==\2\)throw (?:Error\(`Remote control enrollment step-up token does not match current account\.`\)|new [A-Za-z_$][\w$]*);if\(Math\.floor\(Date\.now\(\)\/1e3\)-\7\.iat>([A-Za-z_$][\w$]*)\)throw Error\(`Remote control enrollment step-up token is not fresh\.`\);if\(Date\.now\(\)-\7\.pwd_auth_time>\13\*1e3\)throw Error\(`Remote control enrollment step-up token does not have fresh password auth\.`\);if\(\11\.length!==1\|\|\11\[0\]!==([A-Za-z_$][\w$]*)\)throw Error\(`Remote control enrollment step-up token is missing required authorization\.`\);return\{accountUserId:\10\?\?null,issuedAt:\7\.iat,passwordAuthTime:\7\.pwd_auth_time,scopes:\11\}\}/u;
-  const validatorMatch = source.match(stepUpValidatorRegex);
-  if (validatorMatch == null) {
-    console.warn("WARN: Could not find remote-control step-up token validator - skipping account compatibility patch");
-    return source;
-  }
-
-  const [
-    validatorNeedle,
-    stepUpValidatorFn,
-    ,
-    ,
-    ,
-    decodeTokenFn,
-    logPayloadFn,
-    ,
-    tokenParserVar,
-    ,
-    ,
-    ,
-    readScopesFn,
-    freshnessWindowVar,
-    requiredScopeVar,
-  ] = validatorMatch;
-
-  let patched = source;
-  patched = patched.replace(
-    enrollmentKeyHelperRegex,
-    `${helpersMatch[0]}${linuxRemoteControlClientAccountCompatibilityHelpers(loadEnrollmentFn, enrollmentKeyFn)}`,
-  );
-
-  patched = patched.replace(
-    startNeedle,
-    [
-      `let ${authIdentityVar}=${authIdentityFn}(${headersVar}),${tokenAccountUserIdVar}=${authIdentityVar}.tokenAccountUserId;`,
-      `if(${tokenAccountUserIdVar}==null)throw Error(\`Remote control enrollment requires the current ChatGPT account user id.\`);`,
-      `let codexLinuxRemoteControlCurrentAccountId=${authIdentityVar}.tokenAccountId??${authIdentityVar}.headerChatGptAccountId,`,
-      `codexLinuxRemoteControlEnrollmentKey=${enrollmentKeyVar},`,
-      `codexLinuxRemoteControlExistingEnrollment=await codexLinuxRemoteControlLoadEnrollment({authIdentity:${authIdentityVar},deviceKeyClient:${deviceKeyClientVar},enrollmentKey:${enrollmentKeyVar},globalState:${globalStateVar}}),`,
-      `${enrollmentRecordKeyVar}=codexLinuxRemoteControlExistingEnrollment?.enrollmentRecordKey??${enrollmentKeyFn}(${enrollmentKeyVar},${tokenAccountUserIdVar}),`,
-      `${loadedEnrollmentVar}=codexLinuxRemoteControlExistingEnrollment?.enrollment??null,`,
-      `${enrollmentVar}=${loadedEnrollmentVar},${tokenResponseVar};`,
-    ].join(""),
-  );
-
-  const authCheckRegex =
-    /remote_control_client_enrollment_start_response[\s\S]{0,500}?\),([A-Za-z_$][\w$]*)\.account_user_id!==([A-Za-z_$][\w$]*)/u;
-  const authCheckMatch = patched.match(authCheckRegex);
-  if (authCheckMatch == null) {
-    console.warn("WARN: Could not find remote-control enrollment account check - skipping account compatibility patch");
-    return source;
-  }
-  const responseVar = authCheckMatch[1];
-  const checkedAccountUserVar = authCheckMatch[2];
-  if (checkedAccountUserVar !== tokenAccountUserIdVar) {
-    console.warn("WARN: Remote-control enrollment account check used unexpected token variable - skipping account compatibility patch");
-    return source;
-  }
-  patched = replaceOnce(
-    patched,
-    `${responseVar}.account_user_id!==${tokenAccountUserIdVar}`,
-    `!codexLinuxRemoteControlAccountMatches({candidateAccountId:codexLinuxRemoteControlCurrentAccountId,candidateAccountUserId:${authIdentityVar}.tokenAccountUserId,candidateUserId:${authIdentityVar}.tokenAuthUserId,expectedAccountId:codexLinuxRemoteControlCurrentAccountId,expectedAccountUserId:${responseVar}.account_user_id})`,
-  );
-  if (patched == null) {
-    console.warn("WARN: Could not replace remote-control enrollment account check - skipping account compatibility patch");
-    return source;
-  }
-
-  const createEnrollmentRegex = new RegExp(
-    `${escapeRegExp(enrollmentVar)}=await ([A-Za-z_$][\\w$]*)\\(\\{accountUserId:(?:${escapeRegExp(tokenAccountUserIdVar)}|${escapeRegExp(responseVar)}\\.account_user_id),clientId:${escapeRegExp(responseVar)}\\.client_id,deviceKeyClient:${escapeRegExp(deviceKeyClientVar)}\\}\\);try\\{`,
-    "u",
-  );
-  const createEnrollmentMatch = patched.match(createEnrollmentRegex);
-  if (createEnrollmentMatch == null) {
-    console.warn("WARN: Could not find remote-control enrollment creation - skipping account compatibility patch");
-    return source;
-  }
-  const createEnrollmentFn = createEnrollmentMatch[1];
-  const createdEnrollmentRecordKeyUpdate =
-    responseVar === enrollmentRecordKeyVar
-      ? ""
-      : `${enrollmentRecordKeyVar}=${enrollmentKeyFn}(codexLinuxRemoteControlEnrollmentKey,${enrollmentVar}.accountUserId);`;
-  patched = patched.replace(
-    createEnrollmentRegex,
-    `${enrollmentVar}=await ${createEnrollmentFn}({accountUserId:${responseVar}.account_user_id,clientId:${responseVar}.client_id,deviceKeyClient:${deviceKeyClientVar}});${createdEnrollmentRecordKeyUpdate}try{`,
-  );
-
-  const stepUpCallRegex = new RegExp(
-    `let ([A-Za-z_$][\\w$]*)=await ([A-Za-z_$][\\w$]*)\\(\\),([A-Za-z_$][\\w$]*)=${escapeRegExp(stepUpValidatorFn)}\\(\\{accountUserId:${escapeRegExp(tokenAccountUserIdVar)},stepUpToken:\\1\\}\\),`,
-    "u",
-  );
-  const stepUpCallMatch = patched.match(stepUpCallRegex);
-  if (stepUpCallMatch == null) {
-    console.warn("WARN: Could not find remote-control step-up validation call - skipping account compatibility patch");
-    return source;
-  }
-  const [, stepUpTokenVar, requestStepUpVar, parsedStepUpVar] = stepUpCallMatch;
-  patched = patched.replace(
-    stepUpCallRegex,
-    `let ${stepUpTokenVar}=await ${requestStepUpVar}({accountId:codexLinuxRemoteControlCurrentAccountId}),${parsedStepUpVar}=${stepUpValidatorFn}({accountId:codexLinuxRemoteControlCurrentAccountId,accountUserId:${enrollmentVar}.accountUserId,stepUpToken:${stepUpTokenVar}}),`,
-  );
-
-  patched = patched.replace(
-    validatorNeedle,
-    [
-      `function ${stepUpValidatorFn}({accountId:codexLinuxExpectedAccountId,accountUserId:codexLinuxExpectedAccountUserId,stepUpToken:codexLinuxStepUpToken}){`,
-      `let codexLinuxStepUpPayload=${decodeTokenFn}(codexLinuxStepUpToken);${logPayloadFn}({payload:codexLinuxStepUpPayload});`,
-      `let codexLinuxStepUpClaims=${tokenParserVar}.parse(codexLinuxStepUpPayload),codexLinuxStepUpAuth=codexLinuxStepUpClaims[\`https://api.openai.com/auth\`],`,
-      `codexLinuxStepUpAccountUserId=codexLinuxStepUpAuth.chatgpt_account_user_id??codexLinuxStepUpAuth.account_user_id??null,`,
-      `codexLinuxStepUpAccountId=codexLinuxStepUpAuth.chatgpt_account_id??codexLinuxStepUpAuth.account_id??null,codexLinuxStepUpScopes=${readScopesFn}(codexLinuxStepUpClaims);`,
-      "if(!codexLinuxRemoteControlAccountMatches({candidateAccountId:codexLinuxStepUpAccountId,candidateAccountUserId:codexLinuxStepUpAccountUserId,candidateUserId:codexLinuxStepUpAuth.user_id??null,expectedAccountId:codexLinuxExpectedAccountId,expectedAccountUserId:codexLinuxExpectedAccountUserId}))",
-      "throw Error(`Remote control enrollment step-up token does not match current account.`);",
-      `if(Math.floor(Date.now()/1e3)-codexLinuxStepUpClaims.iat>${freshnessWindowVar})throw Error(\`Remote control enrollment step-up token is not fresh.\`);`,
-      `if(Date.now()-codexLinuxStepUpClaims.pwd_auth_time>${freshnessWindowVar}*1e3)throw Error(\`Remote control enrollment step-up token does not have fresh password auth.\`);`,
-      `if(codexLinuxStepUpScopes.length!==1||codexLinuxStepUpScopes[0]!==${requiredScopeVar})throw Error(\`Remote control enrollment step-up token is missing required authorization.\`);`,
-      "return{accountUserId:codexLinuxStepUpAccountUserId??null,issuedAt:codexLinuxStepUpClaims.iat,passwordAuthTime:codexLinuxStepUpClaims.pwd_auth_time,scopes:codexLinuxStepUpScopes}}",
-    ].join(""),
-  );
-
-  const authorizationCheckRegex =
-    new RegExp(
-      `async function ([A-Za-z_$][\\w$]*)\\(\\{appServerClient:([A-Za-z_$][\\w$]*),desktopApiOptions:([A-Za-z_$][\\w$]*),deviceKeyClient:([A-Za-z_$][\\w$]*),globalState:([A-Za-z_$][\\w$]*)\\}\\)\\{` +
-        `let ([A-Za-z_$][\\w$]*)=([A-Za-z_$][\\w$]*)\\(await ([A-Za-z_$][\\w$]*)\\(\\{action:\`check remote control authorization\`,appServerClient:\\2,desktopApiOptions:\\3\\}\\)\\)\\.tokenAccountUserId;` +
-        `if\\(\\6==null\\)return\\{clientAuthorized:!1,clientId:null\\};` +
-        `let ([A-Za-z_$][\\w$]*)=await ([A-Za-z_$][\\w$]*)\\(\\{deviceKeyClient:\\4,enrollmentKey:${enrollmentKeyFn}\\(([A-Za-z_$][\\w$]*)\\(\\3\\),\\6\\),globalState:\\5\\}\\);` +
-        `return\\{clientAuthorized:\\9!=null,clientId:\\9\\?\\.clientId\\?\\?null\\}\\}`,
-      "u",
-    );
-  const authorizationCheckMatch = patched.match(authorizationCheckRegex);
-  if (authorizationCheckMatch == null) {
-    console.warn("WARN: Could not find remote-control authorization status check - skipping account compatibility patch");
-    return source;
-  }
-  const [, authCheckFn, appServerClientVar, desktopApiOptionsVar, authDeviceKeyClientVar, authGlobalStateVar, authStatusIdentityVar, authStatusIdentityFn, authHeadersFn, enrollmentVarForStatus, , statusBaseEnrollmentKeyFn] =
-    authorizationCheckMatch;
-  patched = patched.replace(
-    authorizationCheckRegex,
-    `async function ${authCheckFn}({appServerClient:${appServerClientVar},desktopApiOptions:${desktopApiOptionsVar},deviceKeyClient:${authDeviceKeyClientVar},globalState:${authGlobalStateVar}}){let ${authStatusIdentityVar}=${authStatusIdentityFn}(await ${authHeadersFn}({action:\`check remote control authorization\`,appServerClient:${appServerClientVar},desktopApiOptions:${desktopApiOptionsVar}}));if(${authStatusIdentityVar}.tokenAccountUserId==null)return{clientAuthorized:!1,clientId:null};let ${enrollmentVarForStatus}=await codexLinuxRemoteControlLoadEnrollment({authIdentity:${authStatusIdentityVar},deviceKeyClient:${authDeviceKeyClientVar},enrollmentKey:${statusBaseEnrollmentKeyFn}(${desktopApiOptionsVar}),globalState:${authGlobalStateVar}});return{clientAuthorized:${enrollmentVarForStatus}!=null,clientId:${enrollmentVarForStatus}?.enrollment.clientId??null}}`,
-  );
-
-  return patched;
 }
 
 function applyLinuxRemoteControlClientRevocationRecoveryPatch(source) {
@@ -468,10 +221,10 @@ function applyLinuxRemoteMobileAppServerRemoteControlPatch(source) {
   }
 
   const helper =
-    "function codexLinuxRemoteMobileAppServerArgs(){return process.platform===`linux`?[`app-server`,`--remote-control`,`--analytics-default-enabled`]:[`app-server`,`--analytics-default-enabled`]}";
+    "function codexLinuxRemoteMobileAppServerArgs(){return process.platform===`linux`?[`-c`,`features.code_mode_host=true`,`app-server`,`--remote-control`,`--analytics-default-enabled`]:[`-c`,`features.code_mode_host=true`,`app-server`,`--analytics-default-enabled`]}";
   const replaced = source
     .split(REMOTE_MOBILE_APP_SERVER_ARGS_NEEDLE)
-    .join("args:codexLinuxRemoteMobileAppServerArgs()");
+    .join("codexLinuxRemoteMobileAppServerArgs()");
   // Insert after a leading "use strict" so prepending the helper does not
   // demote the directive to a plain expression and de-strict the bundle.
   const insertAt = replaced.startsWith('"use strict";')
@@ -530,72 +283,60 @@ function applyLinuxRemoteControlClientRevokeSetupResetPatch(source) {
     return source;
   }
 
-  const currentStateKeysVar = source.match(/([A-Za-z_$][\w$]*)\.CODEX_MOBILE_SETUP_COMPLETED/u)?.[1] ?? null;
-  const currentStateSetterVar =
-    source.match(/([A-Za-z_$][\w$]*)\([A-Za-z_$][\w$]*,[A-Za-z_$][\w$]*\.keepRemoteControlAwakeWhilePluggedIn,/u)?.[1] ??
-    null;
-  const currentScopeMatch = source.match(
-    /function [A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\)\{let [A-Za-z_$][\w$]*=\(0,[A-Za-z_$][\w$]*\.c\)\(\d+\),[\s\S]*?([A-Za-z_$][\w$]*)=a\(s\)[\s\S]*?`local_remote_control_client_id`[\s\S]*?onRevoked:[A-Za-z_$][\w$]*=>\{[A-Za-z_$][\w$]*\.setData[\s\S]*?onRevokeResult:/u,
+  const currentStateKeysMatch = source.match(/([A-Za-z_$][\w$]*)\.CODEX_MOBILE_SETUP_COMPLETED/u);
+  const currentStateSetterMatch = source.match(
+    /([A-Za-z_$][\w$]*)\([A-Za-z_$][\w$]*,[A-Za-z_$][\w$]*\.keepRemoteControlAwakeWhilePluggedIn,/u,
   );
-  const currentLocalRevokePattern =
-    /onRevoked:([A-Za-z_$][\w$]*)=>\{([A-Za-z_$][\w$]*)\.setData\(([A-Za-z_$][\w$]*)=>\3\?\.filter\(\3=>\3\.clientId!==\1\)\),\2\.invalidate\(\)\},onRevokeResult:/u;
-  if (
-    currentStateKeysVar != null &&
-    currentStateSetterVar != null &&
-    currentScopeMatch != null &&
-    currentLocalRevokePattern.test(source)
-  ) {
-    const helperNeedle = source.match(/var [A-Za-z_$][\w$]*=`remote-control-client-revoke-success`/u)?.[0] ?? null;
-    if (helperNeedle == null) {
+  const currentStateKeysVar = currentStateKeysMatch?.[1] ?? null;
+  const currentStateSetterVar = currentStateSetterMatch?.[1] ?? null;
+  const currentRevokePattern =
+    /onRevoked:([A-Za-z_$][\w$]*)=>\{([A-Za-z_$][\w$]*)\.setData\(([A-Za-z_$][\w$]*)=>\3\?\.filter\(\3=>\3\.clientId!==\1\)\),\2\.invalidate\(\)\},onRevokeResult:([A-Za-z_$][\w$]*)=>\{([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),\{result:\4\}\)\}/u;
+  const currentRevokeMatch = source.match(currentRevokePattern);
+  if (currentStateKeysVar != null && currentStateSetterVar != null && currentRevokeMatch != null) {
+    const ownerFunctionStart = source.lastIndexOf("function ", currentRevokeMatch.index);
+    if (
+      ownerFunctionStart < 0 ||
+      !/^function [A-Za-z_$][\w$]*\(/u.test(source.slice(ownerFunctionStart, ownerFunctionStart + 128))
+    ) {
+      console.warn("WARN: Could not find remote-control revoke helper insertion point - skipping setup reset patch");
+      return source;
+    }
+    const ownerPrefix = source.slice(ownerFunctionStart, currentRevokeMatch.index);
+    const localClientIdMatch = ownerPrefix.match(
+      /\[([A-Za-z_$][\w$]*)\]=[A-Za-z_$][\w$]*\(`local_remote_control_client_id`\)/u,
+    );
+    if (localClientIdMatch == null) {
+      console.warn("WARN: Could not find local remote-control client id - skipping setup reset patch");
+      return source;
+    }
+    const localClientIdVar = localClientIdMatch[1];
+    const anchorPositions = [
+      currentStateKeysMatch.index,
+      currentStateSetterMatch.index,
+      currentRevokeMatch.index,
+      ownerFunctionStart,
+      ownerFunctionStart + localClientIdMatch.index,
+    ];
+    if (Math.max(...anchorPositions) - Math.min(...anchorPositions) > 16_384) {
+      console.warn("WARN: Remote-control revoke setup-reset anchors are too far apart - skipping setup reset patch");
       return source;
     }
     const helper = [
-      `function ${REMOTE_CONTROL_REVOKE_SETUP_RESET_MARKER}(e,t,n,r,i){`,
+      `function ${REMOTE_CONTROL_REVOKE_SETUP_RESET_MARKER}(e,t,n,r,i,o){`,
       "let a=e?.filter(e=>(e.clientId??e.client_id)!==t);",
-      "return a?.length===0&&i(n,r.CODEX_MOBILE_SETUP_COMPLETED,!1),a",
+      "let s=a?.filter(e=>(e.clientId??e.client_id)!==o);",
+      "return s?.length===0&&i(n,r.CODEX_MOBILE_SETUP_COMPLETED,!1),a",
       "}",
     ].join("");
-    return source
-      .replace(helperNeedle, `${helper}${helperNeedle}`)
+    return `${source.slice(0, ownerFunctionStart)}${helper}${source.slice(ownerFunctionStart)}`
       .replace(
-        currentLocalRevokePattern,
-        (_needle, clientIdVar, querySnapshotVar, dataVar) =>
-          `onRevoked:${clientIdVar}=>{${querySnapshotVar}.setData(${dataVar}=>${REMOTE_CONTROL_REVOKE_SETUP_RESET_MARKER}(${dataVar},${clientIdVar},${currentScopeMatch[1]},${currentStateKeysVar},${currentStateSetterVar})),${querySnapshotVar}.invalidate()},onRevokeResult:`,
+        currentRevokePattern,
+        (_needle, clientIdVar, querySnapshotVar, dataVar, resultVar, trackFn, desktopHostVar, revokeEventVar) =>
+          `onRevoked:${clientIdVar}=>{${querySnapshotVar}.setData(${dataVar}=>${REMOTE_CONTROL_REVOKE_SETUP_RESET_MARKER}(${dataVar},${clientIdVar},${desktopHostVar},${currentStateKeysVar},${currentStateSetterVar},${localClientIdVar})),${querySnapshotVar}.invalidate()},onRevokeResult:${resultVar}=>{${trackFn}(${desktopHostVar},${revokeEventVar},{result:${resultVar}})}`,
       );
   }
-
-  const setGlobalStateMatch = source.match(
-    /mutationFn:[A-Za-z_$][\w$]*=>([A-Za-z_$][\w$]*)\([A-Za-z_$][\w$]*,[A-Za-z_$][\w$]*\.ADDED_REMOTE_CONTROL_ENV_IDS,/u,
-  );
-  if (setGlobalStateMatch == null) {
-    return source;
-  }
-
-  const setGlobalStateFn = setGlobalStateMatch[1];
-  const helperNeedle = source.match(/var [A-Za-z_$][\w$]*=`remote-control-client-revoke-success`/u)?.[0] ?? null;
-  if (helperNeedle == null) {
-    return source;
-  }
-
-  const helper = [
-    `function ${REMOTE_CONTROL_REVOKE_SETUP_RESET_MARKER}(e,t,n){`,
-    "let r=e?.filter(e=>(e.client_id??e.clientId)!==t);",
-    `return r?.length===0&&${setGlobalStateFn}(n,\`codex-mobile-has-connected-device\`,!1),r`,
-    "}",
-  ].join("");
-
-  const patched = source.replace(helperNeedle, `${helper}${helperNeedle}`);
-  const successPattern =
-    /([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\{eventName:`codex_remote_control_client_revoke_result`,metadata:\{result:`succeeded`\}\}\),([A-Za-z_$][\w$]*)\.setData\(([A-Za-z_$][\w$]*)=>\4\?\.filter\(\4=>\4\.client_id!==([A-Za-z_$][\w$]*)\)\)/u;
-  if (!successPattern.test(patched)) {
-    return source;
-  }
-
-  return patched.replace(
-    successPattern,
-    (_needle, trackFn, queryClientVar, querySnapshotVar, dataVar, clientIdVar) =>
-      `${trackFn}(${queryClientVar},{eventName:\`codex_remote_control_client_revoke_result\`,metadata:{result:\`succeeded\`}}),${querySnapshotVar}.setData(${dataVar}=>${REMOTE_CONTROL_REVOKE_SETUP_RESET_MARKER}(${dataVar},${clientIdVar},${queryClientVar}))`,
-  );
+  console.warn("WARN: Could not find remote-control revoke success handler - skipping setup reset patch");
+  return source;
 }
 
 function applyLinuxRemoteControlLoadGatePatch(source) {
@@ -629,12 +370,10 @@ function applyLinuxRemoteControlFeatureSyncPatch(source) {
     return source;
   }
 
-  // 26.527.x builds the per-host feature enablement in a helper that copies the
-  // supported defaults, then unconditionally adds remote_plugin (n[vI]=t), and
-  // never includes remote_control. Current app servers support remote_plugin and
-  // use it for remote marketplace data, so Linux only adds remote_control.
-  // Older core Linux patches may already have removed the remote_plugin tail;
-  // compose with that sanitized shape instead of treating it as drift.
+  // The current per-host feature enablement helper copies the supported
+  // defaults, then adds remote_plugin without remote_control. Current app
+  // servers use remote_plugin for remote marketplace data, so Linux adds only
+  // remote_control while preserving the upstream remote_plugin assignment.
   let patched = source;
   let changed = false;
   const enablementRegex =
@@ -650,19 +389,6 @@ function applyLinuxRemoteControlFeatureSyncPatch(source) {
         `function ${REMOTE_CONTROL_FEATURE_SYNC_MARKER}(e,t){return e==null||t==null||e===t}`;
       patched = patched.replace(enablementRegex, replacement);
       changed = true;
-    } else {
-      const sanitizedEnablementRegex =
-        /(for\(let ([A-Za-z_$][\w$]*) of [A-Za-z_$][\w$]*\)\{let ([A-Za-z_$][\w$]*)=[A-Za-z_$][\w$]*\[\2\];\3!=null&&\(([A-Za-z_$][\w$]*)\[\2\]=\3\)\})return \4\}/u;
-      const sanitizedMatch = patched.match(sanitizedEnablementRegex);
-      if (sanitizedMatch != null) {
-        const [, loopBlock, , , enablementVar] = sanitizedMatch;
-        const replacement =
-          `${loopBlock}return typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`)` +
-          `?(${REMOTE_CONTROL_FEATURE_SYNC_MARKER}(arguments[2],arguments[3])&&(${enablementVar}.remote_control=!0),${enablementVar})` +
-          `:${enablementVar}}function ${REMOTE_CONTROL_FEATURE_SYNC_MARKER}(e,t){return e==null||t==null||e===t}`;
-        patched = patched.replace(sanitizedEnablementRegex, replacement);
-        changed = true;
-      }
     }
   }
 
@@ -727,50 +453,24 @@ function applyLinuxRemoteControlFeatureSyncHostScopePatch(source) {
 }
 
 function applyLinuxRemoteControlVisibilityPatch(source) {
-  if (source.includes(REMOTE_CONTROL_VISIBILITY_REPLACEMENT)) {
+  if (!source.includes("remoteControlConnectionsState")) {
     return source;
   }
-  if (source.includes(REMOTE_CONTROL_PROFILE_AVAILABILITY_MARKER)) {
-    const profileAvailabilityMatch = source.match(REMOTE_CONTROL_PROFILE_AVAILABILITY_NEEDLE);
-    if (profileAvailabilityMatch == null) {
+
+  const settingsVisibilityMatch = source.match(REMOTE_CONTROL_SETTINGS_VISIBILITY_NEEDLE);
+  if (settingsVisibilityMatch == null) {
+    if (source.includes(REMOTE_CONTROL_VISIBILITY_MARKER)) {
       return source;
     }
-    const [, functionName, stateVar, slingshotVar] = profileAvailabilityMatch;
-    return source.replace(
-      REMOTE_CONTROL_PROFILE_AVAILABILITY_NEEDLE,
-      `function ${functionName}({remoteControlConnectionsState:${stateVar},slingshotEnabled:${slingshotVar}}){let n=typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`);return n||${slingshotVar}&&(${stateVar}?.available??!0)&&${stateVar}?.accessRequired!==!0}`,
-    );
-  }
-  if (source.includes(REMOTE_CONTROL_VISIBILITY_PREVIOUS_REPLACEMENT)) {
-    return source.replace(REMOTE_CONTROL_VISIBILITY_PREVIOUS_REPLACEMENT, REMOTE_CONTROL_VISIBILITY_REPLACEMENT);
-  }
-  if (source.includes(REMOTE_CONTROL_VISIBILITY_OLD_REPLACEMENT)) {
-    return source.replace(REMOTE_CONTROL_VISIBILITY_OLD_REPLACEMENT, REMOTE_CONTROL_VISIBILITY_REPLACEMENT);
-  }
-  if (
-    source.includes("remoteControlConnectionsState") &&
-    source.includes("navigator.userAgent.includes(`Linux`)")
-  ) {
+    console.warn("WARN: Could not find remote-control visibility gate - skipping Linux remote-control visibility patch");
     return source;
   }
-  if (!source.includes(REMOTE_CONTROL_VISIBILITY_NEEDLE)) {
-    if (!source.includes("remoteControlConnectionsState")) {
-      return source;
-    }
 
-    const settingsVisibilityMatch = source.match(REMOTE_CONTROL_SETTINGS_VISIBILITY_NEEDLE);
-    if (settingsVisibilityMatch == null) {
-      console.warn("WARN: Could not find remote-control visibility gate - skipping Linux remote-control visibility patch");
-      return source;
-    }
-
-    const [, functionName, stateVar, slingshotVar] = settingsVisibilityMatch;
-    return source.replace(
-      REMOTE_CONTROL_SETTINGS_VISIBILITY_NEEDLE,
-      `function ${functionName}({remoteControlConnectionsState:${stateVar},slingshotEnabled:${slingshotVar}}){let n=typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`);return n||${slingshotVar}&&(${stateVar}?.available??!0)&&${stateVar}?.accessRequired!==!0}`,
-    );
-  }
-  return source.replace(REMOTE_CONTROL_VISIBILITY_NEEDLE, REMOTE_CONTROL_VISIBILITY_REPLACEMENT);
+  const [, functionName, stateVar, slingshotVar] = settingsVisibilityMatch;
+  return source.replace(
+    REMOTE_CONTROL_SETTINGS_VISIBILITY_NEEDLE,
+    `function ${functionName}({remoteControlConnectionsState:${stateVar},slingshotEnabled:${slingshotVar}}){let n=typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`);/*${REMOTE_CONTROL_VISIBILITY_MARKER}*/return(n||${slingshotVar})&&(n||(${stateVar}?.available??!0))&&${stateVar}?.accessRequired!==!0}`,
+  );
 }
 
 function wrapRemoteControlTabs(source, firstKey) {
@@ -798,8 +498,12 @@ function replaceLinuxRemoteControlCopy(source) {
 }
 
 function applyLinuxRemoteControlCopyPatch(source) {
+  const hasMarker = source.includes(REMOTE_CONTROL_COPY_MARKER);
   const { patched, changed } = replaceLinuxRemoteControlCopy(source);
   if (!changed) {
+    if (hasMarker) {
+      return source;
+    }
     if (
       !source.includes("this Mac") &&
       !source.includes("Keep this Mac awake") &&
@@ -812,7 +516,7 @@ function applyLinuxRemoteControlCopyPatch(source) {
     console.warn("WARN: Could not find remote-control Mac copy - skipping Linux remote-control copy patch");
     return source;
   }
-  return patched;
+  return hasMarker ? patched : `/*${REMOTE_CONTROL_COPY_MARKER}*/${patched}`;
 }
 
 function applyLinuxRemoteControlSshInstallActionPatch(source) {
@@ -1102,52 +806,6 @@ function applyLinuxRemoteControlSettingsUxPatch(source) {
   return patched;
 }
 
-function applyLinuxRemoteControlSelectedTabPatch(source) {
-  if (
-    source.includes(REMOTE_CONTROL_SELECTED_TAB_MARKER) ||
-    source.includes(REMOTE_CONTROL_SELECTED_TAB_REPLACEMENT)
-  ) {
-    return source;
-  }
-
-  // 26.527.x moved the selected-tab resolver into the plugin-install-flow bundle
-  // and added showControlOtherDevices / showRemoteSshConnections params. Keep
-  // outbound control reachable on Linux while still avoiding hidden tabs.
-  const newRegex =
-    /function ([A-Za-z_$][\w$]*)\(\{selectedConnectionsTab:([A-Za-z_$][\w$]*),showControlOtherDevices:([A-Za-z_$][\w$]*),showControlThisMacTab:([A-Za-z_$][\w$]*),showRemoteControlConnectionsSection:([A-Za-z_$][\w$]*),showRemoteSshConnections:([A-Za-z_$][\w$]*),showTabbedSshPage:([A-Za-z_$][\w$]*)\}\)\{return ([^{}]*)\}/u;
-  const newMatch = source.match(newRegex);
-  if (newMatch != null) {
-    const [, fn, sel, otherDevices, controlThisMac, section, sshConns, tabbedSsh, body] = newMatch;
-    const replacement =
-      `function ${fn}({selectedConnectionsTab:${sel},showControlOtherDevices:${otherDevices},showControlThisMacTab:${controlThisMac},showRemoteControlConnectionsSection:${section},showRemoteSshConnections:${sshConns},showTabbedSshPage:${tabbedSsh}}){` +
-      `/*${REMOTE_CONTROL_SELECTED_TAB_MARKER}*/if(typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`)){` +
-      `if(!${section})return ${sshConns}?\`ssh\`:\`access-other-devices\`;` +
-      `if(${sel}===\`control-this-mac\`&&!${controlThisMac})return ${otherDevices}?\`access-other-devices\`:\`ssh\`;` +
-      `if(${sel}===\`access-other-devices\`&&!${otherDevices})return ${controlThisMac}?\`control-this-mac\`:\`ssh\`;` +
-      `if(${sel}===\`ssh\`&&!${tabbedSsh})return ${otherDevices}?\`access-other-devices\`:${controlThisMac}?\`control-this-mac\`:\`ssh\`;return ${sel}}` +
-      `return ${body}}`;
-    return source.replace(newRegex, replacement);
-  }
-
-  // Legacy 4-param shape (pre-26.527.x).
-  const oldMatch = source.match(REMOTE_CONTROL_SELECTED_TAB_REGEX);
-  if (oldMatch != null) {
-    const [, functionName, selectedVar, controlThisMacVar, sectionVar, sshVar] = oldMatch;
-    const replacement =
-      `function ${functionName}({selectedConnectionsTab:${selectedVar},showControlThisMacTab:${controlThisMacVar},showRemoteControlConnectionsSection:${sectionVar},showTabbedSshPage:${sshVar}}){` +
-      `/*${REMOTE_CONTROL_SELECTED_TAB_MARKER}*/let i=typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`);` +
-      `if(i){if(!${sectionVar})return\`ssh\`;if(${selectedVar}===\`control-this-mac\`&&!${controlThisMacVar})return\`access-other-devices\`;` +
-      `if(${selectedVar}===\`ssh\`&&!${sshVar})return\`access-other-devices\`;return ${selectedVar}}` +
-      `return ${sectionVar}?${selectedVar}===\`control-this-mac\`&&!${controlThisMacVar}||${selectedVar}===\`ssh\`&&!${sshVar}?\`access-other-devices\`:${selectedVar}:\`ssh\`}`;
-    return source.replace(REMOTE_CONTROL_SELECTED_TAB_REGEX, replacement);
-  }
-
-  if (/function [A-Za-z_$][\w$]*\(\{selectedConnectionsTab:/u.test(source)) {
-    console.warn("WARN: Could not find remote-control selected-tab needle - skipping Linux remote-control selected-tab patch");
-  }
-  return source;
-}
-
 function applyLinuxRemoteConnectionsRefreshPatch(source) {
   if (source.includes(REMOTE_CONNECTIONS_REFRESH_MARKER)) {
     return source;
@@ -1262,24 +920,29 @@ function browserClientHasNativeChromeBackendPreferenceRouting(source) {
   );
 }
 
-function buildLateUnknownConversationHydrationReplacement(eventName, conversationIdVar, loggerVar) {
+function buildLateUnknownConversationHydrationReplacement(
+  eventName,
+  conversationIdVar,
+  loggerVar,
+  unknownConversationPrelude = "",
+) {
   const pendingMapVar = "codexLinuxRemoteMobilePendingMap";
   const queueVar = "codexLinuxRemoteMobileQueue";
   const inFlightVar = "codexLinuxRemoteMobileInFlight";
   const readVar = "codexLinuxRemoteMobileRead";
   return (
-    `if(!this.conversations.get(${conversationIdVar})){/*${REMOTE_MOBILE_LATE_EVENT_HYDRATION_MARKER}*/` +
+    `if(!this.conversations.get(${conversationIdVar})){/*${REMOTE_MOBILE_LATE_EVENT_HYDRATION_MARKER}*/${unknownConversationPrelude}${unknownConversationPrelude.length > 0 ? ";" : ""}` +
     `let ${pendingMapVar}=this.codexLinuxRemoteMobilePendingNotifications??=new Map,${queueVar}=${pendingMapVar}.get(${conversationIdVar});` +
     `${queueVar}||(${queueVar}=[],${pendingMapVar}.set(${conversationIdVar},${queueVar})),${queueVar}.push(n);` +
     `let ${inFlightVar}=this.codexLinuxRemoteMobileInFlightHydrations??=new Set;` +
-    `if(${inFlightVar}.has(${conversationIdVar})){${loggerVar}.warning(\`Queueing ${eventName} for hydrating conversation\`,{safe:{conversationId:${conversationIdVar},queuedNotificationCount:${queueVar}.length},sensitive:{}});break}` +
-    `${loggerVar}.warning(\`Hydrating conversation for ${eventName}\`,{safe:{conversationId:${conversationIdVar},queuedNotificationCount:${queueVar}.length},sensitive:{}});` +
+    `if(${inFlightVar}.has(${conversationIdVar})){${loggerVar}.warning(\`Queueing ${eventName} for hydrating conversation\`,{safe:{queuedNotificationCount:${queueVar}.length},sensitive:{conversationId:${conversationIdVar}}});break}` +
+    `${loggerVar}.warning(\`Hydrating conversation for ${eventName}\`,{safe:{queuedNotificationCount:${queueVar}.length},sensitive:{conversationId:${conversationIdVar}}});` +
     `let ${readVar}=(s=0)=>this.readThread(${conversationIdVar},{includeTurns:!0}).then(e=>{let t=e?.thread??e,c=this.codexLinuxRemoteMobilePendingNotifications?.get(${conversationIdVar})??[],codexLinuxRemoteMobileTurns=Array.isArray(e?.turns)?e.turns:Array.isArray(t?.turns)?t.turns:null;` +
-    `if(!t||!Array.isArray(codexLinuxRemoteMobileTurns)||codexLinuxRemoteMobileTurns.length===0){if(s<12){${loggerVar}.warning(\`Retrying hydration for missing conversation\`,{safe:{conversationId:${conversationIdVar},queuedNotificationCount:c.length,attempt:s+1},sensitive:{}}),setTimeout(()=>${readVar}(s+1),250);return}` +
-    `this.codexLinuxRemoteMobilePendingNotifications?.delete(${conversationIdVar}),this.codexLinuxRemoteMobileInFlightHydrations?.delete(${conversationIdVar}),${loggerVar}.warning(\`Skipping hydration for missing conversation\`,{safe:{conversationId:${conversationIdVar},queuedNotificationCount:c.length},sensitive:{}});return}` +
+    `if(!t||!Array.isArray(codexLinuxRemoteMobileTurns)||codexLinuxRemoteMobileTurns.length===0){if(s<12){${loggerVar}.warning(\`Retrying hydration for missing conversation\`,{safe:{queuedNotificationCount:c.length,attempt:s+1},sensitive:{conversationId:${conversationIdVar}}}),setTimeout(()=>${readVar}(s+1),250);return}` +
+    `this.codexLinuxRemoteMobilePendingNotifications?.delete(${conversationIdVar}),this.codexLinuxRemoteMobileInFlightHydrations?.delete(${conversationIdVar}),${loggerVar}.warning(\`Skipping hydration for missing conversation\`,{safe:{queuedNotificationCount:c.length},sensitive:{conversationId:${conversationIdVar}}});return}` +
     `this.upsertConversationFromThread(t),this.codexLinuxRemoteMobilePendingNotifications?.delete(${conversationIdVar}),this.codexLinuxRemoteMobileInFlightHydrations?.delete(${conversationIdVar});for(let e of c)this.onNotification(e.method,e.params)})` +
-    `.catch(e=>{if(s<12){${loggerVar}.warning(\`Retrying hydration for ${eventName}\`,{safe:{conversationId:${conversationIdVar},attempt:s+1},sensitive:{error:e}}),setTimeout(()=>${readVar}(s+1),250);return}` +
-    `this.codexLinuxRemoteMobilePendingNotifications?.delete(${conversationIdVar}),this.codexLinuxRemoteMobileInFlightHydrations?.delete(${conversationIdVar}),${loggerVar}.error(\`Failed to hydrate conversation for ${eventName}\`,{safe:{conversationId:${conversationIdVar}},sensitive:{error:e}})});` +
+    `.catch(e=>{if(s<12){${loggerVar}.warning(\`Retrying hydration for ${eventName}\`,{safe:{attempt:s+1},sensitive:{conversationId:${conversationIdVar},error:e}}),setTimeout(()=>${readVar}(s+1),250);return}` +
+    `this.codexLinuxRemoteMobilePendingNotifications?.delete(${conversationIdVar}),this.codexLinuxRemoteMobileInFlightHydrations?.delete(${conversationIdVar}),${loggerVar}.error(\`Failed to hydrate conversation for ${eventName}\`,{safe:{},sensitive:{conversationId:${conversationIdVar},error:e}})});` +
     `${inFlightVar}.add(${conversationIdVar}),${readVar}();break}`
   );
 }
@@ -1306,15 +969,13 @@ function applyLinuxRemoteMobileConversationHydrationPatch(source) {
     }
   }
 
-  // Upstream 26.527.x removed the browserUse/computerUse turn-route tracking and
-  // simplified each unknown-conversation guard to `if(!this.conversations.get(x)){error;break}`.
-  // Re-implement hydrate-on-turn/started + queue-while-hydrating without the deleted routes.
+  // Hydrate on turn/started and queue later events while that read is in flight.
   if (!patched.includes(REMOTE_MOBILE_NOTIFICATION_QUEUE_MARKER)) {
     const unknownTurnNeedle =
       /(let\{threadId:([A-Za-z_$][\w$]*),turn:[A-Za-z_$][\w$]*\}=([A-Za-z_$][\w$]*)\.params,([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\2\);)if\(!this\.conversations\.get\(\4\)\)\{([A-Za-z_$][\w$]*)\.error\(`Received turn\/started for unknown conversation`,\{safe:\{conversationId:\4\},sensitive:\{\}\}\);break\}/u;
     const unknownTurnReplacement =
       (_needle, prefix, _threadIdParamVar, notificationVar, conversationIdVar, normalizerFn, loggerVar) =>
-        `${prefix}if(!this.conversations.get(${conversationIdVar})){/*${REMOTE_MOBILE_UNKNOWN_TURN_MARKER}*//*${REMOTE_MOBILE_NOTIFICATION_QUEUE_MARKER}*//*${REMOTE_MOBILE_IN_FLIGHT_HYDRATION_MARKER}*/let l=${notificationVar}.params?.turn?.threadId??${notificationVar}.params?.thread?.id,d=l!=null?${normalizerFn}(l):null,u=${notificationVar}.params?.turn?.id??${notificationVar}.params?.turnId;if(d==null||u!=null&&d===${normalizerFn}(u)){${loggerVar}.warning(\`Skipping hydration for ambiguous turn/started\`,{safe:{conversationId:${conversationIdVar},resolvedConversationId:d,turnId:u??null},sensitive:{}});break}${notificationVar}={...${notificationVar},params:{...${notificationVar}.params,threadId:l}};if(this.conversations.get(d)){this.onNotification(${notificationVar}.method,${notificationVar}.params);break}let i=this.codexLinuxRemoteMobilePendingNotifications??=new Map,a=i.get(d);a||(a=[],i.set(d,a));let p=u!=null?a.findIndex(e=>{let t=e.params?.turn?.id??e.params?.turnId;return e.method===${notificationVar}.method&&t!=null&&${normalizerFn}(t)===${normalizerFn}(u)}):-1;p>=0?a[p]=${notificationVar}:a.push(${notificationVar});let h=this.codexLinuxRemoteMobileInFlightHydrations??=new Set;if(h.has(d)){${loggerVar}.warning(\`Queueing turn/started for hydrating conversation\`,{safe:{conversationId:d,queuedNotificationCount:a.length,dedupedNotification:p>=0},sensitive:{}});break}${loggerVar}.warning(\`Hydrating conversation for turn/started\`,{safe:{conversationId:d,queuedNotificationCount:a.length},sensitive:{}});let o=(s=0)=>this.readThread(d,{includeTurns:!0}).then(e=>{let t=e?.thread??e,c=this.codexLinuxRemoteMobilePendingNotifications?.get(d)??[],codexLinuxRemoteMobileTurns=Array.isArray(e?.turns)?e.turns:Array.isArray(t?.turns)?t.turns:null;if(!t||!Array.isArray(codexLinuxRemoteMobileTurns)||codexLinuxRemoteMobileTurns.length===0){if(s<12){${loggerVar}.warning(\`Retrying hydration for missing conversation\`,{safe:{conversationId:d,queuedNotificationCount:c.length,attempt:s+1},sensitive:{}}),setTimeout(()=>o(s+1),250);return}this.codexLinuxRemoteMobilePendingNotifications?.delete(d),this.codexLinuxRemoteMobileInFlightHydrations?.delete(d),${loggerVar}.warning(\`Skipping hydration for missing conversation\`,{safe:{conversationId:d,queuedNotificationCount:c.length},sensitive:{}});return}this.upsertConversationFromThread(t),this.codexLinuxRemoteMobilePendingNotifications?.delete(d),this.codexLinuxRemoteMobileInFlightHydrations?.delete(d);for(let e of c)this.onNotification(e.method,e.params)}).catch(e=>{if(s<12){${loggerVar}.warning(\`Retrying hydration for turn/started\`,{safe:{conversationId:d,attempt:s+1},sensitive:{error:e}}),setTimeout(()=>o(s+1),250);return}this.codexLinuxRemoteMobilePendingNotifications?.delete(d),this.codexLinuxRemoteMobileInFlightHydrations?.delete(d),${loggerVar}.error(\`Failed to hydrate conversation for turn/started\`,{safe:{conversationId:d},sensitive:{error:e}})});h.add(d),o();break}`;
+        `${prefix}if(!this.conversations.get(${conversationIdVar})){/*${REMOTE_MOBILE_UNKNOWN_TURN_MARKER}*//*${REMOTE_MOBILE_NOTIFICATION_QUEUE_MARKER}*//*${REMOTE_MOBILE_IN_FLIGHT_HYDRATION_MARKER}*/let l=${notificationVar}.params?.turn?.threadId??${notificationVar}.params?.thread?.id,d=l!=null?${normalizerFn}(l):null,u=${notificationVar}.params?.turn?.id??${notificationVar}.params?.turnId;if(d==null||u!=null&&d===${normalizerFn}(u)){${loggerVar}.warning(\`Skipping hydration for ambiguous turn/started\`,{safe:{},sensitive:{conversationId:${conversationIdVar},resolvedConversationId:d,turnId:u??null}});break}${notificationVar}={...${notificationVar},params:{...${notificationVar}.params,threadId:l}};if(this.conversations.get(d)){this.onNotification(${notificationVar}.method,${notificationVar}.params);break}let i=this.codexLinuxRemoteMobilePendingNotifications??=new Map,a=i.get(d);a||(a=[],i.set(d,a));let p=u!=null?a.findIndex(e=>{let t=e.params?.turn?.id??e.params?.turnId;return e.method===${notificationVar}.method&&t!=null&&${normalizerFn}(t)===${normalizerFn}(u)}):-1;p>=0?a[p]=${notificationVar}:a.push(${notificationVar});let h=this.codexLinuxRemoteMobileInFlightHydrations??=new Set;if(h.has(d)){${loggerVar}.warning(\`Queueing turn/started for hydrating conversation\`,{safe:{queuedNotificationCount:a.length,dedupedNotification:p>=0},sensitive:{conversationId:d}});break}${loggerVar}.warning(\`Hydrating conversation for turn/started\`,{safe:{queuedNotificationCount:a.length},sensitive:{conversationId:d}});let o=(s=0)=>this.readThread(d,{includeTurns:!0}).then(e=>{let t=e?.thread??e,c=this.codexLinuxRemoteMobilePendingNotifications?.get(d)??[],codexLinuxRemoteMobileTurns=Array.isArray(e?.turns)?e.turns:Array.isArray(t?.turns)?t.turns:null;if(!t||!Array.isArray(codexLinuxRemoteMobileTurns)||codexLinuxRemoteMobileTurns.length===0){if(s<12){${loggerVar}.warning(\`Retrying hydration for missing conversation\`,{safe:{queuedNotificationCount:c.length,attempt:s+1},sensitive:{conversationId:d}}),setTimeout(()=>o(s+1),250);return}this.codexLinuxRemoteMobilePendingNotifications?.delete(d),this.codexLinuxRemoteMobileInFlightHydrations?.delete(d),${loggerVar}.warning(\`Skipping hydration for missing conversation\`,{safe:{queuedNotificationCount:c.length},sensitive:{conversationId:d}});return}this.upsertConversationFromThread(t),this.codexLinuxRemoteMobilePendingNotifications?.delete(d),this.codexLinuxRemoteMobileInFlightHydrations?.delete(d);for(let e of c)this.onNotification(e.method,e.params)}).catch(e=>{if(s<12){${loggerVar}.warning(\`Retrying hydration for turn/started\`,{safe:{attempt:s+1},sensitive:{conversationId:d,error:e}}),setTimeout(()=>o(s+1),250);return}this.codexLinuxRemoteMobilePendingNotifications?.delete(d),this.codexLinuxRemoteMobileInFlightHydrations?.delete(d),${loggerVar}.error(\`Failed to hydrate conversation for turn/started\`,{safe:{},sensitive:{conversationId:d,error:e}})});h.add(d),o();break}`;
     if (unknownTurnNeedle.test(patched)) {
       patched = patched.replace(unknownTurnNeedle, unknownTurnReplacement);
     } else if (patched.includes("Received turn/started for unknown conversation")) {
@@ -1334,22 +995,27 @@ function applyLinuxRemoteMobileConversationHydrationPatch(source) {
     }
 
     const itemCompletedNeedle =
-      /if\(!this\.conversations\.get\(([A-Za-z_$][\w$]*)\)\)\{([A-Za-z_$][\w$]*)\.error\(`Received item\/completed for unknown conversation`,\{safe:\{conversationId:\1\},sensitive:\{\}\}\);break\}/u;
+      /if\(([^{};]*clearItemTerminalInputBuffer\([^{};]*\)),!this\.conversations\.get\(([A-Za-z_$][\w$]*)\)\)\{([A-Za-z_$][\w$]*)\.error\(`Received item\/completed for unknown conversation`,\{safe:\{conversationId:\2\},sensitive:\{\}\}\);break\}/u;
     if (itemCompletedNeedle.test(patched)) {
       patched = patched.replace(
         itemCompletedNeedle,
-        (_needle, conversationIdVar, loggerVar) =>
-          buildLateUnknownConversationHydrationReplacement("item/completed", conversationIdVar, loggerVar),
+        (_needle, completionPrelude, conversationIdVar, loggerVar) =>
+          `${completionPrelude};${buildLateUnknownConversationHydrationReplacement("item/completed", conversationIdVar, loggerVar)}`,
       );
     } else if (patched.includes("Received item/completed for unknown conversation")) {
       console.warn("WARN: Could not find unknown item/completed needle - skipping remote mobile item queue patch");
     }
 
     const turnCompletedNeedle =
-      /if\(!this\.conversations\.get\(([A-Za-z_$][\w$]*)\)\)\{([A-Za-z_$][\w$]*)\.error\(`Received turn\/completed for unknown conversation`,\{safe:\{conversationId:\1\},sensitive:\{\}\}\);break\}/u;
+      /if\(!this\.conversations\.get\(([A-Za-z_$][\w$]*)\)\)\{([^{};]*),([A-Za-z_$][\w$]*)\.error\(`Received turn\/completed for unknown conversation`,\{safe:\{conversationId:\1\},sensitive:\{\}\}\);break\}/u;
     const turnCompletedReplacement =
-      (_needle, conversationIdVar, loggerVar) =>
-        buildLateUnknownConversationHydrationReplacement("turn/completed", conversationIdVar, loggerVar);
+      (_needle, conversationIdVar, completionPrelude, loggerVar) =>
+        buildLateUnknownConversationHydrationReplacement(
+          "turn/completed",
+          conversationIdVar,
+          loggerVar,
+          completionPrelude,
+        );
     if (turnCompletedNeedle.test(patched)) {
       patched = patched.replace(turnCompletedNeedle, turnCompletedReplacement);
     } else if (patched.includes("Received turn/completed for unknown conversation")) {
@@ -1360,54 +1026,163 @@ function applyLinuxRemoteMobileConversationHydrationPatch(source) {
   return patched;
 }
 
+function applyLinuxRemoteMobileCompletedItemRecoveryPatch(source) {
+  if (source.includes(REMOTE_MOBILE_COMPLETED_ITEM_MARKER)) {
+    return source;
+  }
+
+  const completedItemDropPattern =
+    /([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)&&\(([A-Za-z_$][\w$]*)\.firstTurnWorkItemStartedAtMs=\3\.firstTurnWorkItemStartedAtMs\?\?Date\.now\(\)\),!\(\2\.type!==`subAgentActivity`&&!([A-Za-z_$][\w$]*)\(\3,\2\.id,\2\.type\)\)&&\(\2\.type,([A-Za-z_$][\w$]*)\(\3,([A-Za-z_$][\w$]*)\)\)/u;
+
+  if (completedItemDropPattern.test(source)) {
+    return source.replace(
+      completedItemDropPattern,
+      (
+        _match,
+        workItemPredicate,
+        completedItemVar,
+        turnVar,
+        findItemFn,
+        upsertItemFn,
+        viewItemVar,
+      ) =>
+        `${workItemPredicate}(${completedItemVar})&&(${turnVar}.firstTurnWorkItemStartedAtMs=${turnVar}.firstTurnWorkItemStartedAtMs??Date.now());let codexLinuxCompletedItemExists=${turnVar}.items.some(e=>e.id===${viewItemVar}.id);if(${completedItemVar}.type!==\`subAgentActivity\`&&codexLinuxCompletedItemExists&&!${findItemFn}(${turnVar},${completedItemVar}.id,${completedItemVar}.type))return;${upsertItemFn}(${turnVar},${viewItemVar})`,
+    );
+  }
+
+  if (
+    source.includes("Item not found in turn state") &&
+    source.includes("case`item/completed`") &&
+    source.includes("item/agentMessage/delta")
+  ) {
+    console.warn(
+      "WARN: Could not find completed item recovery insertion point - skipping remote mobile completed item recovery patch",
+    );
+  }
+
+  return source;
+}
+
+function applyLinuxRemoteTerminalStatusRecoveryPatch(source) {
+  if (
+    source.includes("codexLinuxRemoteTerminalStatusWaitingOnUserInput") &&
+    source.includes("hasUserInputRequest:codexLinuxRemoteHasUserInputRequest") &&
+    source.includes("&&codexLinuxRemoteHasUserInputRequest")
+  ) {
+    return source;
+  }
+
+  if (
+    !source.includes("hasInProgressSideChat") ||
+    !source.includes("isResponseInProgress") ||
+    !source.includes("threadRuntimeStatus") ||
+    !source.includes("pendingRequestType")
+  ) {
+    return source;
+  }
+
+  const userInputRequestHelper =
+    "function codexLinuxRemoteHasUserInputRequest(e){try{return Array.isArray(e)&&e.some(e=>e?.method===`item/tool/requestUserInput`||e?.method===`item/tool/requestOptionPicker`||e?.method===`item/tool/requestSetupCodexContextPicker`||e?.method===`item/tool/call`&&(e?.params?.tool===`request_onboarding_input`||e?.params?.tool===`request_option_picker`||e?.params?.tool===`setup_codex_context_picker`||e?.params?.tool===`setup_codex_step`))}catch{return!1}}";
+  const buildTerminalStatusReplacement = (
+    fnName,
+    sideChatVar,
+    responseProgressVar,
+    systemErrorVar,
+    resumeStateVar,
+    runtimeStatusVar,
+  ) =>
+    `function ${fnName}({hasInProgressSideChat:${sideChatVar},isResponseInProgress:${responseProgressVar},latestTurnHasSystemError:${systemErrorVar},resumeState:${resumeStateVar},threadRuntimeStatus:${runtimeStatusVar},hasUserInputRequest:codexLinuxRemoteHasUserInputRequestPending=!0}){let codexLinuxRemoteTerminalStatusActive=${runtimeStatusVar}?.type===\`active\`,codexLinuxRemoteTerminalStatusActiveFlags=Array.isArray(${runtimeStatusVar}?.activeFlags)?${runtimeStatusVar}.activeFlags:null,codexLinuxRemoteTerminalStatusWaitingOnUserInput=codexLinuxRemoteTerminalStatusActiveFlags?.includes(\`waitingOnUserInput\`)===!0,codexLinuxRemoteTerminalStatusLoading=codexLinuxRemoteTerminalStatusActive&&(${responseProgressVar}===!0||codexLinuxRemoteTerminalStatusActiveFlags==null||codexLinuxRemoteTerminalStatusActiveFlags.length>0&&(!codexLinuxRemoteTerminalStatusWaitingOnUserInput||codexLinuxRemoteHasUserInputRequestPending===!0));return ${sideChatVar}?\`loading\`:${runtimeStatusVar}?.type===\`systemError\`?\`error\`:codexLinuxRemoteTerminalStatusLoading?\`loading\`:${resumeStateVar}===\`needs_resume\`?\`idle\`:${systemErrorVar}?\`error\`:${responseProgressVar}===!0?\`loading\`:\`idle\`}`;
+
+  const terminalStatusPattern =
+    /function ([A-Za-z_$][\w$]*)\(\{hasInProgressSideChat:([A-Za-z_$][\w$]*),isResponseInProgress:([A-Za-z_$][\w$]*),latestTurnHasSystemError:([A-Za-z_$][\w$]*),resumeState:([A-Za-z_$][\w$]*),threadRuntimeStatus:([A-Za-z_$][\w$]*)\}\)\{return \2\?`loading`:\6\?\.type===`systemError`\?`error`:\6\?\.type===`active`\?`loading`:\5===`needs_resume`\?`idle`:\4\?`error`:\3===!0\?`loading`:`idle`\}/u;
+  const terminalStatusMatch = source.match(terminalStatusPattern);
+  if (terminalStatusMatch == null) {
+    console.warn(
+      "WARN: Could not find remote terminal status function - skipping Linux remote terminal status recovery patch",
+    );
+    return source;
+  }
+  const [
+    ,
+    terminalStatusFnName,
+    sideChatVar,
+    responseProgressVar,
+    systemErrorVar,
+    resumeStateVar,
+    runtimeStatusVar,
+  ] = terminalStatusMatch;
+
+  const pendingRequestPattern =
+    /function ([A-Za-z_$][\w$]*)\(\{pendingRequestType:([A-Za-z_$][\w$]*),requests:([A-Za-z_$][\w$]*),resumeState:([A-Za-z_$][\w$]*),threadRuntimeStatus:([A-Za-z_$][\w$]*)\}\)\{return \3==null\|\|\4==null\?null:\4===`needs_resume`\?\5\?\.type===`active`&&\5\.activeFlags\.includes\(`waitingOnApproval`\)&&([A-Za-z_$][\w$]*)\(\3\)\?`approval`:\5\?\.type===`active`&&\5\.activeFlags\.includes\(`waitingOnUserInput`\)\?`response`:null:([A-Za-z_$][\w$]*)\(\2\)\?`approval`:\2===`userInput`\?`response`:null\}/u;
+  const pendingRequestMatch = source.match(pendingRequestPattern);
+  if (pendingRequestMatch == null) {
+    console.warn(
+      "WARN: Could not find remote pending-request function - skipping Linux remote terminal status recovery patch",
+    );
+    return source;
+  }
+  const [
+    ,
+    pendingRequestFnName,
+    pendingTypeVar,
+    requestsVar,
+    pendingResumeStateVar,
+    pendingRuntimeStatusVar,
+    approvalRequestFn,
+    approvalTypeFn,
+  ] = pendingRequestMatch;
+
+  const pendingCallPattern = new RegExp(
+    `${escapeRegExp(pendingRequestFnName)}\\(\\{pendingRequestType:[^{}]+?,requests:([^{}]*\\([^{}]*\\)[^{}]*?),resumeState:[^{}]+?,threadRuntimeStatus:[^{}]+?\\}\\)`,
+    "u",
+  );
+  const requestExpression = source.match(pendingCallPattern)?.[1] ?? null;
+  const terminalCallPattern = new RegExp(
+    `${escapeRegExp(terminalStatusFnName)}\\(\\{hasInProgressSideChat:([^{}]+?),isResponseInProgress:([^{}]+?),resumeState:([^{}]+?),threadRuntimeStatus:([^{}]+?),latestTurnHasSystemError:([^{}]+?)\\}\\)`,
+    "u",
+  );
+  if (requestExpression == null || !terminalCallPattern.test(source)) {
+    console.warn(
+      "WARN: Could not wire remote terminal status to pending user-input requests - skipping Linux remote terminal status recovery patch",
+    );
+    return source;
+  }
+
+  let patched = source.replace(
+    terminalStatusPattern,
+    `${userInputRequestHelper}${buildTerminalStatusReplacement(
+      terminalStatusFnName,
+      sideChatVar,
+      responseProgressVar,
+      systemErrorVar,
+      resumeStateVar,
+      runtimeStatusVar,
+    )}`,
+  );
+  patched = patched.replace(
+    pendingRequestPattern,
+    `function ${pendingRequestFnName}({pendingRequestType:${pendingTypeVar},requests:${requestsVar},resumeState:${pendingResumeStateVar},threadRuntimeStatus:${pendingRuntimeStatusVar}}){return ${requestsVar}==null||${pendingResumeStateVar}==null?null:${pendingResumeStateVar}===\`needs_resume\`?${pendingRuntimeStatusVar}?.type===\`active\`&&Array.isArray(${pendingRuntimeStatusVar}?.activeFlags)&&${pendingRuntimeStatusVar}.activeFlags.includes(\`waitingOnApproval\`)&&${approvalRequestFn}(${requestsVar})?\`approval\`:${pendingRuntimeStatusVar}?.type===\`active\`&&Array.isArray(${pendingRuntimeStatusVar}?.activeFlags)&&${pendingRuntimeStatusVar}.activeFlags.includes(\`waitingOnUserInput\`)&&codexLinuxRemoteHasUserInputRequest(${requestsVar})?\`response\`:null:${approvalTypeFn}(${pendingTypeVar})?\`approval\`:${pendingTypeVar}===\`userInput\`?\`response\`:null}`,
+  );
+  patched = patched.replace(
+    terminalCallPattern,
+    `${terminalStatusFnName}({hasInProgressSideChat:$1,isResponseInProgress:$2,resumeState:$3,threadRuntimeStatus:$4,latestTurnHasSystemError:$5,hasUserInputRequest:codexLinuxRemoteHasUserInputRequest(${requestExpression})})`,
+  );
+
+  return patched;
+}
+
 function applyLinuxRemoteControlStatusReadGuardPatch(source) {
   if (source.includes(REMOTE_CONTROL_STATUS_READ_GUARD_MARKER)) {
-    return source.replace(
-      /function codexLinuxRemoteControlShouldReadStatus\(e\)\{return !\(typeof navigator!=`undefined`&&navigator\.userAgent\.includes\(`Linux`\)&&typeof e==`string`&&\(?e\.startsWith\(`remote-ssh`\)\)?\)\}/u,
-      `function ${REMOTE_CONTROL_STATUS_READ_GUARD_MARKER}(e){return !(typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`)&&typeof e==\`string\`&&(e.startsWith(\`remote-ssh\`)||e.startsWith(\`remote-control:\`)))}`,
-    );
+    return source;
   }
   if (!source.includes("remoteControl/status/read")) {
     return source;
   }
 
-  const replacementForDirectStatusRead = (match) => {
-    const [
-      needle,
-      functionName,
-      storeVar,
-      clientVar,
-      hostVar,
-      generationVar,
-      generationFn,
-      initialValueVar,
-      statusAtomVar,
-      notificationParamsVar,
-      isCurrentFn,
-      readResultVar,
-      errorVar,
-      loggerVar,
-    ] = match;
-    const replacement =
-      `function ${REMOTE_CONTROL_STATUS_READ_GUARD_MARKER}(e){return !(typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`)&&typeof e==\`string\`&&(e.startsWith(\`remote-ssh\`)||e.startsWith(\`remote-control:\`)))}` +
-      `function ${functionName}(${storeVar},${clientVar}){let ${hostVar}=${clientVar}.getHostId(),${generationVar}=${generationFn}(${storeVar},${hostVar}),${initialValueVar}=${storeVar}.get(${statusAtomVar},${hostVar});` +
-      `${clientVar}.addNotificationCallback(\`remoteControl/status/changed\`,({params:${notificationParamsVar}})=>{${isCurrentFn}(${storeVar},${hostVar},${generationVar})&&${storeVar}.set(${statusAtomVar},${hostVar},${notificationParamsVar})});` +
-      `if(!${REMOTE_CONTROL_STATUS_READ_GUARD_MARKER}(${hostVar})){${isCurrentFn}(${storeVar},${hostVar},${generationVar})&&${storeVar}.set(${statusAtomVar},${hostVar},{status:\`disabled\`,available:!1,accessRequired:!1});return}` +
-      `${clientVar}.sendRequest(\`remoteControl/status/read\`,void 0).then(${readResultVar}=>{${storeVar}.get(${statusAtomVar},${hostVar})===${initialValueVar}&&${isCurrentFn}(${storeVar},${hostVar},${generationVar})&&${storeVar}.set(${statusAtomVar},${hostVar},${readResultVar})}).catch(${errorVar}=>{${isCurrentFn}(${storeVar},${hostVar},${generationVar})&&${loggerVar}.error(\`Failed to read remote-control status\`,{safe:{},sensitive:{error:${errorVar}}})})}`;
-    return source.replace(needle, replacement);
-  };
-
   const statusReadPattern =
-    /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{let ([A-Za-z_$][\w$]*)=\3\.getHostId\(\),([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\2,\4\),([A-Za-z_$][\w$]*)=\2\.get\(([A-Za-z_$][\w$]*),\4\);\3\.addNotificationCallback\(`remoteControl\/status\/changed`,\(\{params:([A-Za-z_$][\w$]*)\}\)=>\{([A-Za-z_$][\w$]*)\(\2,\4,\5\)&&\2\.set\(\8,\4,\9\)\}\),\3\.sendRequest\(`remoteControl\/status\/read`,void 0\)\.then\(([A-Za-z_$][\w$]*)=>\{\2\.get\(\8,\4\)===\7&&\10\(\2,\4,\5\)&&\2\.set\(\8,\4,\11\)\}\)\.catch\(([A-Za-z_$][\w$]*)=>\{\10\(\2,\4,\5\)&&([A-Za-z_$][\w$]*)\.error\(`Failed to read remote-control status`,\{safe:\{\},sensitive:\{error:\12\}\}\)\}\)\}/u;
-  const match = source.match(statusReadPattern);
-  if (match != null) {
-    return replacementForDirectStatusRead(match);
-  }
-
-  const helperStatusReadPattern =
     /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{let ([A-Za-z_$][\w$]*)=\3\.getHostId\(\),([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\2,\4\),([A-Za-z_$][\w$]*)=\2\.get\(([A-Za-z_$][\w$]*),\4\);\3\.addNotificationCallback\(`remoteControl\/status\/changed`,\(\{params:([A-Za-z_$][\w$]*)\}\)=>\{([A-Za-z_$][\w$]*)\(\2,\4,\5\)&&([A-Za-z_$][\w$]*)\(\2,\4,\9\)\}\),\3\.sendRequest\(`remoteControl\/status\/read`,void 0\)\.then\(([A-Za-z_$][\w$]*)=>\{\2\.get\(\8,\4\)===\7&&\10\(\2,\4,\5\)&&\11\(\2,\4,\12\)\}\)\.catch\(([A-Za-z_$][\w$]*)=>\{\10\(\2,\4,\5\)&&([A-Za-z_$][\w$]*)\.error\(`Failed to read remote-control status`,\{safe:\{\},sensitive:\{error:\13\}\}\)\}\)\}/u;
-  const helperMatch = source.match(helperStatusReadPattern);
-  if (helperMatch == null) {
+  const match = source.match(statusReadPattern);
+  if (match == null) {
     console.warn("WARN: Could not find remote-control status read needle - skipping Linux remote-control status guard patch");
     return source;
   }
@@ -1428,7 +1203,7 @@ function applyLinuxRemoteControlStatusReadGuardPatch(source) {
     readResultVar,
     errorVar,
     loggerVar,
-  ] = helperMatch;
+  ] = match;
   const replacement =
     `function ${REMOTE_CONTROL_STATUS_READ_GUARD_MARKER}(e){return !(typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`)&&typeof e==\`string\`&&(e.startsWith(\`remote-ssh\`)||e.startsWith(\`remote-control:\`)))}` +
     `function ${functionName}(${storeVar},${clientVar}){let ${hostVar}=${clientVar}.getHostId(),${generationVar}=${generationFn}(${storeVar},${hostVar}),${initialValueVar}=${storeVar}.get(${statusAtomVar},${hostVar});` +
@@ -1439,17 +1214,61 @@ function applyLinuxRemoteControlStatusReadGuardPatch(source) {
   return source.replace(needle, replacement);
 }
 
+function applyLinuxRemoteControlStatusWaitPatch(source) {
+  if (source.includes(REMOTE_CONTROL_STATUS_WAIT_MARKER)) {
+    return source;
+  }
+  if (
+    !source.includes("Timed out waiting for remote control to connect") ||
+    !source.includes("remoteControl/status/changed")
+  ) {
+    return source;
+  }
+
+  const timeoutVariableMatch = source.match(
+    /setTimeout\(\(\)=>\{[^}]{0,300}Timed out waiting for remote control to connect[^}]{0,300}\},([A-Za-z_$][\w$]*)\)/u,
+  );
+  if (timeoutVariableMatch == null) {
+    console.warn("WARN: Could not find remote-control status timeout variable - skipping Linux remote-control status wait patch");
+    return source;
+  }
+
+  const timeoutVariable = timeoutVariableMatch[1];
+  const statusWaitRegex = new RegExp(
+    `\\b${escapeRegExp(timeoutVariable)}=5e3(?=,[A-Za-z_$][\\w$]*=([A-Za-z_$][\\w$]*)\\(([A-Za-z_$][\\w$]*),e=>null\\),[A-Za-z_$][\\w$]*=\\1\\(\\2,e=>!1\\),[A-Za-z_$][\\w$]*=[A-Za-z_$][\\w$]*\\(\\2,)`,
+    "u",
+  );
+  if (!statusWaitRegex.test(source)) {
+    console.warn("WARN: Could not find remote-control status wait needle - skipping Linux remote-control status wait patch");
+    return source;
+  }
+
+  return source.replace(
+    statusWaitRegex,
+    `${timeoutVariable}=typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`)?3e4:5e3/*${REMOTE_CONTROL_STATUS_WAIT_MARKER}*/`,
+  );
+}
+
 function applyLinuxRemoteControlEnablementBridgePatch(source) {
   let patched = source;
 
   patched = applyLinuxRemoteControlEnableForHostParamsPatch(patched);
 
   const markerIndex = patched.indexOf("[remote-connections/slingshot-gate-bridge]");
-  if (markerIndex < 0 || patched.indexOf("set-remote-control-connections-enabled", markerIndex) < 0) {
+  const enablementIndex = patched.indexOf("set-remote-control-connections-enabled");
+  if (markerIndex < 0 || enablementIndex < 0) {
+    return patched;
+  }
+  if (Math.abs(markerIndex - enablementIndex) > 4_500) {
+    console.warn("WARN: Remote-control enablement bridge anchors are too far apart - skipping Linux remote-control bridge patch");
     return patched;
   }
 
-  let region = patched.slice(markerIndex, markerIndex + 4_500);
+  const regionStart = Math.max(0, Math.min(markerIndex, enablementIndex) - 1_000);
+  const regionEnd = Math.min(patched.length, Math.max(markerIndex, enablementIndex) + 4_500);
+  const prefix = patched.slice(0, regionStart);
+  const suffix = patched.slice(regionEnd);
+  let region = patched.slice(regionStart, regionEnd);
 
   if (!patched.includes(REMOTE_CONTROL_ENABLEMENT_BRIDGE_MARKER)) {
     const currentBridgePattern =
@@ -1459,55 +1278,35 @@ function applyLinuxRemoteControlEnablementBridgePatch(source) {
       (_needle, functionName, cacheVar, compilerVar, checkGateVar, isLoadingVar, gateHookVar, gateValueVar, enabledVar, callbackVar, depsVar) =>
         `function ${functionName}(){let ${cacheVar}=(0,${compilerVar}.c)(6),{checkGate:${checkGateVar},isLoading:${isLoadingVar}}=${gateHookVar}(),${gateValueVar};${cacheVar}[0]===${checkGateVar}?${gateValueVar}=${cacheVar}[1]:(${gateValueVar}=${checkGateVar}(\`1042620455\`),${cacheVar}[0]=${checkGateVar},${cacheVar}[1]=${gateValueVar});let ${enabledVar}=${gateValueVar}||/*${REMOTE_CONTROL_ENABLEMENT_BRIDGE_MARKER}*/typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`),${callbackVar},${depsVar};return `,
     );
-    const bridgePattern =
-      /function ([A-Za-z_$][\w$]*)\(\)\{let ([A-Za-z_$][\w$]*)=\(0,([A-Za-z_$][\w$]*)\.c\)\(3\),([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*);return \2\[0\]===\4\?/u;
-    if (patchedRegion === region) {
-      patchedRegion = region.replace(
-        bridgePattern,
-        (_needle, functionName, cacheVar, compilerVar, enabledVar, gateVar, callbackVar, depsVar) =>
-          `function ${functionName}(){let ${cacheVar}=(0,${compilerVar}.c)(3),${enabledVar}=${gateVar}()||/*${REMOTE_CONTROL_ENABLEMENT_BRIDGE_MARKER}*/typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`),${callbackVar},${depsVar};return ${cacheVar}[0]===${enabledVar}?`,
-      );
-    }
-
     if (patchedRegion === region) {
       console.warn("WARN: Could not find remote-control enablement bridge needle - skipping Linux remote-control bridge patch");
       return patched;
     }
 
-    patched = patched.slice(0, markerIndex) + patchedRegion + patched.slice(markerIndex + region.length);
-    region = patched.slice(markerIndex, markerIndex + 4_500);
+    region = patchedRegion;
   }
 
-  if (patched.includes(REMOTE_CONTROL_SELF_AUTO_CONNECT_MARKER)) {
-    return patched;
+  if (region.includes(REMOTE_CONTROL_SELF_AUTO_CONNECT_MARKER)) {
+    return prefix + region + suffix;
   }
 
   const selfAutoConnectReplacement = (desktopHostRequestFn, enabledVar, errorVar, loggerVar, logPrefixVar) =>
-    `${desktopHostRequestFn}(\`set-remote-control-connections-enabled\`,{params:{enabled:${enabledVar}}}).then(async e=>{if(${enabledVar}&&typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`)){let t=e?.remoteControlConnections??e?.sharedObjects?.remote_control_connections??e?.connections??[],n=e?.sharedObjects?.local_remote_control_installation_id??e?.local_remote_control_installation_id??e?.localRemoteControlInstallationId??e?.installationId??e?.installation_id??null;if(t.length===0)try{let e=await ${desktopHostRequestFn}(\`refresh-remote-control-connections\`,{params:{}});t=e?.remoteControlConnections??e?.sharedObjects?.remote_control_connections??e?.connections??[],n=n??e?.sharedObjects?.local_remote_control_installation_id??e?.local_remote_control_installation_id??e?.localRemoteControlInstallationId??e?.installationId??e?.installation_id??null}catch(e){${loggerVar}.warning(\`\${${logPrefixVar}} self_auto_connect_refresh_failed\`,{safe:{},sensitive:{error:e}})}if(n==null)try{let e=await ${desktopHostRequestFn}(\`get-global-state\`,{params:{key:\`electron-local-remote-control-installation-id\`}});n=e?.value??e?.state?.value??e?.globalState?.[\`electron-local-remote-control-installation-id\`]??null}catch(e){${loggerVar}.warning(\`\${${logPrefixVar}} self_auto_connect_identity_failed\`,{safe:{},sensitive:{error:e}})}let r=t.filter(e=>typeof e?.hostId==\`string\`&&e.hostId.startsWith(\`remote-control:\`)),i=new Set(r.filter(e=>n!=null&&(e.installationId??e.installation_id)===n).map(e=>e.hostId));await Promise.all(r.map(e=>${desktopHostRequestFn}(\`set-remote-connection-auto-connect\`,{params:{hostId:e.hostId,autoConnect:i.has(e.hostId)}}).catch(t=>{${loggerVar}.warning(\`\${${logPrefixVar}} self_auto_connect_failed\`,{safe:{hostId:e.hostId,autoConnect:i.has(e.hostId)},sensitive:{error:t}})})))}}/*${REMOTE_CONTROL_SELF_AUTO_CONNECT_MARKER}*/).catch(${errorVar}=>{${loggerVar}.warning(\`\${${logPrefixVar}} sync_failed\`,{safe:{enabled:${enabledVar}},sensitive:{error:${errorVar}}})})`;
+    `${desktopHostRequestFn}(\`set-remote-control-connections-enabled\`,{params:{enabled:${enabledVar}}}).then(async e=>{if(${enabledVar}&&typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`)){let t=e?.remoteControlConnections??e?.sharedObjects?.remote_control_connections??e?.connections??[],n=e?.sharedObjects?.local_remote_control_installation_id??e?.local_remote_control_installation_id??e?.localRemoteControlInstallationId??e?.installationId??e?.installation_id??null;if(t.length===0)try{let e=await ${desktopHostRequestFn}(\`refresh-remote-control-connections\`,{params:{}});t=e?.remoteControlConnections??e?.sharedObjects?.remote_control_connections??e?.connections??[],n=n??e?.sharedObjects?.local_remote_control_installation_id??e?.local_remote_control_installation_id??e?.localRemoteControlInstallationId??e?.installationId??e?.installation_id??null}catch(e){${loggerVar}.warning(\`\${${logPrefixVar}} self_auto_connect_refresh_failed\`,{safe:{},sensitive:{error:e}})}if(n==null)try{let e=await ${desktopHostRequestFn}(\`get-global-state\`,{params:{key:\`electron-local-remote-control-installation-id\`}});n=e?.value??e?.state?.value??e?.globalState?.[\`electron-local-remote-control-installation-id\`]??null}catch(e){${loggerVar}.warning(\`\${${logPrefixVar}} self_auto_connect_identity_failed\`,{safe:{},sensitive:{error:e}})}let r=t.filter(e=>typeof e?.hostId==\`string\`&&e.hostId.startsWith(\`remote-control:\`)),i=new Set(r.filter(e=>n!=null&&(e.installationId??e.installation_id)===n).map(e=>e.hostId));await Promise.all(r.map(e=>${desktopHostRequestFn}(\`set-remote-connection-auto-connect\`,{params:{hostId:e.hostId,autoConnect:i.has(e.hostId)}}).catch(t=>{${loggerVar}.warning(\`\${${logPrefixVar}} self_auto_connect_failed\`,{safe:{autoConnect:i.has(e.hostId)},sensitive:{hostId:e.hostId,error:t}})})))}}/*${REMOTE_CONTROL_SELF_AUTO_CONNECT_MARKER}*/).catch(${errorVar}=>{${loggerVar}.warning(\`\${${logPrefixVar}} sync_failed\`,{safe:{enabled:${enabledVar}},sensitive:{error:${errorVar}}})})`;
 
-  const previousAutoConnectCleanupPattern =
-    /([A-Za-z_$][\w$]*)\(`set-remote-control-connections-enabled`,\{params:\{enabled:([A-Za-z_$][\w$]*)\}\}\)\.then\(async ([A-Za-z_$][\w$]*)=>\{[\s\S]*?\/\*codexLinuxRemoteControlAutoConnectCleanup\*\/\)\.catch\(([A-Za-z_$][\w$]*)=>\{([A-Za-z_$][\w$]*)\.warning\(`\$\{([A-Za-z_$][\w$]*)\} sync_failed`,\{safe:\{(?:enabled|slingshotEnabled):\2\},sensitive:\{error:\4\}\}\)\}\)/u;
   const selfAutoConnectPattern =
     /([A-Za-z_$][\w$]*)\(`set-remote-control-connections-enabled`,\{params:\{enabled:([A-Za-z_$][\w$]*)\}\}\)\.catch\(([A-Za-z_$][\w$]*)=>\{([A-Za-z_$][\w$]*)\.warning\(`\$\{([A-Za-z_$][\w$]*)\} sync_failed`,\{safe:\{(?:enabled|slingshotEnabled):\2\},sensitive:\{error:\3\}\}\)\}\)/u;
-  let selfAutoConnectRegion = region.replace(
-    previousAutoConnectCleanupPattern,
-    (_needle, desktopHostRequestFn, enabledVar, _resultVar, errorVar, loggerVar, logPrefixVar) =>
+  const selfAutoConnectRegion = region.replace(
+    selfAutoConnectPattern,
+    (_needle, desktopHostRequestFn, enabledVar, errorVar, loggerVar, logPrefixVar) =>
       selfAutoConnectReplacement(desktopHostRequestFn, enabledVar, errorVar, loggerVar, logPrefixVar),
   );
-  if (selfAutoConnectRegion === region) {
-    selfAutoConnectRegion = region.replace(
-      selfAutoConnectPattern,
-      (_needle, desktopHostRequestFn, enabledVar, errorVar, loggerVar, logPrefixVar) =>
-        selfAutoConnectReplacement(desktopHostRequestFn, enabledVar, errorVar, loggerVar, logPrefixVar),
-    );
-  }
 
   if (selfAutoConnectRegion === region) {
     console.warn("WARN: Could not find remote-control self auto-connect needle - skipping Linux remote-control auto-connect patch");
-    return patched;
+    return prefix + region + suffix;
   }
 
-  return patched.slice(0, markerIndex) + selfAutoConnectRegion + patched.slice(markerIndex + region.length);
+  return prefix + selfAutoConnectRegion + suffix;
 }
 
 function applyLinuxRemoteControlEnableForHostParamsPatch(source) {
@@ -1558,47 +1357,56 @@ function applyLinuxRemoteMobileActiveStatusPatch(source) {
   );
 }
 
-function applyLinuxRemoteMobileProjectlessRemoteTaskPatch(source) {
-  if (source.includes(REMOTE_MOBILE_PROJECTLESS_REMOTE_TASK_MARKER)) {
-    return source;
-  }
-  if (!source.includes("No owner repo found for remote task")) {
+function applyLinuxRemoteMobileReasoningSummaryPatch(source) {
+  if (source.includes(REMOTE_MOBILE_REASONING_SUMMARY_MARKER)) {
     return source;
   }
 
-  const fallbackPattern =
-    /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\2,\3\),([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\5\);if\(!\7\)\{(?:([A-Za-z_$][\w$]*)\.has\(\2\.task\.id\)\|\|\(\9\.add\(\2\.task\.id\),)?([A-Za-z_$][\w$]*)\.warning\(`No owner repo found for remote task`,\{safe:\{taskId:\2\.task\.id\},sensitive:\{\}\}\)(?:\))?;return\}/u;
-  const match = source.match(fallbackPattern);
-  if (match == null) {
-    console.warn("WARN: Could not find remote task owner-repo grouping needle - skipping projectless remote task patch");
+  const logMarker = "Reasoning summary turn-start config resolved";
+  const logIndex = source.indexOf(logMarker);
+  if (logIndex === -1) {
+    console.warn(
+      "WARN: Could not find reasoning-summary turn-start log marker - skipping Linux remote mobile summary patch",
+    );
     return source;
   }
 
-  const [
-    needle,
-    functionName,
-    remoteTaskVar,
-    remoteProjectsByLabelVar,
-    projectGroupsVar,
-    remoteProjectVar,
-    remoteProjectForTaskFn,
-    ownerRepoVar,
-    ownerRepoForProjectFn,
-  ] = match;
+  const functionStart = source.lastIndexOf("async function ", logIndex);
+  const turnStartPrefix = functionStart === -1 ? "" : source.slice(functionStart, logIndex);
+  const summaryPattern =
+    /(?<prefix>let |,)(?<featureOverride>[A-Za-z_$][\w$]*)=(?<manager>[A-Za-z_$][\w$]*)\.getDefaultFeatureOverride\([A-Za-z_$][\w$]*\)===!0,(?<summary>[A-Za-z_$][\w$]*)=[A-Za-z_$][\w$]*\?\.summary\?\?`none`;(?<latestSettings>[A-Za-z_$][\w$]*)\?\.summary!==void 0&&\(\k<summary>=\k<latestSettings>\.summary\),\k<featureOverride>&&\(\k<summary>=`detailed`\),(?<request>[A-Za-z_$][\w$]*)\.summary!==void 0&&\(\k<summary>=\k<request>\.summary\);/u;
+  const summaryMatch = turnStartPrefix.match(summaryPattern);
+  if (summaryMatch == null) {
+    console.warn(
+      "WARN: Could not find reasoning-summary turn-start resolver - skipping Linux remote mobile summary patch",
+    );
+    return source;
+  }
 
-  return source.replace(
-    needle,
-    [
-      `function ${functionName}(${remoteTaskVar},${remoteProjectsByLabelVar},${projectGroupsVar}){`,
-      `let ${remoteProjectVar}=${remoteProjectForTaskFn}(${remoteTaskVar},${remoteProjectsByLabelVar}),`,
-      `${ownerRepoVar}=${ownerRepoForProjectFn}(${remoteProjectVar});`,
-      `if(!${ownerRepoVar}){`,
-      `let ${REMOTE_MOBILE_PROJECTLESS_REMOTE_TASK_MARKER}=${remoteTaskVar}.task?.id??${remoteTaskVar}.conversationId??${remoteTaskVar}.key??\`unknown\`,`,
-      `codexLinuxRemoteMobileProjectlessRemoteTaskLabel=${remoteTaskVar}.task?.task_status_display?.environment_label??${remoteTaskVar}.task?.title??\`Remote task\`,`,
-      `codexLinuxRemoteMobileProjectlessRemoteTaskGroup={projectId:\`remote-task:\${${REMOTE_MOBILE_PROJECTLESS_REMOTE_TASK_MARKER}}\`,projectKind:\`remote\`,label:codexLinuxRemoteMobileProjectlessRemoteTaskLabel,path:\`\${${REMOTE_MOBILE_PROJECTLESS_REMOTE_TASK_MARKER}}\`,repositoryData:null,isCodexWorktree:!1,threadKeys:[]};`,
-      `${projectGroupsVar}.push(codexLinuxRemoteMobileProjectlessRemoteTaskGroup),codexLinuxRemoteMobileProjectlessRemoteTaskGroup.threadKeys.push(${remoteTaskVar}.key);return}`,
-    ].join(""),
+  const {
+    featureOverride: featureOverrideVar,
+    manager: managerVar,
+    request: requestVar,
+    summary: summaryVar,
+  } = summaryMatch.groups;
+  const localHostPattern = new RegExp(
+    `!([A-Za-z_$][\\w$]*)\\(${escapeRegExp(managerVar)}\\.getHostId\\(\\)\\)`,
+    "u",
   );
+  const localHostMatch = turnStartPrefix.match(localHostPattern);
+  if (localHostMatch == null) {
+    console.warn(
+      "WARN: Could not find local-host turn-start guard - skipping Linux remote mobile summary patch",
+    );
+    return source;
+  }
+
+  const localHostClassifier = localHostMatch[1];
+  const replacement =
+    `${summaryMatch[0]}/*${REMOTE_MOBILE_REASONING_SUMMARY_MARKER}*/` +
+    `navigator.userAgent.includes(\`Linux\`)&&!${localHostClassifier}(${managerVar}.getHostId())&&${requestVar}.summary===void 0&&(${featureOverrideVar}=!1,${summaryVar}=\`none\`);`;
+  const absoluteMatchStart = functionStart + summaryMatch.index;
+  return `${source.slice(0, absoluteMatchStart)}${replacement}${source.slice(absoluteMatchStart + summaryMatch[0].length)}`;
 }
 
 module.exports = [
@@ -1608,20 +1416,6 @@ module.exports = [
     order: 20_100,
     ciPolicy: "optional",
     apply: applyLinuxRemoteControlDeviceKeyPatch,
-  },
-  {
-    id: "linux-remote-control-preserve-config",
-    phase: "main-bundle",
-    order: 20_110,
-    ciPolicy: "optional",
-    apply: applyLinuxRemoteControlPreserveConfigPatch,
-  },
-  {
-    id: "linux-remote-control-client-account-compatibility",
-    phase: "main-bundle",
-    order: 20_115,
-    ciPolicy: "optional",
-    apply: applyLinuxRemoteControlClientAccountCompatibilityPatch,
   },
   {
     id: "linux-remote-control-client-revocation-recovery",
@@ -1640,7 +1434,7 @@ module.exports = [
   {
     id: "linux-remote-control-load-gate",
     phase: "webview-asset",
-    pattern: /^(?:remote-connection-visibility|app-initial~app-main~worktree-init-v2-page~remote-conversation-page~new-thread-panel-page~o~).*\.js$/,
+    pattern: REMOTE_CONTROL_APP_INITIAL_ASSET_PATTERN,
     order: 20_118,
     ciPolicy: "optional",
     missingDescription: "remote-control loader gate bundle",
@@ -1650,7 +1444,7 @@ module.exports = [
   {
     id: "linux-remote-control-feature-sync",
     phase: "webview-asset",
-    pattern: /^(?:app-main|index)-.*\.js$/,
+    pattern: REMOTE_CONTROL_APP_INITIAL_ASSET_PATTERN,
     order: 20_119,
     ciPolicy: "optional",
     missingDescription: "webview app main bundle",
@@ -1660,7 +1454,7 @@ module.exports = [
   {
     id: "linux-remote-control-visibility",
     phase: "webview-asset",
-    pattern: /^(?:remote-control-connections-visibility|remote-connections-settings|use-plugin-install-flow)-.*\.js$/,
+    pattern: REMOTE_CONTROL_APP_INITIAL_ASSET_PATTERN,
     order: 20_120,
     ciPolicy: "optional",
     missingDescription: "remote-control connections visibility bundle",
@@ -1670,7 +1464,7 @@ module.exports = [
   {
     id: "linux-remote-control-copy",
     phase: "webview-asset",
-    pattern: /^(?:codex-mobile-setup-flow|remote-connections-settings|use-codex-mobile-connected-settings)-.*\.js$/,
+    pattern: /^(?:codex-mobile-setup-dialog|remote-connections-settings)-.*\.js$/,
     order: 20_130,
     ciPolicy: "optional",
     missingDescription: "remote-control settings or mobile setup bundle",
@@ -1686,16 +1480,6 @@ module.exports = [
     missingDescription: "remote connections settings bundle",
     skipDescription: "Linux remote-control settings UX patch",
     apply: applyLinuxRemoteControlSettingsUxPatch,
-  },
-  {
-    id: "linux-remote-control-selected-tab",
-    phase: "webview-asset",
-    pattern: /^(?:use-plugin-install-flow|remote-connections-settings)-.*\.js$/,
-    order: 20_136,
-    ciPolicy: "optional",
-    missingDescription: "remote-control selected-tab bundle",
-    skipDescription: "Linux remote-control selected-tab patch",
-    apply: applyLinuxRemoteControlSelectedTabPatch,
   },
   {
     id: "linux-remote-control-client-revoke-setup-reset",
@@ -1718,9 +1502,19 @@ module.exports = [
     apply: applyLinuxRemoteConnectionsRefreshPatch,
   },
   {
+    id: "linux-remote-mobile-reasoning-summary-none",
+    phase: "webview-asset",
+    pattern: REMOTE_CONTROL_APP_INITIAL_ASSET_PATTERN,
+    order: 20_149,
+    ciPolicy: "optional",
+    missingDescription: "turn-start reasoning summary resolver",
+    skipDescription: "Linux remote-mobile reasoning summary patch",
+    apply: applyLinuxRemoteMobileReasoningSummaryPatch,
+  },
+  {
     id: "linux-remote-mobile-conversation-hydration",
     phase: "webview-asset",
-    pattern: /^(?:app-server-manager-signals|thread-context-inputs|app-initial~app-main~worktree-init-v2-page~remote-conversation-page~).*\.js$/,
+    pattern: REMOTE_CONTROL_APP_INITIAL_ASSET_PATTERN,
     order: 20_150,
     ciPolicy: "optional",
     missingDescription: "app-server manager signals bundle",
@@ -1728,20 +1522,50 @@ module.exports = [
     apply: applyLinuxRemoteMobileConversationHydrationPatch,
   },
   {
+    id: "linux-remote-mobile-completed-item-recovery",
+    phase: "webview-asset",
+    pattern: REMOTE_CONTROL_APP_INITIAL_ASSET_PATTERN,
+    order: 20_151,
+    ciPolicy: "optional",
+    missingDescription: "app-server conversation manager bundle",
+    skipDescription: "Linux remote-mobile completed item recovery patch",
+    apply: applyLinuxRemoteMobileCompletedItemRecoveryPatch,
+  },
+  {
+    id: "linux-remote-terminal-status-recovery",
+    phase: "webview-asset",
+    pattern: REMOTE_CONTROL_APP_INITIAL_ASSET_PATTERN,
+    order: 20_152,
+    ciPolicy: "optional",
+    missingDescription: "app-server conversation manager bundle",
+    skipDescription: "Linux remote terminal status recovery patch",
+    apply: applyLinuxRemoteTerminalStatusRecoveryPatch,
+  },
+  {
     id: "linux-remote-control-status-read-guard",
     phase: "webview-asset",
-    pattern: /^(?:app-server-manager-signals|thread-context-inputs|app-initial~app-main~worktree-init-v2-page~remote-conversation-page~(?:new-thread-panel-page~o~|pull-requests-page~plug~)).*\.js$/,
-    order: 20_151,
+    pattern: REMOTE_CONTROL_APP_INITIAL_ASSET_PATTERN,
+    order: 20_153,
     ciPolicy: "optional",
     missingDescription: "app-server manager signals bundle",
     skipDescription: "Linux remote-control status read guard patch",
     apply: applyLinuxRemoteControlStatusReadGuardPatch,
   },
   {
+    id: "linux-remote-control-status-wait",
+    phase: "webview-asset",
+    pattern: REMOTE_CONTROL_APP_INITIAL_ASSET_PATTERN,
+    order: 20_154,
+    ciPolicy: "optional",
+    missingDescription: "app-server manager signals bundle",
+    skipDescription: "Linux remote-control status wait patch",
+    apply: applyLinuxRemoteControlStatusWaitPatch,
+  },
+  {
     id: "linux-remote-control-enable-for-host-params",
     phase: "webview-asset",
-    pattern: /^(?:app-main|app-initial~app-main~automations-page)-.*\.js$/,
-    order: 20_154,
+    pattern: REMOTE_CONTROL_APP_INITIAL_ASSET_PATTERN,
+    order: 20_155,
     ciPolicy: "optional",
     missingDescription: "app main remote-control host toggle bundle",
     skipDescription: "Linux remote-control host toggle params patch",
@@ -1750,8 +1574,8 @@ module.exports = [
   {
     id: "linux-remote-control-enablement-bridge",
     phase: "webview-asset",
-    pattern: /^app-main-.*\.js$/,
-    order: 20_155,
+    pattern: REMOTE_CONTROL_APP_INITIAL_ASSET_PATTERN,
+    order: 20_156,
     ciPolicy: "optional",
     missingDescription: "app main bundle",
     skipDescription: "Linux remote-control enablement bridge patch",
@@ -1760,22 +1584,12 @@ module.exports = [
   {
     id: "linux-remote-mobile-active-status",
     phase: "webview-asset",
-    pattern: /^(?:app-main|avatar-overlay-realtime-voice-button)-.*\.js$/,
+    pattern: REMOTE_CONTROL_APP_INITIAL_ASSET_PATTERN,
     order: 20_160,
     ciPolicy: "optional",
     missingDescription: "app main bundle",
     skipDescription: "Linux remote-mobile active status patch",
     apply: applyLinuxRemoteMobileActiveStatusPatch,
-  },
-  {
-    id: "linux-remote-mobile-projectless-remote-task",
-    phase: "webview-asset",
-    pattern: /^app-initial~app-main~remote-conversation-page~new-thread-panel-page~onboarding-page~appgen-~.*\.js$/,
-    order: 20_170,
-    ciPolicy: "optional",
-    missingDescription: "sidebar project groups bundle",
-    skipDescription: "Linux remote-mobile projectless remote task patch",
-    apply: applyLinuxRemoteMobileProjectlessRemoteTaskPatch,
   },
 ];
 
@@ -1783,15 +1597,17 @@ module.exports.applyLinuxRemoteControlDeviceKeyPatch = applyLinuxRemoteControlDe
 module.exports.applyLinuxRemoteMobileAppServerRemoteControlPatch =
   applyLinuxRemoteMobileAppServerRemoteControlPatch;
 module.exports.applyLinuxRemoteMobileChromeBridgePatch = applyLinuxRemoteMobileChromeBridgePatch;
+module.exports.applyLinuxRemoteMobileCompletedItemRecoveryPatch =
+  applyLinuxRemoteMobileCompletedItemRecoveryPatch;
 module.exports.applyLinuxRemoteMobileConversationHydrationPatch = applyLinuxRemoteMobileConversationHydrationPatch;
+module.exports.applyLinuxRemoteMobileReasoningSummaryPatch = applyLinuxRemoteMobileReasoningSummaryPatch;
+module.exports.applyLinuxRemoteTerminalStatusRecoveryPatch = applyLinuxRemoteTerminalStatusRecoveryPatch;
 module.exports.applyLinuxRemoteControlStatusReadGuardPatch = applyLinuxRemoteControlStatusReadGuardPatch;
+module.exports.applyLinuxRemoteControlStatusWaitPatch = applyLinuxRemoteControlStatusWaitPatch;
 module.exports.applyLinuxRemoteControlEnablementBridgePatch = applyLinuxRemoteControlEnablementBridgePatch;
 module.exports.applyLinuxRemoteControlEnableForHostParamsPatch =
   applyLinuxRemoteControlEnableForHostParamsPatch;
 module.exports.applyLinuxRemoteMobileActiveStatusPatch = applyLinuxRemoteMobileActiveStatusPatch;
-module.exports.applyLinuxRemoteControlPreserveConfigPatch = applyLinuxRemoteControlPreserveConfigPatch;
-module.exports.applyLinuxRemoteControlClientAccountCompatibilityPatch =
-  applyLinuxRemoteControlClientAccountCompatibilityPatch;
 module.exports.applyLinuxRemoteControlClientRevocationRecoveryPatch =
   applyLinuxRemoteControlClientRevocationRecoveryPatch;
 module.exports.applyLinuxRemoteControlClientRevokeSetupResetPatch =
@@ -1804,6 +1620,3 @@ module.exports.applyLinuxRemoteControlCopyPatch = applyLinuxRemoteControlCopyPat
 module.exports.applyLinuxRemoteControlSshInstallActionPatch = applyLinuxRemoteControlSshInstallActionPatch;
 module.exports.applyLinuxRemoteControlSshInstallReleasePatch = applyLinuxRemoteControlSshInstallReleasePatch;
 module.exports.applyLinuxRemoteControlSettingsUxPatch = applyLinuxRemoteControlSettingsUxPatch;
-module.exports.applyLinuxRemoteControlSelectedTabPatch = applyLinuxRemoteControlSelectedTabPatch;
-module.exports.applyLinuxRemoteMobileProjectlessRemoteTaskPatch =
-  applyLinuxRemoteMobileProjectlessRemoteTaskPatch;

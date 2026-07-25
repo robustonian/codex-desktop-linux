@@ -77,15 +77,13 @@ test("remote-control UI feature exposes optional webview asset descriptors when 
     assert.deepEqual(enabledLinuxFeatureIds({ featuresRoot: root }), ["remote-control-ui"]);
 
     const patches = loadLinuxFeaturePatchDescriptors({ featuresRoot: root });
-    assert.equal(patches.length, 5);
+    assert.equal(patches.length, 3);
     assert.deepEqual(
       patches.map((patch) => [patch.name, patch.phase, patch.ciPolicy]),
       [
         ["feature:remote-control-ui:remote-connections-visibility", "webview-asset", "optional"],
         ["feature:remote-control-ui:remote-control-connections-visibility", "webview-asset", "optional"],
         ["feature:remote-control-ui:experimental-features", "webview-asset", "optional"],
-        ["feature:remote-control-ui:nux-gate", "webview-asset", "optional"],
-        ["feature:remote-control-ui:app-main", "webview-asset", "optional"],
       ],
     );
   });
@@ -95,20 +93,16 @@ test("remote-control UI feature patches are idempotent and fail soft", () => {
   const remoteConnectionsPatch = featurePatches.find((patch) => patch.id === "remote-connections-visibility");
   const remoteControlConnectionsPatch = featurePatches.find((patch) => patch.id === "remote-control-connections-visibility");
   const experimentalFeaturesPatch = featurePatches.find((patch) => patch.id === "experimental-features");
-  const appMainPatch = featurePatches.find((patch) => patch.id === "app-main");
-  const nuxGatePatch = featurePatches.find((patch) => patch.id === "nux-gate");
   const remoteConnectionsSource =
     "function c(){let e=(0,s.c)(3),{data:n}=t(a,r(i)),c=o(`4114442250`);if(n?.config[`features.remote_connections`]===!0)return!0;let l=n?.config.features;if(typeof l!=`object`||!l||Array.isArray(l))return c;let u;return e[0]!==l||e[1]!==c?(u=Object.getOwnPropertyDescriptor(l,`remote_connections`)?.value===!0||c,e[0]=l,e[1]=c,e[2]=u):u=e[2],u}";
+  const atomRemoteConnectionsSource =
+    "function s(e){if(e(c,`4114442250`))return`enabled`;return`disabled`}";
   const currentRemoteConnectionsSource =
     "function d(){let e=(0,u.c)(3),{data:i}=n(s,r(t)),a=c(`4114442250`);if(i?.config[`features.remote_connections`]===!0)return!0;let o=i?.config.features;if(typeof o!=`object`||!o||Array.isArray(o))return a;let l;return e[0]!==o||e[1]!==a?(l=Object.getOwnPropertyDescriptor(o,`remote_connections`)?.value===!0||a,e[0]=o,e[1]=a,e[2]=l):l=e[2],l}";
   const currentRemoteControlConnectionsSource =
     "function a({remoteControlConnectionsState:e,slingshotEnabled:t}){return t&&(e?.available??!0)&&e?.accessRequired!==!0}";
-  const currentAppMainSource =
-    "function m_(){let e=(0,Z.c)(14),t=Pg(),{data:n,isLoading:r}=Ps(d.CODEX_MOBILE_SETUP_COMPLETED),i=Ql(),a=ec(`2798711298`),[o]=ts(`local_app_server_feature_enablement`),[s,c]=gt(Vg),l=o?.remote_control??!1,u=t&&i&&a&&!l&&!r&&!n&&!s;return u}";
-  const currentNuxGateSource =
-    "import{r as ee}from\"./remote-connection-visibility-6MV6akfy.js\";function wt(){let i=ee(),a=z(),[o]=E(`remote_connections`),s=o?.some(Tt)??!1;return i&&!a&&o!=null&&s}";
   const experimentalFeaturesSource =
-    "var Z=`remote_control`;function Ie(e){return e.stage===`beta`?e.name!==`memories`&&e.name!==`multi_agent`&&e.name!==`plugins`&&e.name!==`plugin`&&e.name!==`realtime_conversation`&&e.name!==`remote_control`&&e.name!==`chronicle`&&e.name!==`workspace_dependencies`:!1}";
+    "var Z=`remote_control`;function Ie(e){return e.stage===`beta`?e.name!==`memories`&&e.name!==`multi_agent`&&e.name!==`plugins`&&e.name!==`plugin`&&e.name!==`remote_control`&&!e.name.startsWith(`realtime_`)&&e.name!==`chronicle`&&e.name!==`workspace_dependencies`:!1}";
 
   const firstPatched = remoteConnectionsPatch.apply(remoteConnectionsSource, {});
   assert.match(firstPatched, /navigator\.userAgent\.includes\(`Linux`\)/);
@@ -118,27 +112,90 @@ test("remote-control UI feature patches are idempotent and fail soft", () => {
   assert.match(currentRemoteConnectionsPatched, /c\(`4114442250`\)\|\|navigator\.userAgent\.includes\(`Linux`\)/);
   assert.equal(remoteConnectionsPatch.apply(currentRemoteConnectionsPatched, {}), currentRemoteConnectionsPatched);
 
+  const atomRemoteConnectionsPatched = remoteConnectionsPatch.apply(atomRemoteConnectionsSource, {});
+  assert.match(atomRemoteConnectionsPatched, /e\(c,`4114442250`\)\|\|navigator\.userAgent\.includes\(`Linux`\)/);
+  assert.equal(remoteConnectionsPatch.apply(atomRemoteConnectionsPatched, {}), atomRemoteConnectionsPatched);
+
   const currentRemoteControlConnectionsPatched = remoteControlConnectionsPatch.apply(currentRemoteControlConnectionsSource, {});
   assert.match(currentRemoteControlConnectionsPatched, /\(t\|\|navigator\.userAgent\.includes\(`Linux`\)\)&&\(e\?\.available\?\?!0\)/);
-  assert.equal(remoteControlConnectionsPatch.apply(currentRemoteControlConnectionsPatched, {}), currentRemoteControlConnectionsPatched);
-
-  const currentAppMainPatched = appMainPatch.apply(currentAppMainSource, {});
-  assert.match(currentAppMainPatched, /ec\(`2798711298`\)\|\|navigator\.userAgent\.includes\(`Linux`\)/);
-  assert.equal(appMainPatch.apply(currentAppMainPatched, {}), currentAppMainPatched);
-
-  const { value: currentNuxGatePatched, warnings: currentNuxGateWarnings } = captureWarns(() =>
-    nuxGatePatch.apply(currentNuxGateSource, {}),
+  const { value: remoteControlPatchedAgain, warnings: remoteControlPatchedAgainWarnings } = captureWarns(() =>
+    remoteControlConnectionsPatch.apply(currentRemoteControlConnectionsPatched, {}),
   );
-  assert.equal(currentNuxGatePatched, currentNuxGateSource);
-  assert.deepEqual(currentNuxGateWarnings, []);
+  assert.equal(remoteControlPatchedAgain, currentRemoteControlConnectionsPatched);
+  assert.deepEqual(remoteControlPatchedAgainWarnings, []);
+
+  const currentGate = new Function(
+    "remoteControlConnectionsState",
+    "slingshotEnabled",
+    "navigator",
+    `${currentRemoteControlConnectionsPatched};return a({remoteControlConnectionsState,slingshotEnabled})`,
+  );
+  const linuxNavigator = { userAgent: "Linux" };
+  assert.equal(currentGate({ available: false, accessRequired: false }, false, linuxNavigator), false);
+  assert.equal(currentGate({ available: true, accessRequired: true }, false, linuxNavigator), false);
+  assert.equal(currentGate({ available: true, accessRequired: false }, false, linuxNavigator), true);
 
   const filtered = experimentalFeaturesPatch.apply(experimentalFeaturesSource, {});
   assert.doesNotMatch(filtered, /e\.name!==`remote_control`/);
-  assert.equal(experimentalFeaturesPatch.apply(filtered, {}), filtered);
+  const { value: filteredAgain, warnings: filteredAgainWarnings } = captureWarns(() =>
+    experimentalFeaturesPatch.apply(filtered, {}),
+  );
+  assert.equal(filteredAgain, filtered);
+  assert.deepEqual(filteredAgainWarnings, []);
 
   const { value, warnings } = captureWarns(() => remoteConnectionsPatch.apply("real codex bundle", {}));
   assert.equal(value, "real codex bundle");
   assert.match(warnings.join("\n"), /Could not find remote connections Statsig gate/);
+
+  const unrelatedLinuxGate = "const unrelated=flag||navigator.userAgent.includes(`Linux`);const gate=get(\"4114442250\")";
+  const { value: driftedValue, warnings: driftedWarnings } = captureWarns(() =>
+    remoteConnectionsPatch.apply(unrelatedLinuxGate, {}),
+  );
+  assert.equal(driftedValue, unrelatedLinuxGate);
+  assert.match(driftedWarnings.join("\n"), /Could not find remote connections Statsig gate/);
+
+  const unrelatedRemoteControlLinuxGate =
+    "const unrelated=(flag||navigator.userAgent.includes(`Linux`))&&other;function RD(){return enabled&&state?.available}";
+  const { value: remoteControlDriftedValue, warnings: remoteControlDriftedWarnings } = captureWarns(() =>
+    remoteControlConnectionsPatch.apply(unrelatedRemoteControlLinuxGate, {}),
+  );
+  assert.equal(remoteControlDriftedValue, unrelatedRemoteControlLinuxGate);
+  assert.match(
+    remoteControlDriftedWarnings.join("\n"),
+    /Could not find remote control connections visibility gate/,
+  );
+});
+
+test("remote-control UI descriptors match the current app chunks", () => {
+  const remoteConnectionsPatch = featurePatches.find((patch) => patch.id === "remote-connections-visibility");
+  const remoteControlConnectionsPatch = featurePatches.find((patch) => patch.id === "remote-control-connections-visibility");
+  const experimentalFeaturesPatch = featurePatches.find((patch) => patch.id === "experimental-features");
+
+  assert.ok(
+    remoteConnectionsPatch.pattern.test("app-initial-BTphDPeq.js"),
+  );
+  assert.equal(
+    remoteConnectionsPatch.pattern.test(
+      "app-initial~app-main~hotkey-window-new-thread-page~hotkey-window-home-page~composer-utility-bar-D9zyQF1n.js",
+    ),
+    false,
+  );
+
+  assert.ok(
+    remoteControlConnectionsPatch.pattern.test("app-initial-BTphDPeq.js"),
+  );
+  assert.equal(
+    remoteControlConnectionsPatch.pattern.test(
+      "app-initial~app-main~new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~lzri21pz-DYeTwZrs.js",
+    ),
+    false,
+  );
+
+  assert.ok(experimentalFeaturesPatch.pattern.test("settings-route-state-BwIfDYxh.js"));
+  assert.equal(
+    experimentalFeaturesPatch.pattern.test("experimental-features-queries-old.js"),
+    false,
+  );
 });
 
 test("remote-control UI feature patches matching webview assets and records patch report entries", () => {
@@ -153,25 +210,14 @@ test("remote-control UI feature patches matching webview assets and records patc
         fs.writeFileSync(path.join(buildDir, "main.js"), "console.log('main bundle');");
         fs.writeFileSync(path.join(tempApp, "package.json"), JSON.stringify({ name: "codex" }));
 
+        const appInitialAsset = "app-initial-BTphDPeq.js";
         fs.writeFileSync(
-          path.join(assetsDir, "remote-connection-visibility-test.js"),
-          "function c(){let e=(0,s.c)(3),{data:n}=t(a,r(i)),c=o(`4114442250`);if(n?.config[`features.remote_connections`]===!0)return!0;let l=n?.config.features;if(typeof l!=`object`||!l||Array.isArray(l))return c;let u;return e[0]!==l||e[1]!==c?(u=Object.getOwnPropertyDescriptor(l,`remote_connections`)?.value===!0||c,e[0]=l,e[1]=c,e[2]=u):u=e[2],u}",
+          path.join(assetsDir, appInitialAsset),
+          "function Twt(){let e=(0,kwt.c)(3),{data:t}=Vr(y4,Br(B2)),n=BN(`4114442250`);if(t?.config[`features.remote_connections`]===!0)return!0;let r=t?.config.features;if(typeof r!=`object`||!r||Array.isArray(r))return n;let i;return e[0]!==r||e[1]!==n?(i=Object.getOwnPropertyDescriptor(r,`remote_connections`)?.value===!0||n,e[0]=r,e[1]=n,e[2]=i):i=e[2],i}function D8(e){return e(RN,`4114442250`)?`enabled`:`disabled`}function a({remoteControlConnectionsState:e,slingshotEnabled:t}){return t&&(e?.available??!0)&&e?.accessRequired!==!0}",
         );
         fs.writeFileSync(
-          path.join(assetsDir, "remote-control-connections-visibility-test.js"),
-          "function p(){let e=t(`1042620455`),n=r(`remote_control_connections_state`);return!!e&&n?.available===!0}",
-        );
-        fs.writeFileSync(
-          path.join(assetsDir, "experimental-features-queries-test.js"),
-          "var Z=`remote_control`;function Ie(e){return e.stage===`beta`?e.name!==`memories`&&e.name!==`multi_agent`&&e.name!==`plugins`&&e.name!==`plugin`&&e.name!==`realtime_conversation`&&e.name!==`remote_control`&&e.name!==`chronicle`&&e.name!==`workspace_dependencies`:!1}",
-        );
-        fs.writeFileSync(
-          path.join(assetsDir, "nux-gate-test.js"),
-          "function g(){let e=o(`2798711298`),t=n?.remote_control??!1;return e&&!t}",
-        );
-        fs.writeFileSync(
-          path.join(assetsDir, "app-main-test.js"),
-          "function h(){let e=o(`2798711298`),t=n?.remote_control??!1;return e&&!t&&r!==`CODEX_MOBILE_SETUP_COMPLETED`}",
+          path.join(assetsDir, "settings-route-state-BwIfDYxh.js"),
+          "var Z=`remote_control`;function Ie(e){return e.stage===`beta`?e.name!==`memories`&&e.name!==`multi_agent`&&e.name!==`plugins`&&e.name!==`plugin`&&e.name!==`remote_control`&&!e.name.startsWith(`realtime_`)&&e.name!==`chronicle`&&e.name!==`workspace_dependencies`:!1}",
         );
 
         const report = createPatchReport();
@@ -182,29 +228,32 @@ test("remote-control UI feature patches matching webview assets and records patc
         );
 
         assert.match(
-          fs.readFileSync(path.join(assetsDir, "remote-connection-visibility-test.js"), "utf8"),
+          fs.readFileSync(
+            path.join(assetsDir, appInitialAsset),
+            "utf8",
+          ),
           /navigator\.userAgent\.includes\(`Linux`\)/,
         );
         assert.match(
-          fs.readFileSync(path.join(assetsDir, "remote-control-connections-visibility-test.js"), "utf8"),
+          fs.readFileSync(
+            path.join(assetsDir, appInitialAsset),
+            "utf8",
+          ),
           /navigator\.userAgent\.includes\(`Linux`\)/,
         );
         assert.doesNotMatch(
-          fs.readFileSync(path.join(assetsDir, "experimental-features-queries-test.js"), "utf8"),
+          fs.readFileSync(path.join(assetsDir, "settings-route-state-BwIfDYxh.js"), "utf8"),
           /e\.name!==`remote_control`/,
         );
-        assert.match(
-          fs.readFileSync(path.join(assetsDir, "nux-gate-test.js"), "utf8"),
-          /o\(`2798711298`\)\|\|navigator\.userAgent\.includes\(`Linux`\)/,
-        );
-        assert.match(
-          fs.readFileSync(path.join(assetsDir, "app-main-test.js"), "utf8"),
-          /o\(`2798711298`\)\|\|navigator\.userAgent\.includes\(`Linux`\)/,
-        );
-        assert.ok(
-          report.patches.some((patch) =>
-            patch.name === "feature:remote-control-ui:remote-connections-visibility" && patch.status === "applied"
-          ),
+        assert.deepEqual(
+          report.patches
+            .filter((patch) => patch.featureId === "remote-control-ui")
+            .map((patch) => [patch.name, patch.status]),
+          [
+            ["feature:remote-control-ui:remote-connections-visibility", "applied"],
+            ["feature:remote-control-ui:remote-control-connections-visibility", "applied"],
+            ["feature:remote-control-ui:experimental-features", "applied"],
+          ],
         );
       } finally {
         fs.rmSync(tempApp, { recursive: true, force: true });

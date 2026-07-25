@@ -1,5 +1,5 @@
 {
-  description = "Codex Desktop for Linux installer";
+  description = "ChatGPT Desktop for Linux installer";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -53,6 +53,7 @@
           ];
         };
         flakeSourceCommit = self.rev or (self.dirtyRev or "");
+        flakeSourceRemote = "https://github.com/ilysenko/codex-desktop-linux.git";
         flakeSourceDateEpoch = toString (self.lastModified or 1);
         sourceRoot = pkgs.lib.cleanSourceWith {
           src = ./.;
@@ -63,6 +64,7 @@
             in
               !(pkgs.lib.hasSuffix "/.codex" pathStr || pkgs.lib.hasInfix "/.codex/" pathStr));
         };
+        nixLinuxFeatures = import ./nix/linux-features.nix { lib = pkgs.lib; };
         computerUseBuildSource = pkgs.runCommandLocal "codex-computer-use-linux-source" { } ''
           mkdir -p "$out"
           cp ${./Cargo.lock} "$out/Cargo.lock"
@@ -74,27 +76,38 @@
           cp -R ${./computer-use-linux} "$out/computer-use-linux"
           chmod -R u+w "$out"
         '';
+        notificationActionsBuildSource = pkgs.runCommandLocal "codex-notification-actions-linux-source" { } ''
+          mkdir -p "$out"
+          cp ${./Cargo.lock} "$out/Cargo.lock"
+          cat > "$out/Cargo.toml" <<'EOF'
+          [workspace]
+          members = ["notification-actions-linux"]
+          resolver = "2"
+          EOF
+          cp -R ${./notification-actions-linux} "$out/notification-actions-linux"
+          chmod -R u+w "$out"
+        '';
         nativeModulesBuildSupport = pkgs.runCommandLocal "codex-native-modules-build-support" { } ''
           mkdir -p "$out/scripts/lib"
           cp ${./scripts/lib/native-modules.sh} "$out/scripts/lib/native-modules.sh"
         '';
 
         codexDmg = pkgs.fetchurl {
-          url = "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg";
-          hash = "sha256-MKL+mR5Ibx7W1SUWeWOXM1aNIN7cDXHJieggC8cRxGw=";
+          url = "https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg";
+          hash = "sha256-roZOLe99tW0Lt3qHaly+TkwvVUzMZUzskhuUaJJYPAo=";
         };
 
-        codexVersion = "26.623.141536";
-        electronVersion = "42.1.0";
+        codexVersion = "26.721.41059";
+        electronVersion = "42.3.0";
         electronPlatform =
           {
             x86_64-linux = {
               arch = "x64";
-              hash = "sha256-iCBHNDqeIDxs/F05sWbqngJd0laUPg03EfhnJa0OO9k=";
+              hash = "sha256-SHpmfKanNLlYwWz/HfdNnUTSwYpszNtN1R9jAaNWxCA=";
             };
             aarch64-linux = {
               arch = "arm64";
-              hash = "sha256-HnAPfz2u95TMRSNeUcEXJmSu1JpOdze4iW3cOYv/TX0=";
+              hash = "sha256-Kjdf+XP7e93FOKT2eyFBlH6dclE6G6or6r7Cp/Zc0PA=";
             };
           }.${system} or (throw "codex-desktop-linux Nix package is not supported on ${system}");
 
@@ -105,7 +118,7 @@
 
         electronHeaders = pkgs.fetchurl {
           url = "https://artifacts.electronjs.org/headers/dist/v${electronVersion}/node-v${electronVersion}-headers.tar.gz";
-          hash = "sha256-DPwdIPJS1sKb3RSx88qjDtxkd9uT5aZiBnRCSzjc3f0=";
+          hash = "sha256-ghAJ+cGDAFDYlK755hkGywpTeyAAstm77ZmF//HV4NA=";
         };
 
         browserUseNodeReplRuntime = pkgs.fetchurl {
@@ -156,6 +169,65 @@
             install -Dm0755 "$release_dir/codex-computer-use-linux" "$out/bin/codex-computer-use-linux"
             install -Dm0755 "$release_dir/codex-computer-use-cosmic" "$out/bin/codex-computer-use-cosmic"
             install -Dm0755 "$release_dir/codex-chrome-extension-host" "$out/bin/codex-chrome-extension-host"
+            runHook postInstall
+          '';
+        };
+
+        codexNotificationActionsBinary = pkgs.rustPlatform.buildRustPackage {
+          pname = "codex-notification-actions-linux";
+          version = "0.1.0";
+          src = notificationActionsBuildSource;
+
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+          };
+
+          cargoBuildFlags = [
+            "-p"
+            "codex-notification-actions-linux"
+          ];
+
+          doCheck = true;
+
+          installPhase = ''
+            runHook preInstall
+            release_dir="target/''${CARGO_BUILD_TARGET:-${pkgs.stdenv.hostPlatform.rust.rustcTarget}}/release"
+            if [ ! -d "$release_dir" ]; then
+              release_dir="target/release"
+            fi
+            install -Dm0755 "$release_dir/codex-notification-actions-linux" "$out/bin/codex-notification-actions-linux"
+            runHook postInstall
+          '';
+        };
+
+        codexMcpHelperReaper = pkgs.rustPlatform.buildRustPackage {
+          pname = "codex-mcp-helper-reaper";
+          version = "0.1.0";
+          src = ./linux-features/mcp-helper-reaper/reaper;
+
+          cargoLock = {
+            lockFile = ./linux-features/mcp-helper-reaper/reaper/Cargo.lock;
+          };
+        };
+
+        codexGlobalDictationBinary = pkgs.rustPlatform.buildRustPackage {
+          pname = "codex-global-dictation-linux";
+          version = "0.1.0";
+          src = ./global-dictation-linux;
+
+          cargoLock = {
+            lockFile = ./global-dictation-linux/Cargo.lock;
+          };
+
+          doCheck = false;
+
+          installPhase = ''
+            runHook preInstall
+            release_dir="target/''${CARGO_BUILD_TARGET:-${pkgs.stdenv.hostPlatform.rust.rustcTarget}}/release"
+            if [ ! -d "$release_dir" ]; then
+              release_dir="target/release"
+            fi
+            install -Dm0755 "$release_dir/codex-global-dictation-linux" "$out/bin/codex-global-dictation-linux"
             runHook postInstall
           '';
         };
@@ -261,6 +333,7 @@
           libxi
           libxtst
           libxscrnsaver
+          libnotify
           libglvnd
           systemd
           wayland
@@ -272,6 +345,15 @@
           stdenv.cc.cc.lib
           zlib
         ]);
+        gsettingsSchemaPackages = with pkgs; [
+          gsettings-desktop-schemas
+          gtk3
+        ];
+        gsettingsSchemaRoot = pkg:
+          pkgs.lib.removeSuffix "/glib-2.0/schemas" (pkgs.glib.getSchemaPath pkg);
+        gsettingsSchemaDataDirs =
+          pkgs.lib.concatMapStringsSep ":" gsettingsSchemaRoot gsettingsSchemaPackages;
+        xdgDefaultDataDirs = "/usr/local/share:/usr/share";
         launcherPath = pkgs.lib.makeBinPath (with pkgs; [
           bash
           coreutils
@@ -286,6 +368,11 @@
           systemd
           xdg-utils
         ]);
+        globalDictationRuntimePath = pkgs.lib.makeBinPath (with pkgs; [
+          xdotool
+          xinput
+          xmodmap
+        ]);
 
         patchNixInstalledApp = installDir: ''
           # Patch generated scripts for NixOS systems without /bin/bash.
@@ -293,9 +380,12 @@
             ${pkgs.gnused}/bin/sed -i '1s|^#!/bin/bash$|#!${pkgs.bash}/bin/bash|' "${installDir}/start.sh"
             if ! grep -q "NixOS Electron library path" "${installDir}/start.sh"; then
               # shellcheck disable=SC2016
-              ${pkgs.gnused}/bin/sed -i '2i# NixOS Electron library path for dlopen()ed GL/EGL libraries.\nexport LD_LIBRARY_PATH="${electronLibPath}:${runtimeLibPath}:''${LD_LIBRARY_PATH:-}"' "${installDir}/start.sh"
+              ${pkgs.gnused}/bin/sed -i '/^codex_capture_original_ld_library_path$/a\
+# NixOS Electron library path for dlopen()ed GL/EGL libraries.\
+export LD_LIBRARY_PATH="${electronLibPath}:${runtimeLibPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\
+codex_nixos_add_runtime_library_dirs' "${installDir}/start.sh"
             fi
-            if ! grep -q "codex_nixos_add_runtime_library_dirs" "${installDir}/start.sh"; then
+            if ! grep -q "codex_nixos_add_runtime_library_dirs()" "${installDir}/start.sh"; then
               # shellcheck disable=SC2016
               ${pkgs.gnused}/bin/sed -i '/^set -euo pipefail$/a\
 \
@@ -317,9 +407,7 @@ codex_nixos_add_runtime_library_dirs() {\
     done\
 \
     export LD_LIBRARY_PATH\
-}\
-\
-codex_nixos_add_runtime_library_dirs' "${installDir}/start.sh"
+}' "${installDir}/start.sh"
             fi
             if ! grep -q "Browser Use bundled marketplace metadata" "${installDir}/start.sh"; then
               ${pkgs.python3}/bin/python3 - "${installDir}/start.sh" <<'PY'
@@ -385,13 +473,29 @@ PY
           fi
         '';
 
+        linuxFeaturesConfigFile = config:
+          pkgs.writeText "codex-linux-features.json" (builtins.toJSON config);
+
         linuxFeaturesConfig = linuxFeatureIds:
-          pkgs.writeText "codex-linux-features.json" (builtins.toJSON {
+          linuxFeaturesConfigFile {
             enabled = linuxFeatureIds;
-          });
+          };
+
+        normalizeLinuxFeaturesConfig = config:
+          let
+            enabled = nixLinuxFeatures.normalize (config.enabled or [ ]);
+          in
+          config // {
+            inherit enabled;
+          };
+
+        watchdogLinuxFeaturesConfig = normalizeLinuxFeaturesConfig (
+          builtins.fromJSON (builtins.readFile ./scripts/ci/watchdog-linux-features.json)
+        );
 
         enabledFeatureIds = { enableComputerUseUi ? false, linuxFeatureIds ? [ ] }:
-          pkgs.lib.optionals enableComputerUseUi [ "computer-use-ui" ] ++ linuxFeatureIds;
+          pkgs.lib.optionals enableComputerUseUi [ "computer-use-ui" ]
+          ++ nixLinuxFeatures.normalize linuxFeatureIds;
 
         packageSuffix = args:
           let
@@ -399,9 +503,17 @@ PY
           in
           if featureIds == [ ] then "" else "-${pkgs.lib.concatStringsSep "-" featureIds}";
 
-        mkCodexDesktopPayload = { enableComputerUseUi ? false, linuxFeatureIds ? [ ] }:
+        mkCodexDesktopPayload = { enableComputerUseUi ? false, linuxFeatureIds ? [ ], linuxFeaturesConfigOverride ? null }:
+        let
+          effectiveLinuxFeaturesConfig =
+            if linuxFeaturesConfigOverride == null then
+              normalizeLinuxFeaturesConfig { enabled = linuxFeatureIds; }
+            else
+              normalizeLinuxFeaturesConfig linuxFeaturesConfigOverride;
+          effectiveLinuxFeatureIds = effectiveLinuxFeaturesConfig.enabled;
+        in
         pkgs.stdenv.mkDerivation {
-          pname = "codex-desktop${packageSuffix { inherit enableComputerUseUi linuxFeatureIds; }}-payload";
+          pname = "codex-desktop${packageSuffix { inherit enableComputerUseUi; linuxFeatureIds = effectiveLinuxFeatureIds; }}-payload";
           version = codexVersion;
           src = sourceRoot;
           __structuredAttrs = true;
@@ -420,6 +532,7 @@ PY
             pkgs.patchelf
             pkgs.python3
             pkgs.unzip
+            pkgs.util-linux
           ];
 
           dontConfigure = true;
@@ -438,6 +551,7 @@ PY
             export SOURCE_DATE_EPOCH="${flakeSourceDateEpoch}"
             ${pkgs.lib.optionalString (flakeSourceCommit != "") ''
             export CODEX_LINUX_SOURCE_COMMIT="${flakeSourceCommit}"
+            export CODEX_LINUX_SOURCE_REMOTE="${flakeSourceRemote}"
             ''}
             ${pkgs.lib.optionalString enableComputerUseUi ''
             export CODEX_LINUX_ENABLE_COMPUTER_USE_UI=1
@@ -446,7 +560,7 @@ PY
             export CXXFLAGS="''${CXXFLAGS:-} -ffile-prefix-map=$TMPDIR=/build -fdebug-prefix-map=$TMPDIR=/build -fmacro-prefix-map=$TMPDIR=/build"
             export RUSTFLAGS="''${RUSTFLAGS:-} --remap-path-prefix=$TMPDIR=/build -C link-arg=-Wl,--build-id=none"
             export CODEX_MANAGED_NODE_SOURCE="${pkgs.nodejs}"
-            export CODEX_LINUX_FEATURES_CONFIG="${linuxFeaturesConfig linuxFeatureIds}"
+            export CODEX_LINUX_FEATURES_CONFIG="${linuxFeaturesConfigFile effectiveLinuxFeaturesConfig}"
             export CODEX_ELECTRON_ZIP_SOURCE="${electronZip}"
             export CODEX_NATIVE_MODULES_SOURCE="${codexNativeModules}"
             ${pkgs.lib.optionalString (browserUseNodeRepl != null) ''
@@ -455,6 +569,13 @@ PY
             export CODEX_LINUX_COMPUTER_USE_BACKEND_SOURCE="${codexComputerUseBinaries}/bin/codex-computer-use-linux"
             export CODEX_LINUX_COMPUTER_USE_COSMIC_SOURCE="${codexComputerUseBinaries}/bin/codex-computer-use-cosmic"
             export CODEX_CHROME_EXTENSION_HOST_SOURCE="${codexComputerUseBinaries}/bin/codex-chrome-extension-host"
+            export CODEX_NOTIFICATION_ACTIONS_SOURCE="${codexNotificationActionsBinary}/bin/codex-notification-actions-linux"
+            ${pkgs.lib.optionalString (builtins.elem "mcp-helper-reaper" effectiveLinuxFeatureIds) ''
+            export CODEX_MCP_HELPER_REAPER_SOURCE="${codexMcpHelperReaper}/bin/codex-mcp-helper-reaper"
+            ''}
+            ${pkgs.lib.optionalString (builtins.elem "global-dictation" effectiveLinuxFeatureIds) ''
+            export CODEX_GLOBAL_DICTATION_LINUX_SOURCE="${codexGlobalDictationBinary}/bin/codex-global-dictation-linux"
+            ''}
             mkdir -p "$HOME" "$npm_config_cache" "$CARGO_HOME"
 
             source_dir="$TMPDIR/codex-source"
@@ -482,12 +603,26 @@ PY
           '';
         };
 
-        mkCodexDesktop = { enableComputerUseUi ? false, linuxFeatureIds ? [ ] }:
+        buildCodexDesktop = { enableComputerUseUi ? false, linuxFeatureIds ? [ ], linuxFeaturesConfigOverride ? null }:
         let
-          featureArgs = { inherit enableComputerUseUi linuxFeatureIds; };
-          payload = mkCodexDesktopPayload {
-            inherit enableComputerUseUi linuxFeatureIds;
+          effectiveLinuxFeaturesConfig =
+            if linuxFeaturesConfigOverride == null then
+              normalizeLinuxFeaturesConfig { enabled = linuxFeatureIds; }
+            else
+              normalizeLinuxFeaturesConfig linuxFeaturesConfigOverride;
+          normalizedLinuxFeatureIds = effectiveLinuxFeaturesConfig.enabled;
+          featureArgs = {
+            inherit enableComputerUseUi;
+            linuxFeatureIds = normalizedLinuxFeatureIds;
           };
+          payload = mkCodexDesktopPayload {
+            inherit enableComputerUseUi;
+            linuxFeatureIds = normalizedLinuxFeatureIds;
+            linuxFeaturesConfigOverride = effectiveLinuxFeaturesConfig;
+          };
+          payloadLauncherPath = launcherPath + pkgs.lib.optionalString
+            (builtins.elem "global-dictation" normalizedLinuxFeatureIds)
+            ":${globalDictationRuntimePath}";
         in
         pkgs.stdenv.mkDerivation {
           pname = "codex-desktop${packageSuffix featureArgs}";
@@ -523,10 +658,30 @@ PY
               --unpack "{*.node,*.so,*.dylib}"
             rm -rf "$resources_dir/app-extracted"
 
-            if [ -f "$resources_dir/node_repl" ]; then
-              patchelf --set-interpreter "$(cat ${pkgs.stdenv.cc}/nix-support/dynamic-linker)" \
-                --set-rpath "${pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.glibc ]}" \
-                "$resources_dir/node_repl"
+            for node_repl_binary in \
+              "$resources_dir/node_repl" \
+              "$resources_dir/node_repl.codex-linux-original"; do
+              if [ -f "$node_repl_binary" ] \
+                  && [ "$(dd if="$node_repl_binary" bs=1 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; then
+                patchelf --set-interpreter "$(cat ${pkgs.stdenv.cc}/nix-support/dynamic-linker)" \
+                  --set-rpath "${pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.glibc ]}" \
+                  "$node_repl_binary"
+              fi
+            done
+
+            if [ -f "$resources_dir/node_repl.codex-linux-original" ]; then
+              node_repl_interpreter="$(patchelf --print-interpreter \
+                "$resources_dir/node_repl.codex-linux-original")"
+              node_repl_rpath="$(patchelf --print-rpath \
+                "$resources_dir/node_repl.codex-linux-original")"
+              case "$node_repl_interpreter" in
+                /nix/store/*) ;;
+                *) echo "node_repl backup has non-Nix interpreter: $node_repl_interpreter" >&2; exit 1 ;;
+              esac
+              case "$node_repl_rpath" in
+                *"/nix/store/"*) ;;
+                *) echo "node_repl backup has non-Nix RPATH: $node_repl_rpath" >&2; exit 1 ;;
+              esac
             fi
 
             ${patchNixInstalledApp "$out/opt/codex-desktop"}
@@ -541,9 +696,9 @@ PY
               --replace-fail "/usr/share/applications/codex-desktop.desktop" "$out/share/applications/codex-desktop.desktop"
 
             makeWrapper "$out/opt/codex-desktop/start.sh" "$out/bin/codex-desktop" \
-              --prefix PATH : "${launcherPath}" \
-              --prefix LD_LIBRARY_PATH : "${electronLibPath}" \
-              --prefix LD_LIBRARY_PATH : "${runtimeLibPath}" \
+              --prefix PATH : "${payloadLauncherPath}" \
+              --run 'export XDG_DATA_DIRS="''${XDG_DATA_DIRS:-${xdgDefaultDataDirs}}"' \
+              --prefix XDG_DATA_DIRS : "${gsettingsSchemaDataDirs}" \
               --prefix PATH : "/run/current-system/sw/bin" \
               --prefix PATH : "/etc/profiles/per-user/$(whoami)/bin"
 
@@ -556,9 +711,9 @@ PY
                 featureIds = enabledFeatureIds featureArgs;
               in
               if featureIds == [ ] then
-                "Codex Desktop for Linux"
+                "ChatGPT Desktop for Linux"
               else
-                "Codex Desktop for Linux with ${pkgs.lib.concatStringsSep ", " featureIds} enabled";
+                "ChatGPT Desktop for Linux with ${pkgs.lib.concatStringsSep ", " featureIds} enabled";
             homepage = "https://github.com/ilysenko/codex-desktop-linux";
             license = pkgs.lib.licenses.mit;
             platforms = pkgs.lib.platforms.linux;
@@ -566,19 +721,23 @@ PY
           };
         };
 
-        codexDesktop = mkCodexDesktop { };
+        codexDesktop = pkgs.lib.makeOverridable buildCodexDesktop { };
 
-        codexDesktopComputerUseUi = mkCodexDesktop {
+        codexDesktopComputerUseUi = codexDesktop.override {
           enableComputerUseUi = true;
         };
 
-        codexDesktopRemoteMobileControl = mkCodexDesktop {
+        codexDesktopRemoteMobileControl = codexDesktop.override {
           linuxFeatureIds = [ "remote-mobile-control" ];
         };
 
-        codexDesktopComputerUseUiRemoteMobileControl = mkCodexDesktop {
+        codexDesktopComputerUseUiRemoteMobileControl = codexDesktop.override {
           enableComputerUseUi = true;
           linuxFeatureIds = [ "remote-mobile-control" ];
+        };
+
+        codexDesktopWatchdogFeatureCheck = codexDesktop.override {
+          linuxFeaturesConfigOverride = watchdogLinuxFeaturesConfig;
         };
 
         installer = pkgs.writeShellApplication {
@@ -614,6 +773,7 @@ PY
             cd "$source_dir"
             export CODEX_INSTALL_DIR="''${CODEX_INSTALL_DIR:-$root_dir/codex-app}"
             export CODEX_MANAGED_NODE_SOURCE="${pkgs.nodejs}"
+            export CODEX_NOTIFICATION_ACTIONS_SOURCE="${codexNotificationActionsBinary}/bin/codex-notification-actions-linux"
             ${pkgs.bash}/bin/bash "$source_dir/install.sh" "$source_dir/Codex.dmg" "$@"
 
             install_dir="''${CODEX_INSTALL_DIR:-$root_dir/codex-app}"
@@ -630,6 +790,56 @@ PY
           codex-desktop-remote-mobile-control = codexDesktopRemoteMobileControl;
           codex-desktop-computer-use-ui-remote-mobile-control = codexDesktopComputerUseUiRemoteMobileControl;
           installer = installer;
+        };
+
+        checks = {
+          notification-actions-linux = codexNotificationActionsBinary;
+          notification-actions-installer = pkgs.runCommand "codex-notification-actions-installer-check" { } ''
+            grep -F 'CODEX_NOTIFICATION_ACTIONS_SOURCE=' ${installer}/bin/codex-desktop-installer >/dev/null
+            touch "$out"
+          '';
+          nix-gsettings-schema-wrapper = pkgs.runCommand "codex-desktop-nix-gsettings-schema-wrapper-check" { } ''
+            schema_data_dirs=${pkgs.lib.escapeShellArg gsettingsSchemaDataDirs}
+            default_data_dirs=${pkgs.lib.escapeShellArg xdgDefaultDataDirs}
+            explicit_data_dirs=/custom/share:/other/share
+
+            run_wrapper() {
+              case "$1" in
+                unset) unset XDG_DATA_DIRS ;;
+                empty) export XDG_DATA_DIRS= ;;
+                populated) export XDG_DATA_DIRS="$explicit_data_dirs" ;;
+                *) echo "unknown test case: $1" >&2; return 1 ;;
+              esac
+
+              exec() {
+                printf '%s\n' "$XDG_DATA_DIRS"
+              }
+
+              source ${codexDesktop}/bin/codex-desktop
+            }
+
+            assert_data_dirs() {
+              test_case="$1"
+              expected="$2"
+              actual="$(run_wrapper "$test_case")"
+              if [ "$actual" != "$expected" ]; then
+                printf '%s: expected <%s>, got <%s>\n' \
+                  "$test_case" "$expected" "$actual" >&2
+                return 1
+              fi
+            }
+
+            expected_defaults="$schema_data_dirs:$default_data_dirs"
+            assert_data_dirs unset "$expected_defaults"
+            assert_data_dirs empty "$expected_defaults"
+            assert_data_dirs populated "$schema_data_dirs:$explicit_data_dirs"
+            touch "$out"
+          '';
+          nix-linux-features-evaluation = import ./nix/linux-features-test.nix {
+            inherit pkgs self system;
+          };
+          watchdog-linux-features = codexDesktopWatchdogFeatureCheck;
+          nix-linux-features-multi-feature = codexDesktopWatchdogFeatureCheck;
         };
 
         apps.default = {

@@ -9,7 +9,6 @@ SPEC_TEMPLATE="$REPO_DIR/packaging/linux/codex-desktop.spec"
 DESKTOP_TEMPLATE="$REPO_DIR/packaging/linux/codex-desktop.desktop"
 SERVICE_TEMPLATE="$REPO_DIR/packaging/linux/codex-update-manager.service"
 USER_SERVICE_HELPER_TEMPLATE="$REPO_DIR/packaging/linux/codex-update-manager-user-service.sh"
-ICON_SOURCE="$REPO_DIR/assets/codex-linux.png"
 PACKAGED_RUNTIME_TEMPLATE="$REPO_DIR/packaging/linux/codex-packaged-runtime.sh"
 
 PACKAGE_NAME="${PACKAGE_NAME:-codex-desktop}"
@@ -24,6 +23,8 @@ UPDATE_BUILDER_ROOT_PLACEHOLDER="__UPDATE_BUILDER_ROOT__"
 # Keep the installed update-builder payload aligned with the other package formats.
 # shellcheck source=scripts/lib/package-common.sh
 . "$REPO_DIR/scripts/lib/package-common.sh"
+
+ICON_SOURCE="$(resolve_package_icon_source)"
 
 info()  { echo "[INFO] $*" >&2; }
 error() { echo "[ERROR] $*" >&2; exit 1; }
@@ -64,8 +65,7 @@ main() {
         RPM_BINARY_PAYLOAD="w19T${MAX_BUILD_THREADS}.zstdio"
     fi
 
-    [ -d "$APP_DIR" ] || error "Missing app directory: $APP_DIR. Run ./install.sh first."
-    [ -x "$APP_DIR/start.sh" ] || error "Missing launcher: $APP_DIR/start.sh"
+    ensure_app_layout
     [ -f "$SPEC_TEMPLATE" ] || error "Missing spec template: $SPEC_TEMPLATE"
     [ -f "$DESKTOP_TEMPLATE" ] || error "Missing desktop template: $DESKTOP_TEMPLATE"
     [ -f "$ICON_SOURCE" ] || error "Missing icon: $ICON_SOURCE"
@@ -101,9 +101,11 @@ main() {
 exec /opt/$PACKAGE_NAME/start.sh "\$@"
 SCRIPT
     chmod 0755 "$staging_root/usr/bin/$PACKAGE_NAME"
+    stage_linux_feature_package_resources "$staging_root" "rpm"
     run_linux_feature_package_hooks "$staging_root" "rpm"
     normalize_package_payload_permissions "$staging_root"
     restore_linux_feature_payload_permissions "$staging_root"
+    restore_linux_feature_package_resource_permissions "$staging_root" "rpm"
 
     local spec_file="$build_root/codex-desktop.spec"
     sed \
@@ -114,6 +116,26 @@ SCRIPT
         -e "s/__ARCH__/$arch/g" \
         -e "s/__PACKAGE_WITH_UPDATER__/$(package_with_updater_enabled && echo 1 || echo 0)/g" \
         "$SPEC_TEMPLATE" > "$spec_file"
+    local feature_dependency_suffix
+    local feature_files
+    if ! feature_dependency_suffix="$(
+        linux_feature_package_dependency_suffix rpm "$staging_root/opt/$PACKAGE_NAME"
+    )"; then
+        error "Failed to render Linux feature dependencies for rpm"
+    fi
+    if ! feature_files="$(
+        linux_feature_package_files rpm "$staging_root/opt/$PACKAGE_NAME"
+    )"; then
+        error "Failed to render Linux feature files for rpm"
+    fi
+    replace_literal_file_token \
+        "$spec_file" \
+        ", __LINUX_FEATURE_DEPENDENCIES__" \
+        "$feature_dependency_suffix"
+    replace_literal_file_token \
+        "$spec_file" \
+        "__LINUX_FEATURE_FILES__" \
+        "$feature_files"
 
     local rpmbuild_dir="$build_root/rpmbuild"
     mkdir -p \

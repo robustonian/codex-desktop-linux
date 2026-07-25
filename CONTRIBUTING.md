@@ -1,8 +1,10 @@
+**IMPORTANT: PLEASE KEEP ONLY ONE PULL REQUEST OPEN AT A TIME. THE DEFAULT MAXIMUM IS TWO ACTIVE PULL REQUESTS FROM THE SAME CONTRIBUTOR, AND EVEN THAT SHOULD BE RESERVED FOR EXCEPTIONAL CIRCUMSTANCES. MAINTAINERS MAY CONFIGURE A DIFFERENT PER-CONTRIBUTOR LIMIT FOR EXPLICIT EXCEPTIONS. DO NOT OPEN SEVERAL PULL REQUESTS AT ONCE; FINISH OR CLOSE EXISTING WORK BEFORE SUBMITTING MORE. AN AUTOMATED BOT WILL CLOSE PULL REQUESTS THAT EXCEED THE EFFECTIVE LIMIT.**
+
 **IMPORTANT: THIS PROJECT SUPPORTS ONLY THE LATEST UPSTREAM `CODEX.DMG`. WHEN FIXING UPSTREAM DRIFT, REMOVE OLD DRIFT WORKAROUNDS IN THE SAME PULL REQUEST. DO NOT KEEP LEGACY DMG SHAPES, FALLBACK PATCH PATHS, OR VERSION-SPECIFIC COMPATIBILITY ZOOS AROUND. THE CODE SHOULD TARGET THE CURRENT DMG SO REVIEW, VALIDATION, AND DIAGNOSTICS DO NOT HAVE TO GUESS WHICH UPSTREAM VERSION FAILED.**
 
-# Contributing to Codex Desktop for Linux
+# Contributing to ChatGPT Desktop for Linux
 
-Thanks for your interest in contributing to Codex Desktop for Linux. This project adapts the official macOS Codex Desktop DMG into a runnable Linux app, packages it for multiple Linux distributions, and maintains a local Rust update manager for future rebuilds.
+Thanks for your interest in contributing to ChatGPT Desktop for Linux. This project adapts the official macOS ChatGPT Desktop DMG into a runnable Linux app, packages it for multiple Linux distributions, and maintains a local Rust update manager for future rebuilds.
 
 Contributions of all sizes are welcome: bug reports, documentation improvements, packaging fixes, installer updates, tests, and new features.
 
@@ -13,7 +15,7 @@ Contributions of all sizes are welcome: bug reports, documentation improvements,
 - Avoid mixed pull requests that combine unrelated fixes, refactors, formatting, docs, or cleanup.
 - Think through the impact on every supported path: source installs, `.deb`, `.rpm`, pacman packages, Nix, updater rebuilds, and different desktop environments.
 - Preserve existing platform behavior unless the pull request explicitly explains why it must change.
-- If a feature is not part of the standard upstream Codex Desktop experience and is not required Linux compatibility glue, implement it as an opt-in `linux-features/` module instead of a core patch.
+- If a feature is not part of the standard upstream ChatGPT Desktop experience and is not required Linux compatibility glue, implement it as an opt-in `linux-features/` module instead of a core patch.
 - Include a short summary, the user-visible behavior change, and the validation you ran.
 
 ## Before You Start
@@ -58,6 +60,22 @@ Good issue reports usually include:
 - exact commands used
 - expected behavior
 - actual behavior
+
+### Labels and maintainer triage
+
+Repository labels are assigned by maintainers and authorized collaborators
+during triage. Contributors without repository label permission should provide
+the facts needed to classify the work; they should not self-assign, request,
+or guess labels. A new item with no labels is waiting for triage, not rejected.
+
+Coding agents follow the same boundary. Without explicit delegated label
+authority, an agent may propose a classification to authorized staff but must
+not create, apply, remove, or rename labels. Staff-authorized repository
+automation may apply deterministic classifications from the policy. Bulk
+catalog changes remain restricted to the trusted manual workflow.
+
+Read [issue and pull request label governance](docs/label-governance.md) for
+the authority model, taxonomy, selection rules, and migration process.
 
 ## Development Setup
 
@@ -311,4 +329,4 @@ Please avoid:
 
 ## Thank You
 
-Every improvement helps make Codex Desktop for Linux more reliable across distributions, desktop environments, and packaging formats. Thanks for taking the time to contribute thoughtfully.
+Every improvement helps make ChatGPT Desktop for Linux more reliable across distributions, desktop environments, and packaging formats. Thanks for taking the time to contribute thoughtfully.

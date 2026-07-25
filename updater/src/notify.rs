@@ -4,7 +4,7 @@ use anyhow::Result;
 use notify_rust::{Hint, Timeout};
 use std::path::{Path, PathBuf};
 
-const APP_NAME: &str = "Codex Desktop";
+const APP_NAME: &str = "ChatGPT Desktop";
 const DESKTOP_ENTRY: &str = "codex-desktop";
 const PACKAGED_BUNDLE_ICON_PATH: &str = "/opt/codex-desktop/.codex-linux/codex-desktop.png";
 const SYSTEM_ICON_PATH: &str = "/usr/share/icons/hicolor/256x256/apps/codex-desktop.png";

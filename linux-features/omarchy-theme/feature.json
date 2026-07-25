@@ -1,0 +1,28 @@
+{
+  "id": "omarchy-theme",
+  "title": "Omarchy Theme",
+  "description": "Loads user CSS generated from the active Omarchy theme into Codex Desktop.",
+  "defaultEnabled": false,
+  "entrypoints": {
+    "patchDescriptors": "./patch.js"
+  },
+  "resources": [
+    {
+      "source": "codex-desktop.css.tpl",
+      "target": ".codex-linux/features/omarchy-theme/codex-desktop.css.tpl",
+      "mode": "0644"
+    }
+  ],
+  "runtimeHooks": {
+    "env": {
+      "source": "user-stylesheet.env",
+      "name": "user-stylesheet.env",
+      "mode": "0644"
+    },
+    "prelaunch": {
+      "source": "install-template.sh",
+      "name": "install-template.sh",
+      "mode": "0755"
+    }
+  }
+}

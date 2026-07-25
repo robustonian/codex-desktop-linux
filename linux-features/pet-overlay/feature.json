@@ -1,0 +1,28 @@
+{
+  "id": "pet-overlay",
+  "title": "Pet Overlay",
+  "description": "Optional Linux avatar overlay placement and compositor hints.",
+  "defaultEnabled": false,
+  "entrypoints": {
+    "patchDescriptors": "./patch.js"
+  },
+  "runtimeHooks": {
+    "launcher": {
+      "source": "launcher-hook.sh",
+      "name": "gpu-compositing-default.sh",
+      "mode": "0755"
+    }
+  },
+  "petOverlay": {
+    "gravity": "bottom-right",
+    "margin": 24,
+    "allWorkspaces": true,
+    "alwaysOnTop": true,
+    "skipTaskbar": true,
+    "lockPosition": false,
+    "mode": "interactive",
+    "hyprland": true,
+    "kwin": true,
+    "niri": true
+  }
+}

@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=Codex Desktop
-Comment=OpenAI Codex desktop wrapper for Linux
+Name=ChatGPT
+Comment=OpenAI ChatGPT Desktop wrapper for Linux
 Exec=env BAMF_DESKTOP_FILE_HINT=@HOME@/.local/share/applications/codex-desktop.desktop CHROME_DESKTOP=codex-desktop.desktop @HOME@/.local/bin/codex-desktop %U
 TryExec=@HOME@/.local/bin/codex-desktop
 Terminal=false

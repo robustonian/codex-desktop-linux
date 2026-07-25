@@ -3,13 +3,13 @@
  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
  "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
 <policyconfig>
-  <vendor>Codex Desktop Linux</vendor>
+  <vendor>ChatGPT Desktop for Linux</vendor>
   <vendor_url>https://github.com/ilysenko/codex-desktop-linux</vendor_url>
   <icon_name>codex-desktop</icon_name>
 
   <action id="com.github.ilysenko.codex-desktop-linux.update.install-deb">
-    <description>Install a Codex Desktop update</description>
-    <message>Authentication is required to install the Codex Desktop update.</message>
+    <description>Install a ChatGPT Desktop update</description>
+    <message>Authentication is required to install the ChatGPT Desktop update.</message>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
@@ -20,8 +20,8 @@
   </action>
 
   <action id="com.github.ilysenko.codex-desktop-linux.update.install-rpm">
-    <description>Install a Codex Desktop update</description>
-    <message>Authentication is required to install the Codex Desktop update.</message>
+    <description>Install a ChatGPT Desktop update</description>
+    <message>Authentication is required to install the ChatGPT Desktop update.</message>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
@@ -32,8 +32,8 @@
   </action>
 
   <action id="com.github.ilysenko.codex-desktop-linux.update.install-pacman">
-    <description>Install a Codex Desktop update</description>
-    <message>Authentication is required to install the Codex Desktop update.</message>
+    <description>Install a ChatGPT Desktop update</description>
+    <message>Authentication is required to install the ChatGPT Desktop update.</message>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
@@ -44,8 +44,8 @@
   </action>
 
   <action id="com.github.ilysenko.codex-desktop-linux.update.rollback-deb">
-    <description>Roll back a Codex Desktop update</description>
-    <message>Authentication is required to roll back the Codex Desktop update.</message>
+    <description>Roll back a ChatGPT Desktop update</description>
+    <message>Authentication is required to roll back the ChatGPT Desktop update.</message>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
@@ -56,8 +56,8 @@
   </action>
 
   <action id="com.github.ilysenko.codex-desktop-linux.update.rollback-rpm">
-    <description>Roll back a Codex Desktop update</description>
-    <message>Authentication is required to roll back the Codex Desktop update.</message>
+    <description>Roll back a ChatGPT Desktop update</description>
+    <message>Authentication is required to roll back the ChatGPT Desktop update.</message>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
@@ -68,8 +68,8 @@
   </action>
 
   <action id="com.github.ilysenko.codex-desktop-linux.update.rollback-pacman">
-    <description>Roll back a Codex Desktop update</description>
-    <message>Authentication is required to roll back the Codex Desktop update.</message>
+    <description>Roll back a ChatGPT Desktop update</description>
+    <message>Authentication is required to roll back the ChatGPT Desktop update.</message>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>

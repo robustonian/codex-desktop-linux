@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This repository adapts the official macOS Codex Desktop DMG into a runnable
+This repository adapts the official macOS ChatGPT Desktop DMG into a runnable
 Linux app, packages it as `.deb`, `.rpm`, pacman, and AppImage artifacts, and
 ships a local Rust update manager that can rebuild future Linux packages from
 newer upstream DMGs.
@@ -39,6 +39,37 @@ update-builder bundle.
   cross-format changes unless the code explicitly scopes them to one package
   format or desktop target.
 
+## Issue And Pull Request Labels
+
+- [`.github/labels.json`](.github/labels.json) is the source of truth for label
+  names, colors, descriptions, groups, migrations, and retirements. Follow
+  [label governance](docs/label-governance.md) when classifying an issue or
+  pull request.
+- Labels are staff-managed. Contributors without repository label permission
+  do not determine their own labels. An agent without explicit delegated label
+  authority may propose a classification to an authorized maintainer or
+  collaborator, but it must not mutate repository labels.
+- An authorized agent operation must show a read-only plan first and use the
+  trusted manual workflow or `scripts/ci/manage-labels.js` with the required
+  typed confirmation. Never run write-capable label code from a fork pull
+  request or other untrusted ref.
+- After triage starts, issues have one `type:`, one or more `area:`, and one
+  active `status:` label. Pull requests have one `type:`, one or more `area:`,
+  and one `risk:` label. Use multiple areas only for real ownership boundaries.
+- Read native checks, draft state, mergeability, reviews, timestamps, and
+  open/closed state directly from GitHub. Do not duplicate them with labels.
+- `workflow: manual only` is a hard stop for item-specific automation: it may
+  inspect the item but must not comment, edit, classify, close, or merge it.
+  Only an owner-approved catalog migration declared in `.github/labels.json`
+  may preserve an existing classification under a replacement name.
+  `risk: low` never grants merge authority.
+- Do not infer labels from a title alone. Preserve uncertainty with the
+  appropriate triage status. Apply `resolution: duplicate` only after the
+  canonical item is verified and linked.
+- Never expose suspected secrets or an undisclosed vulnerability through a
+  public label. Use `type: security` only for public hardening or an already
+  disclosed concern.
+
 ## Source Routing
 
 Use source files, not generated artifacts. Main routing:
@@ -52,6 +83,8 @@ Use source files, not generated artifacts. Main routing:
 - Linux features: `linux-features/<id>/`.
 - Package builders: `scripts/build-*.sh` and `scripts/lib/package-common.sh`.
 - Updater: `updater/src/`.
+- Upstream DMG automation: `scripts/automation/upstream-dmg-watchdog/` and
+  `docs/upstream-dmg-watchdog.md`.
 - Computer Use: `computer-use-linux/`; compositor backends under
   `computer-use-linux/src/windowing/backends/`.
 - Nix: `flake.nix`, `flake.lock`, and `nix/`.
@@ -62,9 +95,13 @@ Detailed agent docs: [repository map](docs/agents/repository-map.md),
 
 Primary human docs: [architecture](docs/architecture.md),
 [build and packaging](docs/build-and-packaging.md),
+[native setup](docs/native-setup.md),
 [Linux features](docs/linux-features-architecture.md),
 [updater](docs/updater.md), [Linux Computer Use](docs/linux-computer-use.md),
+[Record and Replay](docs/record-and-replay-linux.md),
 [Nix](docs/nix.md), and [troubleshooting](docs/troubleshooting.md).
+
+Repository governance: [issue and pull request labels](docs/label-governance.md).
 
 ## Patch And Feature Rules
 
@@ -99,9 +136,10 @@ Primary human docs: [architecture](docs/architecture.md),
   set too.
 - GUI launchers often do not inherit shell `PATH`. The generated launcher
   searches common Codex CLI and `nvm` locations and respects `CODEX_CLI_PATH`.
-- CLI preflight is launcher-scoped and best-effort. It can prompt to install
-  or update the Codex CLI, but failures should warn rather than block app
-  launch.
+- CLI preflight is launcher-scoped and normally best-effort. A detected npm CLI
+  missing its required Linux optional dependency is the exception: the launcher
+  performs one bounded synchronous repair and blocks Electron startup if that
+  repair fails or times out, because the known-broken CLI cannot serve the app.
 - The generated launcher starts the local webview server before Electron and
   verifies the expected startup markers. See
   [webview server evaluation](docs/webview-server-evaluation.md) before
@@ -117,13 +155,28 @@ Primary human docs: [architecture](docs/architecture.md),
   `systemd --user` updater service on a best-effort basis.
 - Failed privileged updater installs stay failed until a newer rebuild or an
   explicit retry path; avoid auto-retrying every reconcile cycle.
+- Automated user-local updater paths must force acceptance and running-app
+  overrides off. They may build alongside a running app, but promotion must
+  wait for exit or fail without replacing the installed runtime.
+- Transactional app promotion retains only the immediately previous managed
+  app backup; older exact managed backups are pruned under the promotion lock.
 - Manual rollback uses the last-known-good package recorded in updater state
   and the same format-specific command layer as normal installs.
+- Local installs, updater rebuilds, and scheduled CI use the same upstream DMG
+  acceptance profile. Build into a sibling candidate and promote it only after
+  an `accepted` or `accepted_with_warnings` verdict. Only user-enabled Linux
+  features participate in local/updater acceptance, and drift in any enabled
+  feature rejects the candidate. Disabled features are not probed. Rejected or
+  inconclusive candidates must not replace the working app.
+- Existing local apps are promoted with atomic directory exchange and a durable
+  recovery journal. Do not reintroduce a two-rename window in which the
+  canonical install path is absent, and do not fall back when the filesystem
+  lacks atomic exchange support.
 
 ## Generated Artifacts
 
 Treat these as generated or local runtime state, not primary source:
-`codex-app/`, `codex-app-next/`, `codex-*-app/`, `dist/`,
+`codex-app/`, `codex-app-next/`, `.codex-app.candidate-*`, `codex-*-app/`, `dist/`,
 `dist/appimage.AppDir/`, `dist-next/rebuild/`, `target/`, `Codex.dmg`,
 `linux-features/features.json`, `linux-features/local/`,
 `codex-app/.codex-linux/linux-features-staged.json`, updater config/state/log
@@ -154,7 +207,7 @@ Side-by-side rebuild candidate: `./scripts/rebuild-candidate.sh` or
 
 ## Runtime Expectations
 
-- `python3`, `7z`, `curl`, `unzip`, `tar`, `make`, and `g++` are required for
+- `python3`, `7z`, `curl`, `unzip`, `tar`, `flock`, `make`, and `g++` are required for
   `install.sh`.
 - Native package builders require their format-specific tools: `dpkg-deb`,
   `rpmbuild`, `makepkg`/pacman tooling, or `appimagetool`.
@@ -192,7 +245,9 @@ for broad cross-format confidence.
   when adding or removing shared payload files.
 - Keep new core patch descriptors fail-soft and idempotent unless there is a
   deliberate `required-upstream` CI policy.
-- Keep optional feature patches optional in CI and disabled by default.
+- Keep optional features disabled by default. When a user enables one, its
+  patch drift must block candidate promotion until the user disables it or the
+  feature is repaired for the current DMG.
 - Add tests near the behavior being changed: patcher tests for ASAR needles,
   feature tests for Linux features, Rust tests for updater/MCP backends, and
   package smoke checks for payload/layout changes.
