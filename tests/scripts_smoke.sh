@@ -7063,6 +7063,7 @@ codex_cli_missing_optional_dependency() {
     [ "${BROKEN_CLI:-0}" = "1" ]
 }
 run_cli_preflight_background() { printf 'background=1\n' >> "$ROUTING_LOG"; }
+configure_codex_profile_cli_path() { :; }
 log_codex_cli_path() { printf 'version=final\n' >> "$ROUTING_LOG"; }
 launch_electron() { printf 'electron=launch\n' >> "$ROUTING_LOG"; }
 '''
@@ -7092,17 +7093,19 @@ PY
     [ "$selected_cli" = "$path_cli_bin/codex" ] || fail "CLI lookup must keep the first PATH hit, got $selected_cli"
 
     local brew_home="$workspace/brew-home"
-    mkdir -p "$brew_home/.linuxbrew/bin"
+    local gui_tool_bin="$workspace/gui-tool-bin"
+    mkdir -p "$brew_home/.linuxbrew/bin" "$gui_tool_bin"
+    ln -s "$(command -v bash)" "$gui_tool_bin/bash"
     printf '#!/usr/bin/env bash\nprintf "codex-cli 0.160.0\\n"\n' > "$brew_home/.linuxbrew/bin/codex"
     chmod +x "$brew_home/.linuxbrew/bin/codex"
-    selected_cli="$(env -i PATH="$clean_tool_path" HOME="$brew_home" "$launcher_probe" find)"
+    selected_cli="$(env -i PATH="$gui_tool_bin" HOME="$brew_home" "$launcher_probe" find)"
     [ "$selected_cli" = "$brew_home/.linuxbrew/bin/codex" ] || fail "CLI lookup must find Linuxbrew installs with a GUI PATH, got $selected_cli"
 
     local brew_prefix="$workspace/linuxbrew-prefix"
     mkdir -p "$brew_prefix/bin"
     printf '#!/usr/bin/env bash\nprintf "codex-cli 0.161.0\\n"\n' > "$brew_prefix/bin/codex"
     chmod +x "$brew_prefix/bin/codex"
-    selected_cli="$(env -i PATH="$clean_tool_path" HOME="$workspace/empty-home" HOMEBREW_PREFIX="$brew_prefix" "$launcher_probe" find)"
+    selected_cli="$(env -i PATH="$gui_tool_bin" HOME="$workspace/empty-home" HOMEBREW_PREFIX="$brew_prefix" "$launcher_probe" find)"
     [ "$selected_cli" = "$brew_prefix/bin/codex" ] || fail "CLI lookup must honor HOMEBREW_PREFIX, got $selected_cli"
 
     local resolve_bin="$workspace/resolve-bin"

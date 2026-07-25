@@ -185,6 +185,7 @@ const {
   applyLinuxFastModeModelGuardPatch,
   applyLinuxI18nGatePatch,
   applyLinuxOpaqueWindowsDefaultPatch,
+  applyLinuxRemoteControlProfileTabsPatch,
   applyLinuxSettingsSearchVisibilityPatch,
   applyLinuxSkillsListDedupePatch,
   applyLinuxThreadSidePanelNativeTooltipPatch,
@@ -1019,7 +1020,7 @@ test("default core patch descriptors are grouped and unique", () => {
     "linux-local-app-server-feature-enablement-handler",
     "linux-remote-control-config-preservation",
     "linux-profiled-remote-control-auth-client",
-    "linux-remote-control-profile-availability",
+    "linux-remote-control-profile-tabs",
     "linux-app-updater-menu",
     "linux-settings-persistence",
     "linux-launch-actions",
@@ -1188,6 +1189,20 @@ test("app-server feature enablement descriptor matches current app-main chunks",
     true,
   );
   assert.equal(descriptor.pattern.test("experimental-feature-visibility-Bvp90zWX.js"), false);
+});
+
+test("profiled remote-control tabs descriptor targets the current settings chunk only", () => {
+  const descriptor = corePatchDescriptors().find(
+    (descriptor) => descriptor.id === "linux-remote-control-profile-tabs",
+  );
+
+  assert.ok(descriptor);
+  assert.equal(
+    descriptor.pattern.test("remote-connections-settings-DT3CtY0r.js"),
+    true,
+  );
+  assert.equal(descriptor.pattern.test("app-main-BP5-48gp.js"), false);
+  assert.equal(descriptor.pattern.test("use-plugin-install-flow-BNPyTLo-.js"), false);
 });
 
 test("window controls safe-area descriptor matches the current monolithic app chunk", () => {
@@ -2421,9 +2436,10 @@ test("warns when upstream still strips remote_control but the guard shape drifts
 test("uses unprofiled auth client for remote control when a Codex profile wraps the local app-server", () => {
   const source = [
     "class I1{constructor(e){this.options=e,this.sharedObjectRepository=new t.o;",
-    "let i=this.createAppServerConnection(z);if(this.remoteControlDeviceKeyClient=L$({resourcesPath:tt({env:process.env,resourcesPath:process.resourcesPath})}),",
-    "this.appServerClients.set(z,i),this.appServerConnectionRegistry=new t.kn,this.appServerConnectionRegistry.addConnection(z,i),this.durableThreadHostConfig!=null){}",
-    "this.remoteConnectionsHandler=new b$(this.appState,this.sharedObjectRepository,z,this.appServerConnectionRegistry,{desktopOriginator:e.desktopOriginator,devApiBaseUrl:e.devApiBaseUrl,prodApiBaseUrl:e.prodApiBaseUrl},i,this.remoteControlDeviceKeyClient,this.getHostConfigForHostId.bind(this),this.getAppServerClient.bind(this),this.createAndRegisterRemoteConnection.bind(this),this.disposeRemoteConnection.bind(this));}",
+    "let r=this.createAppServerConnection(V),s=new n.L;this.remoteControlDeviceKeyClient=new Nde(o.t({env:process.env,resourcesPath:process.resourcesPath})),",
+    "this.executionHostRegistry.add(V,s),this.appServerConnectionRegistry=new n.An,this.appServerConnectionRegistry.addConnection(V,r);",
+    "this.remoteConnectionsHandler=new Tde(this.appState,this.sharedObjectRepository,V,this.appServerConnectionRegistry,{desktopOriginator:e.desktopOriginator,devApiBaseUrl:e.devApiBaseUrl,prodApiBaseUrl:e.prodApiBaseUrl},r,this.remoteControlDeviceKeyClient,this.getHostConfigForHostId.bind(this),this.getAppServerClient.bind(this),this.createAndRegisterRemoteConnection.bind(this),this.disposeRemoteConnection.bind(this));}",
+    "getHostConfigForHostId(e){if(e===`local`)return Ul}",
     "createAndRegisterRemoteConnection(e){let t=X$(e),n=this.createAppServerConnection(e.hostId,t,!0,this.getLocalAppServerClient(),this.remoteControlDeviceKeyClient);this.appServerClients.set(e.hostId,n)}}",
   ].join("");
 
@@ -2433,82 +2449,14 @@ test("uses unprofiled auth client for remote control when a Codex profile wraps 
   );
 
   assert.match(patched, /CODEX_LINUX_PROFILED_CLI_PATH/);
-  assert.match(patched, /codex_cli_command:\[process\.env\.CODEX_LINUX_PROFILED_CLI_PATH,`app-server`,`--analytics-default-enabled`\]/);
+  assert.match(
+    patched,
+    /codexLinuxAuthHostConfig=\{\.\.\.this\.getHostConfigForHostId\(V\),codex_cli_command:\[process\.env\.CODEX_LINUX_PROFILED_CLI_PATH,`app-server`,`--analytics-default-enabled`\]\}/,
+  );
   assert.match(patched, /this\.desktopAuthAppServerClient=codexLinuxDesktopAuthAppServerClient/);
   assert.match(patched, /prodApiBaseUrl:e\.prodApiBaseUrl},codexLinuxDesktopAuthAppServerClient,this\.remoteControlDeviceKeyClient/);
   assert.match(patched, /this\.desktopAuthAppServerClient\?\?this\.getLocalAppServerClient\(\)/);
   assert.equal((patched.match(/CODEX_LINUX_PROFILED_CLI_PATH/g) ?? []).length, 2);
-});
-
-test("keeps remote-control connections visible on Linux when a profile app-server disables the gate", () => {
-  const source =
-    "function dt({remoteControlConnectionsState:e,slingshotEnabled:t}){return t&&(e?.available??!0)&&e?.accessRequired!==!0}";
-
-  const patched = applyPatchTwice(
-    applyLinuxRemoteControlProfileAvailabilityPatch,
-    source,
-  );
-
-  assert.match(patched, /codexLinuxRemoteControlProfileAvailability/);
-  assert.match(
-    patched,
-    /return codexLinuxRemoteControlProfileAvailability\|\|t&&\(e\?\.available\?\?!0\)&&e\?\.accessRequired!==!0/,
-  );
-
-  const context = {
-    linuxResult: null,
-    macResult: null,
-    macAllowedResult: null,
-    navigator: { userAgent: "Linux x86_64" },
-  };
-  vm.runInNewContext(
-    `${patched};linuxResult=dt({remoteControlConnectionsState:{available:false,accessRequired:true},slingshotEnabled:false});`,
-    context,
-  );
-  context.navigator = { userAgent: "Macintosh" };
-  vm.runInNewContext(
-    `${patched};macResult=dt({remoteControlConnectionsState:{available:true,accessRequired:true},slingshotEnabled:true});`,
-    context,
-  );
-  vm.runInNewContext(
-    `${patched};macAllowedResult=dt({remoteControlConnectionsState:{available:true,accessRequired:false},slingshotEnabled:true});`,
-    context,
-  );
-
-  assert.equal(context.linuxResult, true);
-  assert.equal(context.macResult, false);
-  assert.equal(context.macAllowedResult, true);
-});
-
-test("keeps current split-bundle remote-control availability visible on Linux profiles", () => {
-  const source =
-    "function eur(){let e=(0,rur.c)(3),[t]=F(`remote_control_connections_state`),n=Xee(),r;return e[0]!==t||e[1]!==n?(r=tur({remoteControlConnectionsState:t,slingshotEnabled:n}),e[0]=t,e[1]=n,e[2]=r):r=e[2],r}function tur({remoteControlConnectionsState:e,slingshotEnabled:t}){return t&&(e?.available??!0)&&e?.accessRequired!==!0}function nur({selectedConnectionsTab:e,showControlOtherDevices:t,showControlThisMacTab:n,showRemoteControlConnectionsSection:r,showRemoteSshConnections:i,showTabbedSshPage:a,isWslConnectionsLoading:o,showWslConnections:s}){return e}";
-
-  const patched = applyPatchTwice(
-    applyLinuxRemoteControlProfileAvailabilityPatch,
-    source,
-  );
-
-  assert.match(patched, /codexLinuxRemoteControlProfileAvailability/);
-  assert.match(
-    patched,
-    /return codexLinuxRemoteControlProfileAvailability\|\|t&&\(e\?\.available\?\?!0\)&&e\?\.accessRequired!==!0/,
-  );
-});
-
-test("upgrades the earlier Linux remote-control profile availability patch", () => {
-  const source =
-    "function dt({remoteControlConnectionsState:e,slingshotEnabled:t}){let codexLinuxRemoteControlProfileAvailability=typeof navigator!=`undefined`&&navigator.userAgent.includes(`Linux`);return t&&(e?.available??!0)&&(codexLinuxRemoteControlProfileAvailability||e?.accessRequired!==!0)}";
-
-  const patched = applyPatchTwice(
-    applyLinuxRemoteControlProfileAvailabilityPatch,
-    source,
-  );
-
-  assert.match(
-    patched,
-    /return codexLinuxRemoteControlProfileAvailability\|\|t&&\(e\?\.available\?\?!0\)&&e\?\.accessRequired!==!0/,
-  );
 });
 
 test("keeps remote-control settings tabs visible on Linux when the profile app-server disables the section", () => {
@@ -2524,7 +2472,7 @@ test("keeps remote-control settings tabs visible on Linux when the profile app-s
   ].join("");
 
   const patched = applyPatchTwice(
-    applyLinuxRemoteControlProfileAvailabilityPatch,
+    applyLinuxRemoteControlProfileTabsPatch,
     source,
   );
 
@@ -2593,151 +2541,16 @@ test("keeps remote-control settings tabs visible on Linux when the profile app-s
   });
 });
 
-test("keeps the Codex Mobile sidebar setup entry visible on Linux profiles", () => {
+test("warns when the current profiled remote-control tabs gate drifts", () => {
   const source =
-    "function iD({enabled:e,hasCompletedCodexMobileSetup:t,isChatGptAuth:n,remoteControlFeaturesVisible:r,remoteControlOnboardingEnabled:i}){return e&&n&&r&&i&&!t}";
-
-  const patched = applyPatchTwice(
-    applyLinuxRemoteControlProfileAvailabilityPatch,
-    source,
-  );
-
-  assert.match(patched, /codexLinuxCodexMobileProfileAvailability/);
-  assert.match(
-    patched,
-    /return !t&&\(codexLinuxCodexMobileProfileAvailability\|\|e&&n&&r&&i\)/,
-  );
-
-  const context = {
-    linuxResult: null,
-    linuxCompleteResult: null,
-    macResult: null,
-    macAllowedResult: null,
-    navigator: { userAgent: "Linux x86_64" },
-  };
-  vm.runInNewContext(
-    `${patched};linuxResult=iD({enabled:false,hasCompletedCodexMobileSetup:false,isChatGptAuth:false,remoteControlFeaturesVisible:false,remoteControlOnboardingEnabled:false});`,
-    context,
-  );
-  vm.runInNewContext(
-    `${patched};linuxCompleteResult=iD({enabled:false,hasCompletedCodexMobileSetup:true,isChatGptAuth:false,remoteControlFeaturesVisible:false,remoteControlOnboardingEnabled:false});`,
-    context,
-  );
-  context.navigator = { userAgent: "Macintosh" };
-  vm.runInNewContext(
-    `${patched};macResult=iD({enabled:false,hasCompletedCodexMobileSetup:false,isChatGptAuth:false,remoteControlFeaturesVisible:false,remoteControlOnboardingEnabled:false});`,
-    context,
-  );
-  vm.runInNewContext(
-    `${patched};macAllowedResult=iD({enabled:true,hasCompletedCodexMobileSetup:false,isChatGptAuth:true,remoteControlFeaturesVisible:true,remoteControlOnboardingEnabled:true});`,
-    context,
-  );
-
-  assert.equal(context.linuxResult, true);
-  assert.equal(context.linuxCompleteResult, false);
-  assert.equal(context.macResult, false);
-  assert.equal(context.macAllowedResult, true);
-});
-
-test("keeps the current Codex Mobile help menu setup entry visible on Linux profiles", () => {
-  const source =
-    "function L1e(){let e=(0,Gz.c)(3),{authMethod:t}=Ba(),n=bse(),r=za(`410065390`),{data:i,isLoading:a}=q(cn.CODEX_MOBILE_SETUP_COMPLETED),o=t===`chatgpt`&&n&&!a&&i===!1,s;return e[0]!==r||e[1]!==o?(s=R1e({showChromeExtensionSetup:r,showMobileSetup:o}),e[0]=r,e[1]=o,e[2]=s):s=e[2],s}";
-
-  const patched = applyPatchTwice(
-    applyLinuxRemoteControlProfileAvailabilityPatch,
-    source,
-  );
-
-  assert.match(patched, /codexLinuxCodexMobileProfileAvailability/);
-  assert.match(
-    patched,
-    /o=codexLinuxCodexMobileProfileAvailability\(\{isChatGptAuth:t===`chatgpt`,remoteControlFeaturesVisible:n,isLoading:a,hasCompletedCodexMobileSetup:i\}\)/,
-  );
-
-  const runPatched = ({ userAgent, authMethod, remoteControlFeaturesVisible, isLoading, setupComplete }) => {
-    const context = {
-      Gz: { c: () => [Symbol.for("react.memo_cache_sentinel")] },
-      Ba: () => ({ authMethod }),
-      bse: () => remoteControlFeaturesVisible,
-      za: () => false,
-      q: () => ({ data: setupComplete, isLoading }),
-      cn: { CODEX_MOBILE_SETUP_COMPLETED: "codex-mobile-has-connected-device" },
-      R1e: ({ showMobileSetup }) => showMobileSetup,
-      navigator: { userAgent },
-      result: null,
-    };
-    vm.runInNewContext(`${patched};result=L1e();`, context);
-    return context.result;
-  };
-
-  assert.equal(
-    runPatched({
-      userAgent: "Linux x86_64",
-      authMethod: "apikey",
-      remoteControlFeaturesVisible: false,
-      isLoading: false,
-      setupComplete: false,
-    }),
-    true,
-  );
-  assert.equal(
-    runPatched({
-      userAgent: "Linux x86_64",
-      authMethod: "apikey",
-      remoteControlFeaturesVisible: false,
-      isLoading: false,
-      setupComplete: true,
-    }),
-    false,
-  );
-  assert.equal(
-    runPatched({
-      userAgent: "Macintosh",
-      authMethod: "apikey",
-      remoteControlFeaturesVisible: false,
-      isLoading: false,
-      setupComplete: false,
-    }),
-    false,
-  );
-  assert.equal(
-    runPatched({
-      userAgent: "Macintosh",
-      authMethod: "chatgpt",
-      remoteControlFeaturesVisible: true,
-      isLoading: false,
-      setupComplete: false,
-    }),
-    true,
-  );
-});
-
-test("repairs remote-control settings helper appended into a source map comment", () => {
-  const source =
-    "let Ne=codexLinuxRemoteControlProfileTabsAvailable(Xe()),X=codexLinuxRemoteControlProfileTabsAvailable(!T),marker=`remote_control_connections_state`,showRemoteControlConnectionsSection=Ne;//# sourceMappingURL=remote-connections-settings-B47AgXB8.js.mapfunction codexLinuxRemoteControlProfileTabsAvailable(e){return typeof navigator!=`undefined`&&navigator.userAgent.includes(`Linux`)?!0:e}";
-
-  const patched = applyPatchTwice(
-    applyLinuxRemoteControlProfileAvailabilityPatch,
-    source,
-  );
-
-  assert.match(
-    patched,
-    /\/\/# sourceMappingURL=remote-connections-settings-B47AgXB8\.js\.map\nfunction codexLinuxRemoteControlProfileTabsAvailable/,
-  );
-  assert.doesNotMatch(patched, /\.js\.mapfunction codexLinuxRemoteControlProfileTabsAvailable/);
-});
-
-test("warns when the remote-control profile availability gate drifts", () => {
-  const source =
-    "function dt({remoteControlConnectionsState:e,slingshotEnabled:t}){return t&&e?.accessRequired!==!0}";
+    "let R=St(),z=gate(m),marker=`remote_control_connections_state`,showRemoteControlConnectionsSection=R";
 
   const { value, warnings } = captureWarns(() =>
-    applyLinuxRemoteControlProfileAvailabilityPatch(source),
+    applyLinuxRemoteControlProfileTabsPatch(source),
   );
 
   assert.equal(value, source);
-  assert.match(warnings.join("\n"), /remote-control profile availability gate/);
+  assert.match(warnings.join("\n"), /current remote-control profile tabs gate/);
 });
 
 test("registers local app-server feature enablement in internal and Electron handlers", () => {
@@ -3137,28 +2950,6 @@ test("redirects the renamed Linux-aware titlebar overlay sync away from the tran
   assert.doesNotMatch(patched, /setTitleBarOverlay\(b2\(/);
   assert.deepEqual(warnings, []);
 });
-
-test("separates the latest shared primary and quick-chat Linux titlebar branch", () => {
-  const source = [
-    "function I9(e){return e===`avatarOverlay`}",
-    "function L9({platform:e,appearance:t,opaqueWindowSurfaceEnabled:n,prefersDarkColors:r}){return n?{backgroundColor:r?hne:gne,backgroundMaterial:e===`win32`?`none`:null}:e===`linux`&&!I9(t)?{backgroundColor:r?hne:gne,backgroundMaterial:null}:e===`win32`&&!I9(t)?{backgroundColor:k9,backgroundMaterial:`mica`}:{backgroundColor:k9,backgroundMaterial:null}}",
-    "function j9(e=1){return{color:k9,symbolColor:c.nativeTheme.shouldUseDarkColors?One:Dne,height:Math.round(Ene*e)}}",
-    "function z9({appearance:e,opaqueWindowSurfaceEnabled:t,platform:n,windowZoom:r=1}){switch(e){case`quickChat`:case`primary`:return n===`darwin`?{titleBarStyle:`hiddenInset`,...e===`quickChat`?{resizable:!0}:{}}:n===`win32`||n===`linux`?{titleBarStyle:`hidden`,titleBarOverlay:j9(r),...e===`quickChat`?{resizable:!0}:{}}:{titleBarStyle:`default`,...e===`quickChat`?{resizable:!0}:{}}}}",
-    "installApplicationMenuTitleBarOverlaySync(e,t){if(process.platform!==`win32`&&process.platform!==`linux`||t!==`primary`&&t!==`quickChat`)return;let n=()=>{e.isDestroyed()||e.setTitleBarOverlay(j9(this.windowZooms.get(e.id)))};return c.nativeTheme.on(`updated`,n),n(),()=>{c.nativeTheme.off(`updated`,n)}}",
-    "(process.platform===`win32`||process.platform===`linux`)&&(this.windowZooms.set(n.id,t),n.setTitleBarOverlay(j9(t)))",
-  ].join("");
-
-  const { value: patched, warnings } = captureWarns(() =>
-    applyPatchTwice(applyLinuxNativeTitlebarPatch, source),
-  );
-
-  assert.deepEqual(warnings, []);
-  assert.match(patched, /n===`win32`\?\{titleBarStyle:`hidden`,titleBarOverlay:j9\(r\),/);
-  assert.match(patched, /n===`linux`\?\{titleBarStyle:`hidden`,titleBarOverlay:codexLinuxTitleBarOverlay\(r\),/);
-  assert.match(patched, /t!==`primary`&&t!==`quickChat`/);
-  assert.equal((patched.match(/function codexLinuxTitleBarOverlay/g) ?? []).length, 1);
-});
-
 
 test("updates every Linux zoom titlebar overlay refresh call site", () => {
   const source = [

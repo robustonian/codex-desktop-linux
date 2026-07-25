@@ -1431,6 +1431,35 @@ function applyLinuxAppServerBackfillWaitPatch(currentSource) {
   return patchedSource;
 }
 
+function applyLinuxRemoteControlProfileTabsPatch(currentSource) {
+  const settingsMarker = "codexLinuxRemoteControlProfileTabsAvailable";
+  if (currentSource.includes(settingsMarker)) {
+    return currentSource;
+  }
+
+  const settingsTabsGateRegex =
+    /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\),([A-Za-z_$][\w$]*)=!([A-Za-z_$][\w$]*)(?=,[\s\S]*?showRemoteControlConnectionsSection:\1)/u;
+  const match = currentSource.match(settingsTabsGateRegex);
+  if (
+    match == null ||
+    !currentSource.includes("remote_control_connections_state") ||
+    !currentSource.includes("showRemoteControlConnectionsSection")
+  ) {
+    console.warn(
+      "WARN: Could not find current remote-control profile tabs gate — skipping Linux remote-control profile tabs patch",
+    );
+    return currentSource;
+  }
+
+  const [, sectionVar, sectionFn, otherDevicesVar, otherDevicesGateVar] = match;
+  const helper =
+    `function ${settingsMarker}(e){return typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`)?!0:e}`;
+  return `${currentSource.replace(
+    settingsTabsGateRegex,
+    `${sectionVar}=${settingsMarker}(${sectionFn}()),${otherDevicesVar}=${settingsMarker}(!${otherDevicesGateVar})`,
+  )}\n${helper}`;
+}
+
 function applyLinuxI18nGatePatch(currentSource) {
   const alreadyPatchedI18nGateRegexes = [
     /([A-Za-z_$][\w$]*)=[^;]*?\.get\(`enable_i18n`,!1\)[^;]*;let [^;]*,([A-Za-z_$][\w$]*)=[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\.localeOverride\),[A-Za-z_$][\w$]*=\1\|\|\2!=null/u,
@@ -2287,6 +2316,7 @@ module.exports = {
   applyLinuxBrowserUseWebviewRemountStorePatch,
   applyLinuxConfigWriteVersionConflictPatch,
   applyLinuxI18nGatePatch,
+  applyLinuxRemoteControlProfileTabsPatch,
   applyPersistentRateLimitFooterPatch,
   applyLinuxAppSunsetPatch,
   applyLinuxOpaqueWindowsDefaultPatch,

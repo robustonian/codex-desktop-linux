@@ -194,6 +194,7 @@ COMMON_ENV=(
     "HOME=$HOME_DIR"
     "XDG_RUNTIME_DIR=$RUNTIME_DIR"
     "CODEX_CLI_PATH=$(command -v true)"
+    "CODEX_UPDATE_MANAGER_PATH=$(command -v true)"
     "CODEX_WEBVIEW_PORT=$PORT"
     "CODEX_TEST_HOOK_PID_FILE=$TMP_DIR/hook.pid"
 )

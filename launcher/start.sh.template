@@ -1797,6 +1797,263 @@ verify_cli_launch_path() {
     export CODEX_CLI_SOURCE_PATH CODEX_CLI_PATH
 }
 
+configure_codex_profile_cli_path() {
+    [ -n "$CODEX_LINUX_CODEX_PROFILE" ] || return 0
+    [ -n "${CODEX_CLI_PATH:-}" ] || return 0
+
+    local real_cli="${CODEX_LINUX_PROFILED_CLI_PATH:-$CODEX_CLI_PATH}"
+    local wrapper_dir="$APP_STATE_DIR/profile-cli"
+    local wrapper_path="$wrapper_dir/codex"
+
+    mkdir -p "$wrapper_dir"
+    cat > "$wrapper_path" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ -z "${CODEX_LINUX_PROFILED_CLI_PATH:-}" ] || [ -z "${CODEX_LINUX_CODEX_PROFILE:-}" ]; then
+    echo "Codex Desktop profile wrapper is missing launcher environment." >&2
+    exit 1
+fi
+
+codex_debug_prompt_input_allows_profile() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -c|--config|--enable|--disable)
+                shift
+                [ "$#" -gt 0 ] || return 1
+                shift
+                ;;
+            --config=*|--enable=*|--disable=*)
+                shift
+                ;;
+            -h|--help|--)
+                return 1
+                ;;
+            prompt-input)
+                return 0
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    done
+
+    return 1
+}
+
+codex_args_are_app_server() {
+    local command=""
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --)
+                return 1
+                ;;
+            -c|--config|--enable|--disable|--remote|--remote-auth-token-env|-i|--image|-m|--model|--local-provider|-s|--sandbox|-C|--cd|--add-dir|-a|--ask-for-approval|-p|--profile)
+                shift
+                [ "$#" -gt 0 ] || return 1
+                shift
+                ;;
+            --config=*|--enable=*|--disable=*|--remote=*|--remote-auth-token-env=*|--image=*|--model=*|--local-provider=*|--sandbox=*|--cd=*|--add-dir=*|--ask-for-approval=*|--profile=*)
+                shift
+                ;;
+            --oss|--strict-config|--dangerously-bypass-approvals-and-sandbox|--dangerously-bypass-hook-trust|--search|--no-alt-screen)
+                shift
+                ;;
+            -h|--help|-V|--version)
+                return 1
+                ;;
+            -*)
+                return 1
+                ;;
+            *)
+                command="$1"
+                break
+                ;;
+        esac
+    done
+
+    [ "$command" = "app-server" ]
+}
+
+codex_write_profile_config_overrides() {
+    python3 - "$CODEX_LINUX_CODEX_PROFILE" "${CODEX_HOME:-}" <<'PY'
+import json
+import math
+import pathlib
+import re
+import sys
+import tomllib
+
+profile = sys.argv[1]
+codex_home_arg = sys.argv[2]
+codex_home = pathlib.Path(codex_home_arg) if codex_home_arg else pathlib.Path.home() / ".codex"
+profile_file = codex_home / f"{profile}.config.toml"
+config_file = codex_home / "config.toml"
+
+try:
+    if profile_file.is_file():
+        data = tomllib.loads(profile_file.read_text(encoding="utf-8"))
+    else:
+        root = tomllib.loads(config_file.read_text(encoding="utf-8"))
+        profiles = root.get("profiles", {})
+        data = profiles.get(profile) if isinstance(profiles, dict) else None
+except FileNotFoundError:
+    data = None
+except tomllib.TOMLDecodeError as exc:
+    print(f"Failed to parse Codex profile '{profile}': {exc}", file=sys.stderr)
+    sys.exit(1)
+
+if not isinstance(data, dict):
+    print(
+        f"Codex profile '{profile}' was not found in {profile_file} or {config_file}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+plain_key_re = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def toml_key_part(value):
+    value = str(value)
+    if plain_key_re.match(value):
+        return value
+    return json.dumps(value)
+
+
+def toml_value(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return repr(value)
+        return json.dumps(str(value))
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        parts = [
+            f"{toml_key_part(key)} = {toml_value(item)}"
+            for key, item in value.items()
+        ]
+        return "{ " + ", ".join(parts) + " }"
+    if hasattr(value, "isoformat"):
+        return json.dumps(value.isoformat())
+    return json.dumps(str(value))
+
+
+def flatten(prefix, value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            next_prefix = [*prefix, str(key)]
+            if isinstance(item, dict):
+                yield from flatten(next_prefix, item)
+            else:
+                yield ".".join(toml_key_part(part) for part in next_prefix), item
+    else:
+        yield ".".join(toml_key_part(part) for part in prefix), value
+
+
+for key, value in flatten([], data):
+    if key:
+        print(f"{key}={toml_value(value)}")
+PY
+}
+
+codex_exec_app_server_with_profile_overrides() {
+    local overrides_file
+    local override
+    local -a profile_config_args=()
+
+    overrides_file="$(mktemp "${TMPDIR:-/tmp}/codex-profile-overrides.XXXXXX")" || exit 1
+    if ! codex_write_profile_config_overrides > "$overrides_file"; then
+        rm -f "$overrides_file"
+        exit 1
+    fi
+
+    while IFS= read -r override; do
+        [ -n "$override" ] || continue
+        profile_config_args+=("-c" "$override")
+    done < "$overrides_file"
+    rm -f "$overrides_file"
+
+    if [ "${#profile_config_args[@]}" -eq 0 ]; then
+        exec "$CODEX_LINUX_PROFILED_CLI_PATH" "$@"
+    fi
+
+    exec "$CODEX_LINUX_PROFILED_CLI_PATH" "${profile_config_args[@]}" "$@"
+}
+
+codex_args_allow_profile() {
+    local command=""
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --)
+                return 0
+                ;;
+            -c|--config|--enable|--disable|--remote|--remote-auth-token-env|-i|--image|-m|--model|--local-provider|-s|--sandbox|-C|--cd|--add-dir|-a|--ask-for-approval|-p|--profile)
+                shift
+                [ "$#" -gt 0 ] || return 0
+                shift
+                ;;
+            --config=*|--enable=*|--disable=*|--remote=*|--remote-auth-token-env=*|--image=*|--model=*|--local-provider=*|--sandbox=*|--cd=*|--add-dir=*|--ask-for-approval=*|--profile=*)
+                shift
+                ;;
+            --oss|--strict-config|--dangerously-bypass-approvals-and-sandbox|--dangerously-bypass-hook-trust|--search|--no-alt-screen)
+                shift
+                ;;
+            -h|--help|-V|--version)
+                return 1
+                ;;
+            -*)
+                return 0
+                ;;
+            *)
+                command="$1"
+                shift
+                break
+                ;;
+        esac
+    done
+
+    case "$command" in
+        ""|exec|e|review|resume|archive|delete|unarchive|fork|mcp|sandbox)
+            return 0
+            ;;
+        debug)
+            codex_debug_prompt_input_allows_profile "$@"
+            ;;
+        login|logout|plugin|mcp-server|app-server|remote-control|completion|update|doctor|apply|a|cloud|exec-server|features|help|version)
+            return 1
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+if codex_args_allow_profile "$@"; then
+    exec "$CODEX_LINUX_PROFILED_CLI_PATH" --profile "$CODEX_LINUX_CODEX_PROFILE" "$@"
+fi
+
+if codex_args_are_app_server "$@"; then
+    codex_exec_app_server_with_profile_overrides "$@"
+fi
+
+exec "$CODEX_LINUX_PROFILED_CLI_PATH" "$@"
+SCRIPT
+    chmod 700 "$wrapper_path"
+
+    CODEX_LINUX_PROFILED_CLI_PATH="$real_cli"
+    CODEX_CLI_PATH="$wrapper_path"
+    export CODEX_LINUX_PROFILED_CLI_PATH CODEX_LINUX_CODEX_PROFILE CODEX_CLI_PATH
+    echo "Using Codex profile: $CODEX_LINUX_CODEX_PROFILE"
+}
+
 is_interactive_terminal() {
     [ "$LAUNCHER_INTERACTIVE_TERMINAL" -eq 1 ] && [ -r /dev/tty ] && [ -w /dev/tty ]
 }

@@ -23,16 +23,6 @@ module.exports = [
     apply: applyLinuxAppSunsetPatch,
   }),
   webviewAssetPatch({
-    id: "opaque-window-default-chrome-theme",
-    phase: "webview-asset",
-    order: 1005,
-    ciPolicy: "optional",
-    pattern: /^chrome-theme-.*\.js$/,
-    missingDescription: "chrome theme bundle",
-    skipDescription: "translucent sidebar default patch",
-    apply: applyLinuxOpaqueWindowsDefaultPatch,
-  }),
-  webviewAssetPatch({
     id: "opaque-window-default-general-settings",
     phase: "webview-asset",
     order: 1010,

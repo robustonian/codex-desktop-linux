@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Linux launcher accepts `--profile NAME` / `--profile=NAME` / `-p NAME` and
+  applies the named Codex CLI profile to runtime commands and the local
+  app-server without changing the Desktop sign-in used for remote control.
 - A shared upstream DMG acceptance profile now produces the same structured
   decision for local installs, updater rebuilds, and scheduled CI. Scheduled
   rejections create one fingerprinted drift issue and supersede issues for
@@ -23,6 +26,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Profiled remote-control compatibility now targets only the current
+  Connections settings chunk and current main-process client wiring; obsolete
+  availability, mobile-sidebar, and removed chrome-theme bundle fallbacks were
+  deleted.
 - Remote mobile control now relies on the current upstream account-enrollment
   compatibility and Connections tab resolver instead of patching duplicate
   Linux-specific fallbacks into those paths.

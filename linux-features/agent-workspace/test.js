@@ -704,6 +704,7 @@ test("main bridge install action uses fixed npm package command", async () => {
   const { handlers, execCalls } = buildBridgeHarness({
     env: {
       HOME: path.join(tempDir, "home"),
+      NPM_CONFIG_PREFIX: "",
     },
     execFile(command, args, options, callback) {
       execCalls.push({ command, args, options });

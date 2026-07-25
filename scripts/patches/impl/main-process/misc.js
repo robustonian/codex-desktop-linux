@@ -468,20 +468,26 @@ function applyLinuxRemoteControlConfigPreservationPatch(currentSource) {
 }
 
 function applyLinuxProfiledRemoteControlAuthClientPatch(currentSource) {
-  const marker = "CODEX_LINUX_PROFILED_CLI_PATH";
-  if (currentSource.includes("codexLinuxDesktopAuthAppServerClient")) {
-    return currentSource;
-  }
-
   let patchedSource = currentSource;
-  const localConnectionNeedle =
-    "let i=this.createAppServerConnection(z);if(this.remoteControlDeviceKeyClient=";
-  const localConnectionPatch =
-    "let i=this.createAppServerConnection(z),codexLinuxDesktopAuthAppServerClient=i;if(process.platform===`linux`&&process.env.CODEX_LINUX_PROFILED_CLI_PATH){let codexLinuxAuthHostConfig={...Su,codex_cli_command:[process.env.CODEX_LINUX_PROFILED_CLI_PATH,`app-server`,`--analytics-default-enabled`]};codexLinuxDesktopAuthAppServerClient=this.createAppServerConnection(`local-auth`,codexLinuxAuthHostConfig)}this.desktopAuthAppServerClient=codexLinuxDesktopAuthAppServerClient;if(this.remoteControlDeviceKeyClient=";
-  if (patchedSource.includes(localConnectionNeedle)) {
-    patchedSource = patchedSource.replace(localConnectionNeedle, localConnectionPatch);
+  const authClientMarker = "codexLinuxDesktopAuthAppServerClient";
+  const localConnectionRegex =
+    /let ([A-Za-z_$][\w$]*)=this\.createAppServerConnection\(([A-Za-z_$][\w$]*)\),([A-Za-z_$][\w$]*)=new ([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*);this\.remoteControlDeviceKeyClient=/u;
+  const localConnectionMatch = patchedSource.match(localConnectionRegex);
+  if (!patchedSource.includes(`${authClientMarker}=`) && localConnectionMatch != null) {
+    const [, localClientVar, localHostIdVar, executionRegistryVar, executionRegistryCtor] =
+      localConnectionMatch;
+    patchedSource = patchedSource.replace(
+      localConnectionRegex,
+      `let ${localClientVar}=this.createAppServerConnection(${localHostIdVar}),${authClientMarker}=${localClientVar};` +
+        `if(process.platform===\`linux\`&&process.env.CODEX_LINUX_PROFILED_CLI_PATH){` +
+        `let codexLinuxAuthHostConfig={...this.getHostConfigForHostId(${localHostIdVar}),codex_cli_command:[process.env.CODEX_LINUX_PROFILED_CLI_PATH,\`app-server\`,\`--analytics-default-enabled\`]};` +
+        `${authClientMarker}=this.createAppServerConnection(\`local-auth\`,codexLinuxAuthHostConfig)}` +
+        `this.desktopAuthAppServerClient=${authClientMarker};` +
+        `let ${executionRegistryVar}=new ${executionRegistryCtor};this.remoteControlDeviceKeyClient=`,
+    );
   } else if (
-    patchedSource.includes("this.createAppServerConnection(z)") &&
+    !patchedSource.includes(`${authClientMarker}=`) &&
+    patchedSource.includes("this.createAppServerConnection(") &&
     patchedSource.includes("this.remoteControlDeviceKeyClient=")
   ) {
     console.warn(
@@ -489,40 +495,44 @@ function applyLinuxProfiledRemoteControlAuthClientPatch(currentSource) {
     );
   }
 
-  const handlerNeedle =
-    "prodApiBaseUrl:e.prodApiBaseUrl},i,this.remoteControlDeviceKeyClient,";
-  if (patchedSource.includes(handlerNeedle)) {
+  const handlerAuthRegex =
+    /(this\.remoteConnectionsHandler=new [A-Za-z_$][\w$]*\([\s\S]{0,500}?prodApiBaseUrl:[A-Za-z_$][\w$]*\.prodApiBaseUrl\},)([A-Za-z_$][\w$]*)(,this\.remoteControlDeviceKeyClient,)/u;
+  const handlerAuthMatch = patchedSource.match(handlerAuthRegex);
+  if (
+    handlerAuthMatch != null &&
+    handlerAuthMatch[2] !== authClientMarker
+  ) {
     patchedSource = patchedSource.replace(
-      handlerNeedle,
-      "prodApiBaseUrl:e.prodApiBaseUrl},codexLinuxDesktopAuthAppServerClient,this.remoteControlDeviceKeyClient,",
+      handlerAuthRegex,
+      `$1${authClientMarker}$3`,
     );
   } else if (
+    handlerAuthMatch == null &&
     patchedSource.includes("this.remoteConnectionsHandler=new") &&
-    patchedSource.includes("prodApiBaseUrl:e.prodApiBaseUrl")
+    patchedSource.includes("prodApiBaseUrl:")
   ) {
     console.warn(
       "WARN: Could not find remote-connections handler auth argument for profiled remote-control auth client patch",
     );
   }
 
-  const remoteConnectionNeedle =
-    "this.createAppServerConnection(e.hostId,t,!0,this.getLocalAppServerClient(),this.remoteControlDeviceKeyClient)";
-  if (patchedSource.includes(remoteConnectionNeedle)) {
+  const remoteConnectionRegex =
+    /this\.createAppServerConnection\(([A-Za-z_$][\w$]*)\.hostId,([A-Za-z_$][\w$]*),!0,this\.getLocalAppServerClient\(\),this\.remoteControlDeviceKeyClient\)/u;
+  if (remoteConnectionRegex.test(patchedSource)) {
     patchedSource = patchedSource.replace(
-      remoteConnectionNeedle,
-      "this.createAppServerConnection(e.hostId,t,!0,this.desktopAuthAppServerClient??this.getLocalAppServerClient(),this.remoteControlDeviceKeyClient)",
+      remoteConnectionRegex,
+      "this.createAppServerConnection($1.hostId,$2,!0,this.desktopAuthAppServerClient??this.getLocalAppServerClient(),this.remoteControlDeviceKeyClient)",
     );
   } else if (
+    !patchedSource.includes(
+      "this.desktopAuthAppServerClient??this.getLocalAppServerClient()",
+    ) &&
     patchedSource.includes("createAndRegisterRemoteConnection") &&
     patchedSource.includes("this.getLocalAppServerClient()")
   ) {
     console.warn(
       "WARN: Could not find remote-control transport auth argument for profiled remote-control auth client patch",
     );
-  }
-
-  if (patchedSource.includes(marker) || !currentSource.includes("this.createAppServerConnection(z)")) {
-    return patchedSource;
   }
 
   return patchedSource;
