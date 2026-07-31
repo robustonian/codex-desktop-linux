@@ -143,6 +143,40 @@ jobs:
             echo "- Verified generic feature resource, 0640 mode, and runtime dependency."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Create Codex Micro packaged app fixture
+        env:
+          CODEX_FIXTURE_LINUX_FEATURES_JSON: '["codex-micro"]'
+        run: |
+          set -euo pipefail
+          rm -rf codex-app dist
+          tests/fixtures/create-packaged-app-fixture.sh codex-app
+          printf '%s\n' '{"enabled":["codex-micro"]}' > /tmp/codex-micro-features.json
+
+      - name: Build Codex Micro Debian package
+        env:
+          CODEX_LINUX_FEATURES_CONFIG: /tmp/codex-micro-features.json
+        run: PACKAGE_VERSION="$CI_PACKAGE_VERSION" ./scripts/build-deb.sh
+
+      - name: Inspect Codex Micro Debian package
+        run: |
+          set -euo pipefail
+          deb_file="$(find dist -maxdepth 1 -name 'codex-desktop_*.deb' -print -quit)"
+          test -n "$deb_file"
+          dpkg-deb -c "$deb_file" | tee /tmp/deb-micro-contents.txt >/dev/null
+          dpkg-deb -f "$deb_file" Depends | tee /tmp/deb-micro-depends.txt >/dev/null
+          grep -q './usr/lib/udev/rules.d/70-codex-micro.rules' /tmp/deb-micro-contents.txt
+          grep -q 'libudev1' /tmp/deb-micro-depends.txt
+          grep -q 'libusb-1.0-0' /tmp/deb-micro-depends.txt
+          rule_mode="$(
+            awk '$NF == "./usr/lib/udev/rules.d/70-codex-micro.rules" { print $1 }' \
+              /tmp/deb-micro-contents.txt
+          )"
+          test "$rule_mode" = '-rw-r--r--'
+          {
+            echo "- Codex Micro build: \`$(basename "$deb_file")\`"
+            echo "- Verified udev rule, 0644 mode, and libudev/libusb dependencies."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   nix:
     name: Nix Package Builds
     runs-on: ubuntu-latest
@@ -363,6 +397,41 @@ jobs:
             echo "- Verified generic feature resource, 0640 mode, and runtime dependency."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Create Codex Micro packaged app fixture
+        env:
+          CODEX_FIXTURE_LINUX_FEATURES_JSON: '["codex-micro"]'
+        run: |
+          set -euo pipefail
+          rm -rf codex-app dist
+          tests/fixtures/create-packaged-app-fixture.sh codex-app
+          printf '%s\n' '{"enabled":["codex-micro"]}' > /tmp/codex-micro-features.json
+
+      - name: Build Codex Micro RPM package
+        env:
+          CODEX_LINUX_FEATURES_CONFIG: /tmp/codex-micro-features.json
+        run: PACKAGE_VERSION="$CI_PACKAGE_VERSION" ./scripts/build-rpm.sh
+
+      - name: Inspect Codex Micro RPM package
+        run: |
+          set -euo pipefail
+          rpm_file="$(find dist -maxdepth 1 -name 'codex-desktop-*.rpm' -print -quit)"
+          test -n "$rpm_file"
+          rpm -qlp "$rpm_file" | tee /tmp/rpm-micro-contents.txt >/dev/null
+          rpm -qlvp "$rpm_file" | tee /tmp/rpm-micro-long-contents.txt >/dev/null
+          rpm -qp --requires "$rpm_file" | tee /tmp/rpm-micro-requires.txt >/dev/null
+          grep -q '/usr/lib/udev/rules.d/70-codex-micro.rules' /tmp/rpm-micro-contents.txt
+          grep -q '^libudev\.so\.1' /tmp/rpm-micro-requires.txt
+          grep -q '^libusb-1\.0\.so\.0' /tmp/rpm-micro-requires.txt
+          rule_mode="$(
+            awk '$NF == "/usr/lib/udev/rules.d/70-codex-micro.rules" { print $1 }' \
+              /tmp/rpm-micro-long-contents.txt
+          )"
+          test "$rule_mode" = '-rw-r--r--'
+          {
+            echo "- Codex Micro build: \`$(basename "$rpm_file")\`"
+            echo "- Verified udev rule, 0644 mode, and libudev/libusb dependencies."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   package-pacman:
     name: Build Pacman Package
     runs-on: ubuntu-latest
@@ -426,9 +495,34 @@ jobs:
                 fixture_mode="$(sed -n "1s/ .*//p" /tmp/pacman-feature-long-contents.txt)"
                 test "$fixture_mode" = "-rw-r-----"
                 printf "%s\n" "$(basename "$feature_pkg_file")" > /tmp/pacman-feature-package-name.txt
+
+                rm -rf codex-app dist
+                CODEX_FIXTURE_LINUX_FEATURES_JSON="[\"codex-micro\"]" \
+                  tests/fixtures/create-packaged-app-fixture.sh codex-app
+                printf "%s\n" "{\"enabled\":[\"codex-micro\"]}" \
+                  > /tmp/codex-micro-features.json
+
+                CODEX_LINUX_FEATURES_CONFIG=/tmp/codex-micro-features.json \
+                PACKAGE_VERSION="$CI_PACKAGE_VERSION" \
+                  ./scripts/build-pacman.sh
+
+                micro_pkg_file="$(find dist -maxdepth 1 -name "codex-desktop-*.pkg.tar.*" -print -quit)"
+                test -n "$micro_pkg_file"
+                pacman -Qlp "$micro_pkg_file" | tee /tmp/pacman-micro-contents.txt >/dev/null
+                tar -xOf "$micro_pkg_file" .PKGINFO | tee /tmp/pacman-micro-pkginfo.txt >/dev/null
+                tar -tvf "$micro_pkg_file" \
+                  usr/lib/udev/rules.d/70-codex-micro.rules \
+                  | tee /tmp/pacman-micro-long-contents.txt >/dev/null
+                grep -q "usr/lib/udev/rules.d/70-codex-micro.rules" /tmp/pacman-micro-contents.txt
+                grep -q "^depend = libusb$" /tmp/pacman-micro-pkginfo.txt
+                grep -q "^depend = systemd-libs$" /tmp/pacman-micro-pkginfo.txt
+                micro_rule_mode="$(sed -n "1s/ .*//p" /tmp/pacman-micro-long-contents.txt)"
+                test "$micro_rule_mode" = "-rw-r--r--"
+                printf "%s\n" "$(basename "$micro_pkg_file")" > /tmp/pacman-micro-package-name.txt
               '"'"'
               cp /tmp/pacman-package-name.txt /work/.pacman-package-name.txt
               cp /tmp/pacman-feature-package-name.txt /work/.pacman-feature-package-name.txt
+              cp /tmp/pacman-micro-package-name.txt /work/.pacman-micro-package-name.txt
             '
 
       - name: Write pacman validation summary
@@ -436,6 +530,7 @@ jobs:
           set -euo pipefail
           pkg_file="$(cat .pacman-package-name.txt)"
           feature_pkg_file="$(cat .pacman-feature-package-name.txt)"
+          micro_pkg_file="$(cat .pacman-micro-package-name.txt)"
           {
             echo "## Pacman Package Validation"
             echo ""
@@ -443,4 +538,6 @@ jobs:
             echo "- Verified updater binary, user service, update-builder bundle, and packaged runtime helper."
             echo "- Feature-enabled build: \`$feature_pkg_file\`"
             echo "- Verified generic feature resource, 0640 mode, and runtime dependency."
+            echo "- Codex Micro build: \`$micro_pkg_file\`"
+            echo "- Verified udev rule, 0644 mode, and systemd-libs/libusb dependencies."
           } >> "$GITHUB_STEP_SUMMARY"
