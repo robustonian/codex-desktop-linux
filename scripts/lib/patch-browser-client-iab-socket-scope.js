@@ -43,8 +43,11 @@ if (socketDirOnly || source.includes(iabMarker)) {
   process.exit(0);
 }
 
+// The Unix socket listing resolves its directory from the options argument.
+// The Windows listing has the same overall shape but declares its own pipe
+// prefix and already filters, so it never matches this pattern.
 const socketListingPattern =
-  /([A-Za-z_$][\w$]*)=\(\)=>\s*([A-Za-z_$][\w$]*)\(\)==="win32"\?([A-Za-z_$][\w$]*)\(\):([A-Za-z_$][\w$]*)\(\),\4=async\(\)=>\(await ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\)\.map\(([A-Za-z_$][\w$]*)=>([A-Za-z_$][\w$]*)\.resolve\(\6,\7\)\),\3=async\(\)=>/g;
+  /(?<unixListing>[A-Za-z_$][\w$]*)=async (?<options>[A-Za-z_$][\w$]*)=>\{let (?<socketDirectory>[A-Za-z_$][\w$]*)=(?<resolver>[A-Za-z_$][\w$]*)\(\k<options>\.platform\);return\(await (?<readDirectory>[A-Za-z_$][\w$]*)\(\k<socketDirectory>\)\)\.map\((?<entry>[A-Za-z_$][\w$]*)=>(?<pathModule>[A-Za-z_$][\w$]*)\.resolve\(\k<socketDirectory>,\k<entry>\)\)\}/g;
 const matches = [...source.matchAll(socketListingPattern)];
 if (matches.length !== 1) {
   if (source.includes("codex-browser-use")) {
@@ -56,21 +59,19 @@ if (matches.length !== 1) {
   process.exit(0);
 }
 
-const [
-  target,
-  dispatcher,
-  platform,
-  windowsListing,
+const target = matches[0][0];
+const {
   unixListing,
-  readDirectory,
+  options,
   socketDirectory,
+  resolver,
+  readDirectory,
   entry,
   pathModule,
-] = matches[0];
+} = matches[0].groups;
 const replacement =
-  `${dispatcher}=()=>${platform}()==="win32"?${windowsListing}():${unixListing}(),` +
-  `${unixListing}=async()=>(await ${readDirectory}(${socketDirectory}))` +
+  `${unixListing}=async ${options}=>{let ${socketDirectory}=${resolver}(${options}.platform);` +
+  `return(await ${readDirectory}(${socketDirectory}))` +
   `.filter(${entry}=>!${entry}.startsWith("extension-")${iabMarker})` +
-  `.map(${entry}=>${pathModule}.resolve(${socketDirectory},${entry})),` +
-  `${windowsListing}=async()=>`;
+  `.map(${entry}=>${pathModule}.resolve(${socketDirectory},${entry}))}`;
 fs.writeFileSync(clientPath, source.replace(target, replacement), "utf8");

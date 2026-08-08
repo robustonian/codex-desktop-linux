@@ -94,10 +94,10 @@
 
         codexDmg = pkgs.fetchurl {
           url = "https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg";
-          hash = "sha256-roZOLe99tW0Lt3qHaly+TkwvVUzMZUzskhuUaJJYPAo=";
+          hash = "sha256-+KWnSss4qrSlmsCtf+87tLtPKAp+0l88t+9hRd9eh0c=";
         };
 
-        codexVersion = "26.721.41059";
+        codexVersion = "26.803.41515";
         electronVersion = "42.3.0";
         electronPlatform =
           {
@@ -119,6 +119,12 @@
         electronHeaders = pkgs.fetchurl {
           url = "https://artifacts.electronjs.org/headers/dist/v${electronVersion}/node-v${electronVersion}-headers.tar.gz";
           hash = "sha256-ghAJ+cGDAFDYlK755hkGywpTeyAAstm77ZmF//HV4NA=";
+        };
+
+        codexMicroNodeHidArchive = pkgs.fetchurl {
+          name = "node-hid-3.3.0.tgz";
+          url = "https://registry.npmjs.org/node-hid/-/node-hid-3.3.0.tgz";
+          hash = "sha512-j+dFgJLRAE0nufQKXk3IfS6T6YuHhCgMvz4TrG0sgtb6DSCdYpfJ1etcdmeCmPQjUgO+yo32ktVrRliNs/+fmg==";
         };
 
         browserUseNodeReplRuntime = pkgs.fetchurl {
@@ -321,6 +327,7 @@
           mesa
           libgbm
           alsa-lib
+          pipewire
           libX11
           libXcomposite
           libXdamage
@@ -344,6 +351,12 @@
           libxcrypt-legacy
           stdenv.cc.cc.lib
           zlib
+        ]);
+        codexMicroRuntimeLibPath = pkgs.lib.makeLibraryPath (with pkgs; [
+          systemd
+          libusb1
+          stdenv.cc.cc.lib
+          glibc
         ]);
         gsettingsSchemaPackages = with pkgs; [
           gsettings-desktop-schemas
@@ -511,6 +524,7 @@ PY
             else
               normalizeLinuxFeaturesConfig linuxFeaturesConfigOverride;
           effectiveLinuxFeatureIds = effectiveLinuxFeaturesConfig.enabled;
+          codexMicroEnabled = builtins.elem "codex-micro" effectiveLinuxFeatureIds;
         in
         pkgs.stdenv.mkDerivation {
           pname = "codex-desktop${packageSuffix { inherit enableComputerUseUi; linuxFeatureIds = effectiveLinuxFeatureIds; }}-payload";
@@ -563,6 +577,9 @@ PY
             export CODEX_LINUX_FEATURES_CONFIG="${linuxFeaturesConfigFile effectiveLinuxFeaturesConfig}"
             export CODEX_ELECTRON_ZIP_SOURCE="${electronZip}"
             export CODEX_NATIVE_MODULES_SOURCE="${codexNativeModules}"
+            ${pkgs.lib.optionalString codexMicroEnabled ''
+            export CODEX_MICRO_NODE_HID_ARCHIVE="${codexMicroNodeHidArchive}"
+            ''}
             ${pkgs.lib.optionalString (browserUseNodeRepl != null) ''
             export CODEX_LINUX_NODE_REPL_SOURCE="${browserUseNodeRepl}/bin/node_repl"
             ''}
@@ -611,6 +628,7 @@ PY
             else
               normalizeLinuxFeaturesConfig linuxFeaturesConfigOverride;
           normalizedLinuxFeatureIds = effectiveLinuxFeaturesConfig.enabled;
+          codexMicroEnabled = builtins.elem "codex-micro" normalizedLinuxFeatureIds;
           featureArgs = {
             inherit enableComputerUseUi;
             linuxFeatureIds = normalizedLinuxFeatureIds;
@@ -658,6 +676,31 @@ PY
               --unpack "{*.node,*.so,*.dylib}"
             rm -rf "$resources_dir/app-extracted"
 
+            ${pkgs.lib.optionalString codexMicroEnabled ''
+            codex_micro_node_count=0
+            while IFS= read -r codex_micro_node; do
+              codex_micro_node_count=$((codex_micro_node_count + 1))
+              patchelf --set-rpath "${codexMicroRuntimeLibPath}" "$codex_micro_node"
+              actual_rpath="$(patchelf --print-rpath "$codex_micro_node")"
+              if [ "$actual_rpath" != "${codexMicroRuntimeLibPath}" ]; then
+                echo "codex-micro node-hid RPATH verification failed: $actual_rpath" >&2
+                exit 1
+              fi
+            done < <(
+              find "$resources_dir/app.asar.unpacked" -type f \
+                -path '*/node-hid/prebuilds/HID_hidraw-linux-*/node-napi-v4.node' \
+                -print
+            )
+            if [ "$codex_micro_node_count" -ne 1 ]; then
+              echo "expected exactly one codex-micro node-hid Linux binding, found $codex_micro_node_count" >&2
+              exit 1
+            fi
+
+            install -Dm0644 \
+              "$out/opt/codex-desktop/.codex-linux/features/codex-micro/70-codex-micro.rules" \
+              "$out/lib/udev/rules.d/70-codex-micro.rules"
+            ''}
+
             for node_repl_binary in \
               "$resources_dir/node_repl" \
               "$resources_dir/node_repl.codex-linux-original"; do
@@ -697,6 +740,7 @@ PY
 
             makeWrapper "$out/opt/codex-desktop/start.sh" "$out/bin/codex-desktop" \
               --prefix PATH : "${payloadLauncherPath}" \
+              --set-default ALSA_PLUGIN_DIR "${pkgs.pipewire}/lib/alsa-lib" \
               --run 'export XDG_DATA_DIRS="''${XDG_DATA_DIRS:-${xdgDefaultDataDirs}}"' \
               --prefix XDG_DATA_DIRS : "${gsettingsSchemaDataDirs}" \
               --prefix PATH : "/run/current-system/sw/bin" \
@@ -796,6 +840,36 @@ PY
           notification-actions-linux = codexNotificationActionsBinary;
           notification-actions-installer = pkgs.runCommand "codex-notification-actions-installer-check" { } ''
             grep -F 'CODEX_NOTIFICATION_ACTIONS_SOURCE=' ${installer}/bin/codex-desktop-installer >/dev/null
+            touch "$out"
+          '';
+          nix-pipewire-alsa-wrapper = pkgs.runCommand "codex-desktop-nix-pipewire-alsa-wrapper-check" { } ''
+            plugin="${pkgs.pipewire}/lib/alsa-lib/libasound_module_pcm_pipewire.so"
+            expected_plugin_dir="${pkgs.pipewire}/lib/alsa-lib"
+            test -f "$plugin"
+
+            run_wrapper() {
+              case "$1" in
+                unset) unset ALSA_PLUGIN_DIR ;;
+                custom) export ALSA_PLUGIN_DIR=/custom/lib/alsa-lib ;;
+                *) echo "unknown test case: $1" >&2; return 1 ;;
+              esac
+
+              actual_plugin_dir="$({
+                exec() {
+                  printf '%s\n' "$ALSA_PLUGIN_DIR"
+                }
+
+                source ${codexDesktop}/bin/codex-desktop
+              })"
+              if [ "$actual_plugin_dir" != "$2" ]; then
+                printf 'expected ALSA_PLUGIN_DIR <%s>, got <%s>\n' \\
+                  "$2" "$actual_plugin_dir" >&2
+                return 1
+              fi
+            }
+
+            run_wrapper unset "$expected_plugin_dir"
+            run_wrapper custom /custom/lib/alsa-lib
             touch "$out"
           '';
           nix-gsettings-schema-wrapper = pkgs.runCommand "codex-desktop-nix-gsettings-schema-wrapper-check" { } ''

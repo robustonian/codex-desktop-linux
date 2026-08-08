@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 
 const {
   PATCH_STATUS_FAILED_REQUIRED,
@@ -24,6 +25,8 @@ const {
   applyExtractedAppPatchDescriptors,
   applyMainBundlePatchDescriptors,
   applyWebviewAssetPatchDescriptors,
+  descriptorAppliesTo,
+  descriptorEnabled,
   discoverCorePatchDescriptors,
   normalizePatchDescriptors,
 } = require("./engine.js");
@@ -53,6 +56,15 @@ function recordMainProcessUiPatch(report, status, reason = null) {
   });
 }
 
+function mainBundleSyntaxError(source, target) {
+  try {
+    new vm.Script(source, { filename: target });
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
 function normalizeDiscoveredCorePatchDescriptors(options = {}) {
   const root = options.corePatchRoot ?? CORE_PATCH_ROOT;
   return normalizePatchDescriptors(discoverCorePatchDescriptors({ root }));
@@ -75,15 +87,19 @@ function featurePatchOptions(options = {}) {
 
 function createMainBundleContext(iconAsset, options = {}) {
   const linux = options.linuxTarget ?? detectLinuxTargetContext(options.linuxTargetOptions);
+  const currentFeaturePatchOptions = featurePatchOptions(options);
+  const enabledFeatureIds = options.enabledFeatureIds ??
+    enabledLinuxFeatureIds(currentFeaturePatchOptions);
   return {
     enableComputerUseUi: isComputerUseUiEnabled(),
+    enabledFeatureIds: [...enabledFeatureIds],
     iconAsset,
     iconPathExpression:
       iconAsset == null ? null : `process.resourcesPath+\`/../content/webview/assets/${iconAsset}\``,
     linux,
     linuxTarget: linux,
     corePatchRoot: options.corePatchRoot,
-    featurePatchOptions: featurePatchOptions(options),
+    featurePatchOptions: currentFeaturePatchOptions,
   };
 }
 
@@ -113,8 +129,76 @@ function mainBundlePatchDescriptors(context) {
   ]);
 }
 
+function patchCompositionDelegates(descriptors, context = {}) {
+  const coreOwners = new Map(
+    descriptors
+      .filter((descriptor) => descriptor.sourceKind === "core")
+      .map((descriptor) => [descriptor.id, descriptor]),
+  );
+  const delegates = new Map();
+  for (const descriptor of descriptors) {
+    if (
+      descriptor.sourceKind !== "feature" ||
+      typeof descriptor.featureId !== "string" ||
+      !Array.isArray(descriptor.composesPatches)
+    ) {
+      continue;
+    }
+    if (
+      !descriptorAppliesTo(descriptor, context) ||
+      !descriptorEnabled(descriptor, context)
+    ) {
+      continue;
+    }
+    for (const ownerPatchId of descriptor.composesPatches) {
+      const owner = coreOwners.get(ownerPatchId);
+      if (owner == null) {
+        throw new Error(
+          `Feature descriptor '${descriptor.id}' composes unknown core patch '${ownerPatchId}'`,
+        );
+      }
+      if (owner.phase !== descriptor.phase) {
+        throw new Error(
+          `Feature descriptor '${descriptor.id}' composes core patch '${ownerPatchId}' across phases`,
+        );
+      }
+      if (
+        !descriptorAppliesTo(owner, context) ||
+        !descriptorEnabled(owner, context)
+      ) {
+        throw new Error(
+          `Feature descriptor '${descriptor.id}' composes inactive core patch '${ownerPatchId}'`,
+        );
+      }
+      if (descriptor.order <= owner.order) {
+        throw new Error(
+          `Feature descriptor '${descriptor.id}' must run after composed core patch '${ownerPatchId}'`,
+        );
+      }
+      const existing = delegates.get(ownerPatchId);
+      if (existing != null) {
+        throw new Error(
+          `Core patch '${ownerPatchId}' has multiple active composition delegates: '${existing}' and '${descriptor.id}'`,
+        );
+      }
+      delegates.set(ownerPatchId, descriptor.featureId);
+    }
+  }
+  return Object.fromEntries(
+    [...delegates.entries()].map(([ownerPatchId, featureId]) => [
+      ownerPatchId,
+      [featureId],
+    ]),
+  );
+}
+
 function applyMainBundlePatches(source, context, report) {
-  return applyMainBundlePatchDescriptors(source, mainBundlePatchDescriptors(context), context, report);
+  const descriptors = mainBundlePatchDescriptors(context);
+  context.patchCompositionDelegates = {
+    ...(context.patchCompositionDelegates ?? {}),
+    ...patchCompositionDelegates(descriptors, context),
+  };
+  return applyMainBundlePatchDescriptors(source, descriptors, context, report);
 }
 
 function patchMainBundleSource(source, iconAsset, options = {}) {
@@ -132,7 +216,7 @@ function patchExtractedApp(extractedDir, options = {}) {
 
   setReportLinuxTarget(report, baseContext.linux);
   if (report != null) {
-    report.enabledFeatures = enabledLinuxFeatureIds(featuresOptions);
+    report.enabledFeatures = [...baseContext.enabledFeatureIds];
   }
 
   const main = findMainBundle(extractedDir);
@@ -158,27 +242,41 @@ function patchExtractedApp(extractedDir, options = {}) {
 
   const assetContext = createMainBundleContext(iconAsset, {
     ...options,
+    enabledFeatureIds: baseContext.enabledFeatureIds,
     linuxTarget: baseContext.linux,
   });
+  assetContext.patchCompositionDelegates =
+    patchCompositionDelegates(patchDescriptors, assetContext);
   assetContext.report = report;
 
   if (main != null) {
     const target = path.join(main.buildDir, main.mainBundle);
     const source = fs.readFileSync(target, "utf8");
     const { patchedSource, requiredCoreWarnings } = applyMainBundlePatches(source, assetContext, report);
-    if (patchedSource !== source) {
+    const sourceSyntaxError = mainBundleSyntaxError(source, target);
+    const patchedSyntaxError = mainBundleSyntaxError(patchedSource, target);
+    const syntaxWarning = sourceSyntaxError == null && patchedSyntaxError != null
+      ? `WARN: Patched main bundle has invalid JavaScript syntax: ${patchedSyntaxError}`
+      : null;
+    if (syntaxWarning != null) {
+      console.warn(syntaxWarning);
+    } else if (patchedSource !== source) {
       fs.writeFileSync(target, patchedSource, "utf8");
     }
+    const aggregateWarnings = [
+      ...requiredCoreWarnings,
+      ...(syntaxWarning == null ? [] : [syntaxWarning]),
+    ];
     recordPatch(
       report,
       "main-process-ui",
-      patchStatusFromChange(patchedSource !== source, requiredCoreWarnings, REQUIRED_UPSTREAM),
-      requiredCoreWarnings[0] ?? null,
+      patchStatusFromChange(patchedSource !== source, aggregateWarnings, REQUIRED_UPSTREAM),
+      aggregateWarnings[0] ?? null,
       {
         phase: "main-bundle",
         ciPolicy: REQUIRED_UPSTREAM,
         sourceKind: "core",
-        ...(requiredCoreWarnings.length > 0 ? { warnings: [...requiredCoreWarnings] } : {}),
+        ...(aggregateWarnings.length > 0 ? { warnings: aggregateWarnings } : {}),
       },
     );
   }
@@ -255,6 +353,7 @@ module.exports = {
   createMainBundleContext,
   featurePatchDescriptors,
   patchExtractedApp,
+  patchCompositionDelegates,
   patchMainBundleSource,
   requiredPatchNamesForProfile,
 };

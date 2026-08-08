@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/rust-toolchain.sh"
 PACKAGE_NAME="codex-desktop"
 SYSTEM_APP_ASAR="/opt/$PACKAGE_NAME/resources/app.asar"
 LOCAL_APP_ASAR="$REPO_DIR/codex-app/resources/app.asar"
@@ -127,8 +129,8 @@ have_modern_7zip() {
     ! 7z 2>&1 | grep -m 1 "7-Zip" | grep -q "16.02"
 }
 
-ensure_cargo_on_path() {
-    if command -v cargo >/dev/null 2>&1; then
+ensure_rust_toolchain_on_path() {
+    if rust_toolchain_compatible; then
         return 0
     fi
 
@@ -137,7 +139,7 @@ ensure_cargo_on_path() {
         . "$HOME/.cargo/env"
     fi
 
-    command -v cargo >/dev/null 2>&1
+    rust_toolchain_compatible
 }
 
 dependencies_ready() {
@@ -151,7 +153,7 @@ dependencies_ready() {
     major="$(node_major 2>/dev/null || true)"
     [ -n "$major" ] && [ "$major" -ge 20 ] || return 1
     have_modern_7zip || return 1
-    ensure_cargo_on_path || return 1
+    ensure_rust_toolchain_on_path || return 1
     distro="$(detect_package_distro)"
     if [ "$distro" != "unknown" ]; then
         system_nodejs_ready "$distro" || return 1
@@ -331,7 +333,8 @@ main() {
     else
         info "Installing or verifying host dependencies"
         bash "$REPO_DIR/scripts/install-deps.sh"
-        ensure_cargo_on_path || error "cargo is still unavailable after scripts/install-deps.sh"
+        ensure_rust_toolchain_on_path \
+            || error "Rust ${MIN_RUST_VERSION}+ is still unavailable after scripts/install-deps.sh (found $(rustc_version 2>/dev/null || printf 'none'))"
     fi
 
     local current_package_version current_app_version
