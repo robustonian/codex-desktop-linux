@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 
 const {
   PATCH_STATUS_FAILED_REQUIRED,
@@ -53,6 +54,15 @@ function recordMainProcessUiPatch(report, status, reason = null) {
     ciPolicy: REQUIRED_UPSTREAM,
     sourceKind: "core",
   });
+}
+
+function mainBundleSyntaxError(source, target) {
+  try {
+    new vm.Script(source, { filename: target });
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
 }
 
 function normalizeDiscoveredCorePatchDescriptors(options = {}) {
@@ -243,19 +253,30 @@ function patchExtractedApp(extractedDir, options = {}) {
     const target = path.join(main.buildDir, main.mainBundle);
     const source = fs.readFileSync(target, "utf8");
     const { patchedSource, requiredCoreWarnings } = applyMainBundlePatches(source, assetContext, report);
-    if (patchedSource !== source) {
+    const sourceSyntaxError = mainBundleSyntaxError(source, target);
+    const patchedSyntaxError = mainBundleSyntaxError(patchedSource, target);
+    const syntaxWarning = sourceSyntaxError == null && patchedSyntaxError != null
+      ? `WARN: Patched main bundle has invalid JavaScript syntax: ${patchedSyntaxError}`
+      : null;
+    if (syntaxWarning != null) {
+      console.warn(syntaxWarning);
+    } else if (patchedSource !== source) {
       fs.writeFileSync(target, patchedSource, "utf8");
     }
+    const aggregateWarnings = [
+      ...requiredCoreWarnings,
+      ...(syntaxWarning == null ? [] : [syntaxWarning]),
+    ];
     recordPatch(
       report,
       "main-process-ui",
-      patchStatusFromChange(patchedSource !== source, requiredCoreWarnings, REQUIRED_UPSTREAM),
-      requiredCoreWarnings[0] ?? null,
+      patchStatusFromChange(patchedSource !== source, aggregateWarnings, REQUIRED_UPSTREAM),
+      aggregateWarnings[0] ?? null,
       {
         phase: "main-bundle",
         ciPolicy: REQUIRED_UPSTREAM,
         sourceKind: "core",
-        ...(requiredCoreWarnings.length > 0 ? { warnings: [...requiredCoreWarnings] } : {}),
+        ...(aggregateWarnings.length > 0 ? { warnings: aggregateWarnings } : {}),
       },
     );
   }

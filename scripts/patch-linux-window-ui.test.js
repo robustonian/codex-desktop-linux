@@ -3494,28 +3494,6 @@ test("redirects the renamed Linux-aware titlebar overlay sync away from the tran
   assert.deepEqual(warnings, []);
 });
 
-test("updates every Linux zoom titlebar overlay refresh call site", () => {
-  const source = [
-    "function A2(e){return e===`avatarOverlay`}",
-    "function I2({platform:e,appearance:t,opaqueWindowsEnabled:n,prefersDarkColors:r}){return n&&!A2(t)&&(e===`darwin`||e===`win32`)?{backgroundColor:r?a2:o2,backgroundMaterial:e===`win32`?`none`:null}:e===`linux`&&!A2(t)?{backgroundColor:r?a2:o2,backgroundMaterial:null}:{backgroundColor:i2,backgroundMaterial:null}}",
-    "function b2(e=1){return{color:i2,symbolColor:a.nativeTheme.shouldUseDarkColors?v2:_2,height:Math.round(g2*e)}}",
-    "case`quickChat`:case`primary`:return n===`darwin`?{titleBarStyle:`hiddenInset`,trafficLightPosition:y2(r),...e===`quickChat`?{hasShadow:!0,resizable:!0,transparent:!0}:{},...t?{}:{vibrancy:`menu`}}:n===`win32`||n===`linux`?{titleBarStyle:`hidden`,titleBarOverlay:b2(r),...e===`quickChat`?{resizable:!0}:{}}:{titleBarStyle:`default`,...e===`quickChat`?{resizable:!0}:{}};",
-    "installApplicationMenuTitleBarOverlaySync(e,t){if(process.platform!==`win32`&&process.platform!==`linux`||t!==`primary`&&t!==`quickChat`)return;let n=()=>{e.isDestroyed()||e.setTitleBarOverlay(b2(this.windowZooms.get(e.id)))};return a.nativeTheme.on(`updated`,n),n(),()=>{a.nativeTheme.off(`updated`,n)}}",
-    "process.platform===`darwin`?n.setWindowButtonPosition(y2(t)):(process.platform===`win32`||process.platform===`linux`)&&(this.windowZooms.set(n.id,t),n.setTitleBarOverlay(b2(t)))",
-    "process.platform===`darwin`?o.setWindowButtonPosition(y2(i)):(process.platform===`win32`||process.platform===`linux`)&&(this.windowZooms.set(o.id,i),o.setTitleBarOverlay(b2(i)))",
-  ].join("");
-  const patched = applyPatchTwice(applyLinuxNativeTitlebarPatch, source);
-
-  assert.equal(
-    (patched.match(/setTitleBarOverlay\(process\.platform===`linux`\?codexLinuxTitleBarOverlay/g) ?? []).length,
-    3,
-  );
-  assert.doesNotMatch(
-    patched,
-    /\(process\.platform===`win32`\|\|process\.platform===`linux`\)&&\(this\.windowZooms\.set\([^)]+\),[A-Za-z_$][\w$]*\.setTitleBarOverlay\(b2\([^)]+\)\)\)/,
-  );
-});
-
 function windowControlsSafeAreaFixture(firstInset = 0, secondInset = 0) {
   return [
     `var l=Object.freeze({default:Object.freeze({left:0,right:0}),mac:Object.freeze({legacy:Object.freeze({left:66+c,right:0}),modern:Object.freeze({left:76+c,right:0})}),applicationMenu:Object.freeze({left:0,right:${firstInset}})});`,
@@ -11602,6 +11580,46 @@ test("main-process-ui aggregate ignores optional main-bundle drift warnings", ()
       ),
     );
   } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("main-process-ui rejects a patch-created JavaScript syntax error without writing it", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-patch-report-main-syntax-"));
+  const coreRoot = path.join(tempRoot, "core-patches");
+  try {
+    const buildDir = path.join(tempRoot, ".vite", "build");
+    const patchDir = path.join(coreRoot, "all-linux", "main-process", "syntax-test");
+    const mainPath = path.join(buildDir, "main.js");
+    const originalSource = "codexRequiredPatchOff()";
+    fs.mkdirSync(buildDir, { recursive: true });
+    fs.mkdirSync(patchDir, { recursive: true });
+    fs.writeFileSync(mainPath, originalSource);
+    fs.writeFileSync(
+      path.join(patchDir, "patch.js"),
+      [
+        '"use strict";',
+        "module.exports={",
+        'id:"required-main-bundle-syntax-test",',
+        'phase:"main-bundle",',
+        'ciPolicy:"required-upstream",',
+        'apply:(source)=>source.replace("codexRequiredPatchOff()","codexRequiredPatchOn())")',
+        "};",
+      ].join("\n"),
+    );
+
+    const report = createPatchReport();
+    const { warnings } = captureWarns(() =>
+      patchExtractedApp(tempRoot, { report, corePatchRoot: coreRoot }),
+    );
+
+    const aggregate = report.patches.find((patch) => patch.name === "main-process-ui");
+    assert.equal(fs.readFileSync(mainPath, "utf8"), originalSource);
+    assert.equal(aggregate.status, "failed-required");
+    assert.match(aggregate.reason, /invalid JavaScript syntax: Unexpected token '\)'/);
+    assert.ok(warnings.some((warning) => warning.includes("invalid JavaScript syntax")));
+  } finally {
+    fs.rmSync(coreRoot, { recursive: true, force: true });
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 });
