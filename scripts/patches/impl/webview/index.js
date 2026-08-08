@@ -9,12 +9,22 @@ const {
   escapeRegExp,
   findMatchingBrace,
 } = require("../../lib/minified-js.js");
+const {
+  patchDelegationState,
+} = require("../../lib/composition-delegation.js");
+const {
+  PatchIntegrityError,
+} = require("../../integrity-error.js");
 
 // Webview asset patches target hashed browser chunks copied out of app.asar.
 // They stay fail-soft because upstream chunk names and minified symbols drift.
 const LINUX_TOOLTIP_COLLISION_PADDING_TOP = 44;
 const LINUX_WINDOW_CONTROLS_SAFE_AREA_RIGHT = 138;
 const LINUX_WINDOW_CONTROLS_SAFE_AREA_PROP = "codexLinuxUseWindowControlsSafeArea";
+const LINUX_WINDOW_CONTROLS_SAFE_AREA_MARKER =
+  "/*codexLinuxWindowControlsSafeAreaPatch*/";
+const LINUX_WINDOW_CONTROLS_SAFE_AREA_PATCH_ID =
+  "linux-window-controls-safe-area";
 
 function applyLinuxSettingsSearchVisibilityPatch(currentSource) {
   if (currentSource.includes("function codexLinuxFilterSettingsSearchSection(")) {
@@ -184,7 +194,104 @@ function applyLinuxHeaderSlotSafeAreaPatch(currentSource) {
     .replace(slotSource, patchedSlotSource);
 }
 
-function applyLinuxWindowControlsSafeAreaPatch(currentSource) {
+function markLinuxWindowControlsSafeAreaPatch(source) {
+  const strictDirective = '"use strict";';
+  const insertionIndex = source.startsWith(strictDirective)
+    ? strictDirective.length
+    : 0;
+  return (
+    source.slice(0, insertionIndex) +
+    LINUX_WINDOW_CONTROLS_SAFE_AREA_MARKER +
+    source.slice(insertionIndex)
+  );
+}
+
+function hasCompleteLinuxWindowControlsSafeAreaPatch(source) {
+  const markerCount =
+    source.split(LINUX_WINDOW_CONTROLS_SAFE_AREA_MARKER).length - 1;
+  if (markerCount !== 1) {
+    return false;
+  }
+
+  const insetMatches = [
+    ...source.matchAll(
+      /applicationMenu:Object\.freeze\(\{left:0,right:([^}]+)\}\)/gu,
+    ),
+  ];
+  const slotSignatureMatches = source.match(
+    new RegExp(
+      `function [A-Za-z_$][\\w$]*\\(\\{entries:[A-Za-z_$][\\w$]*,fitWidth:[A-Za-z_$][\\w$]*,side:[A-Za-z_$][\\w$]*,slotWidth:[A-Za-z_$][\\w$]*,${LINUX_WINDOW_CONTROLS_SAFE_AREA_PROP}\\}\\)`,
+      "gu",
+    ),
+  ) ?? [];
+  const paddingMatches = source.match(
+    new RegExp(
+      `"pe-2":([A-Za-z_$][\\w$]*)===\`start\`&&[A-Za-z_$][\\w$]*\\|\\|\\1===\`end\`&&!${LINUX_WINDOW_CONTROLS_SAFE_AREA_PROP},"pe-\\(--spacing-token-safe-header-right\\)":\\1===\`end\`&&${LINUX_WINDOW_CONTROLS_SAFE_AREA_PROP}`,
+      "gu",
+    ),
+  ) ?? [];
+  const nativeHeaderMatches = source.match(
+    new RegExp(
+      `${LINUX_WINDOW_CONTROLS_SAFE_AREA_PROP}:![A-Za-z_$][\\w$]*,side:\`end\``,
+      "gu",
+    ),
+  ) ?? [];
+  const hasSharedConsumers =
+    insetMatches.length > 0 &&
+    slotSignatureMatches.length === 1 &&
+    paddingMatches.length === 1;
+  if (!hasSharedConsumers) {
+    return false;
+  }
+
+  return (
+    insetMatches.every((match) =>
+      match[1] === String(LINUX_WINDOW_CONTROLS_SAFE_AREA_RIGHT)
+    ) &&
+    nativeHeaderMatches.length === 1
+  );
+}
+
+function applyLinuxWindowControlsSafeAreaPatch(currentSource, context = {}) {
+  const delegation = patchDelegationState(
+    currentSource,
+    LINUX_WINDOW_CONTROLS_SAFE_AREA_PATCH_ID,
+    {
+      allowedFeatureIds:
+        context.patchCompositionDelegates?.[
+          LINUX_WINDOW_CONTROLS_SAFE_AREA_PATCH_ID
+        ],
+      enabledFeatureIds: context.enabledFeatureIds,
+      ownerMarker: LINUX_WINDOW_CONTROLS_SAFE_AREA_MARKER,
+    },
+  );
+  if (delegation.state === "enabled") {
+    return currentSource;
+  }
+  if (delegation.state !== "none") {
+    console.warn(
+      "WARN: Found inactive or invalid Linux window-controls safe-area patch delegation — skipping",
+    );
+    return currentSource;
+  }
+  const markerCount =
+    currentSource.split(LINUX_WINDOW_CONTROLS_SAFE_AREA_MARKER).length - 1;
+  if (markerCount > 0) {
+    if (hasCompleteLinuxWindowControlsSafeAreaPatch(currentSource)) {
+      return currentSource;
+    }
+    console.warn(
+      "WARN: Found incomplete Linux window-controls safe-area patch marker — skipping",
+    );
+    return currentSource;
+  }
+  if (currentSource.includes(LINUX_WINDOW_CONTROLS_SAFE_AREA_PROP)) {
+    console.warn(
+      "WARN: Found unmarked Linux window-controls safe-area patch state — skipping",
+    );
+    return currentSource;
+  }
+
   const currentInset = `applicationMenu:Object.freeze({left:0,right:${LINUX_WINDOW_CONTROLS_SAFE_AREA_RIGHT}})`;
   const defaultInset = "applicationMenu:Object.freeze({left:0,right:0})";
 
@@ -211,7 +318,14 @@ function applyLinuxWindowControlsSafeAreaPatch(currentSource) {
       patchedSource.includes(LINUX_WINDOW_CONTROLS_SAFE_AREA_PROP)
     )
   ) {
-    return patchedSource;
+    const completedSource = markLinuxWindowControlsSafeAreaPatch(patchedSource);
+    if (hasCompleteLinuxWindowControlsSafeAreaPatch(completedSource)) {
+      return completedSource;
+    }
+    console.warn(
+      "WARN: Could not complete Linux window-controls safe-area consumers — skipping",
+    );
+    return currentSource;
   }
 
   if (
@@ -702,7 +816,7 @@ function hasCompleteLinuxBrowserUseWebviewRemountStorePatch(source) {
     source.includes("for(let e of this.linuxBrowserUseRecoveryStates.keys())") &&
     source.includes("this.linuxBrowserUseRecoveryStates.clear()") &&
     source.includes("this.linuxBrowserUseRecoveryStates.set(") &&
-    (source.match(/linuxBrowserUseRecoveryStates\.delete\(/gu) ?? []).length >= 7
+    (source.match(/linuxBrowserUseRecoveryStates\.delete\(/gu) ?? []).length >= 6
   );
 }
 
@@ -734,9 +848,12 @@ function applyLinuxBrowserUseWebviewRemountStorePatch(currentSource) {
       /this\.snapshots\.get\(([A-Za-z_$][\w$]*)\(/u,
     )?.[1];
   const activeMethodMatch =
-    /setBrowserUseActive\(([A-Za-z_$][\w$]*),\.\.\.([A-Za-z_$][\w$]*)\)\{let ([A-Za-z_$][\w$]*)=typeof \2\[0\]==`boolean`\?([A-Za-z_$][\w$]*)\(\1,void 0\):\2\[0\],([A-Za-z_$][\w$]*)=typeof \2\[0\]==`boolean`\?\2\[0\]:\2\[1\],/u.exec(
-      classSource,
-    );
+    keyHelper == null
+      ? null
+      : new RegExp(
+          `setBrowserUseActive\\(([A-Za-z_$][\\w$]*),([A-Za-z_$][\\w$]*),([A-Za-z_$][\\w$]*)\\)\\{let ([A-Za-z_$][\\w$]*)=${escapeRegExp(keyHelper)}\\(\\1,\\2\\),`,
+          "u",
+        ).exec(classSource);
   const removeTabMatch =
     keyHelper == null
       ? null
@@ -755,10 +872,6 @@ function applyLinuxBrowserUseWebviewRemountStorePatch(currentSource) {
           `releaseBrowserUseTab\\(([A-Za-z_$][\\w$]*),([A-Za-z_$][\\w$]*)\\)\\{let ([A-Za-z_$][\\w$]*)=${escapeRegExp(keyHelper)}\\(\\1,\\2\\),`,
           "u",
         ).exec(classSource);
-  const siblingDeactivateMatch =
-    /for\(let ([A-Za-z_$][\w$]*) of Array\.from\(this\.browserUseActiveTabKeys\)\)\{if\(\1===([A-Za-z_$][\w$]*)\|\|!\1\.startsWith\(([A-Za-z_$][\w$]*)\)\)continue;this\.browserUseActiveTabKeys\.delete\(\1\);let /u.exec(
-      classSource,
-    );
   const reassociateMethodIndex = classSource.indexOf("reassociateTabState(");
   const reassociateMethodOpenIndex =
     reassociateMethodIndex === -1
@@ -798,7 +911,6 @@ function applyLinuxBrowserUseWebviewRemountStorePatch(currentSource) {
     removeTabMatch == null ||
     removeConversationTabsMatch == null ||
     releaseBrowserUseTabMatch == null ||
-    siblingDeactivateMatch == null ||
     reassociateKeysMatch == null ||
     reassociateStateMatch == null ||
     disposeAllMatch == null ||
@@ -815,13 +927,12 @@ function applyLinuxBrowserUseWebviewRemountStorePatch(currentSource) {
   const [
     activeMethodNeedle,
     activeConversationVar,
-    activeArgsVar,
     activeBrowserTabVar,
-    activeDefaultTabHelper,
     activeValueVar,
+    activeKeyVar,
   ] = activeMethodMatch;
   const activeMethodPatch =
-    `setBrowserUseActive(${activeConversationVar},...${activeArgsVar}){let ${activeBrowserTabVar}=typeof ${activeArgsVar}[0]==\`boolean\`?${activeDefaultTabHelper}(${activeConversationVar},void 0):${activeArgsVar}[0],${activeValueVar}=typeof ${activeArgsVar}[0]==\`boolean\`?${activeArgsVar}[0]:${activeArgsVar}[1];${activeValueVar}||this.linuxBrowserUseRecoveryStates.delete(${keyHelper}(${activeConversationVar},${activeBrowserTabVar}));let `;
+    `setBrowserUseActive(${activeConversationVar},${activeBrowserTabVar},${activeValueVar}){let ${activeKeyVar}=${keyHelper}(${activeConversationVar},${activeBrowserTabVar});${activeValueVar}||this.linuxBrowserUseRecoveryStates.delete(${activeKeyVar});let `;
   const method = `linuxStartWebviewRecovery(e,t,n){let r=${keyHelper}(e,t),i=this.linuxBrowserUseRecoveryStates.get(r);return i??(i={attempt:0,deadlineAt:n},this.linuxBrowserUseRecoveryStates.set(r,i)),i}linuxCompleteWebviewRecovery(e,t,n){let r=${keyHelper}(e,t);this.webviews.get(r)===n&&this.linuxBrowserUseRecoveryStates.delete(r)}linuxFailWebviewRecovery(e,t,n){let r=${keyHelper}(e,t);this.webviews.get(r)===n&&this.linuxBrowserUseRecoveryStates.set(r,{attempt:2,deadlineAt:null})}linuxRemountWebview(e,t,n,r){let i=${keyHelper}(e,t),a=this.linuxBrowserUseRecoveryStates.get(i);if(a?.attempt>=1)return{started:!1,state:a};if(this.webviews.get(i)!==n)return null;let o={attempt:1,deadlineAt:r};return this.linuxBrowserUseRecoveryStates.set(i,o),this.disposeWebviewHost(e,t,i,\`web\`),this.emitChange(),{started:!0,state:o}}`;
   const [
     removeTabNeedle,
@@ -844,11 +955,6 @@ function applyLinuxBrowserUseWebviewRemountStorePatch(currentSource) {
   const releaseBrowserUseTabPatch =
     `releaseBrowserUseTab(${releaseConversationVar},${releaseBrowserTabVar}){let ${releaseKeyVar}=${keyHelper}(${releaseConversationVar},${releaseBrowserTabVar});` +
     `this.linuxBrowserUseRecoveryStates.delete(${releaseKeyVar});let `;
-  const [siblingDeactivateNeedle, siblingKeyVar] = siblingDeactivateMatch;
-  const siblingDeactivatePatch = siblingDeactivateNeedle.replace(
-    ";let ",
-    `;this.linuxBrowserUseRecoveryStates.delete(${siblingKeyVar});let `,
-  );
   const reassociateStateNeedle = reassociateStateMatch[0];
   const reassociateStateVar = reassociateStateMatch[1];
   const reassociateSourceKeyVar = reassociateKeysMatch[1];
@@ -868,7 +974,6 @@ function applyLinuxBrowserUseWebviewRemountStorePatch(currentSource) {
     .replace(removeTabNeedle, removeTabPatch)
     .replace(removeConversationNeedle, removeConversationPatch)
     .replace(releaseBrowserUseTabNeedle, releaseBrowserUseTabPatch)
-    .replace(siblingDeactivateNeedle, siblingDeactivatePatch)
     .replace(reassociateStateNeedle, reassociateStatePatch)
     .replace(disposeAllMatch[0], disposeAllPatch);
   if (!hasCompleteLinuxBrowserUseWebviewRemountStorePatch(patchedClass)) {
@@ -1000,120 +1105,41 @@ function applyLinuxBrowserUseWebviewHostRecoveryPatch(currentSource) {
   );
 }
 
-function applyLinuxBrowserUseHiddenHostOwnershipPatch(currentSource) {
-  const keyMatch = /browserUseTabIdsKey:([A-Za-z_$][\w$]*)/u.exec(currentSource);
-  if (keyMatch == null) {
-    console.warn(
-      "WARN: Could not find hidden Browser Use host tab ownership key — skipping Linux inactive-route host patch",
-    );
+const CURRENT_BROWSER_USE_CHROME_LINUX_REGISTRY =
+  "linux:{installations:[{commands:[`google-chrome`,`google-chrome-stable`],userDataDirName:`google-chrome`},{commands:[`chromium`,`chromium-browser`],userDataDirName:`chromium`},{commands:[`google-chrome-beta`],userDataDirName:`google-chrome-beta`},{commands:[`google-chrome-unstable`],userDataDirName:`google-chrome-unstable`},{commands:[`google-chrome-for-testing`],userDataDirName:`google-chrome-for-testing`}],nativeMessagingManifestDirectories:[`.config/google-chrome/NativeMessagingHosts`,`.config/chromium/NativeMessagingHosts`,`.config/google-chrome-beta/NativeMessagingHosts`,`.config/google-chrome-unstable/NativeMessagingHosts`,`.config/google-chrome-for-testing/NativeMessagingHosts`],processNames:[`chrome`],userDataDirectorySegments:[`.config`,`google-chrome`]}";
+const CURRENT_BROWSER_USE_EDGE_LINUX_REGISTRY =
+  "linux:{installations:[{commands:[`microsoft-edge`,`microsoft-edge-stable`],userDataDirName:`microsoft-edge`}],nativeMessagingManifestDirectories:[`.config/microsoft-edge/NativeMessagingHosts`],processNames:[`msedge`],userDataDirectorySegments:[`.config`,`microsoft-edge`]}";
+const CURRENT_BROWSER_USE_BRAVE_LINUX_REGISTRY =
+  "linux:{installations:[{commands:[`brave-browser`,`brave-browser-stable`,`brave`],userDataDirName:`BraveSoftware/Brave-Browser`}],nativeMessagingManifestDirectories:[`.config/BraveSoftware/Brave-Browser/NativeMessagingHosts`],processNames:[`brave`,`brave-browser`],userDataDirectorySegments:[`.config`,`BraveSoftware`,`Brave-Browser`]}";
+const CURRENT_BROWSER_USE_OPERA_LINUX_REGISTRY =
+  "linux:{installations:[{commands:[`opera`,`opera-stable`],userDataDirName:`opera`}],nativeMessagingManifestDirectories:[`.config/opera/NativeMessagingHosts`],processNames:[`opera`],userDataDirectorySegments:[`.config`,`opera`]}";
+const CURRENT_BROWSER_USE_VIVALDI_LINUX_REGISTRY =
+  "linux:{installations:[{commands:[`vivaldi`,`vivaldi-stable`],userDataDirName:`vivaldi`}],nativeMessagingManifestDirectories:[`.config/vivaldi/NativeMessagingHosts`],processNames:[`vivaldi`,`vivaldi-bin`],userDataDirectorySegments:[`.config`,`vivaldi`]}";
+const CURRENT_BROWSER_USE_CONTRACT_MISSING_REASON =
+  "Could not identify complete current Browser Use external availability and browser registry contract";
+
+const externalBrowserUseAvailabilityPatchedPattern =
+  /function [A-Za-z_$][\w$]*\(\{isExternalBrowserUseFeatureEnabled:[A-Za-z_$][\w$]*,isExternalBrowserUseFeatureLoading:[A-Za-z_$][\w$]*,isExternalBrowserUseGateEnabled:[A-Za-z_$][\w$]*,runCodexInWsl:[A-Za-z_$][\w$]*,windowType:([A-Za-z_$][\w$]*)\}\)\{return \1===`chrome-extension`\|\|navigator\.userAgent\.includes\(`Linux`\)\?`available`:/;
+const externalBrowserUseAvailabilityCurrentPattern =
+  /(function [A-Za-z_$][\w$]*\(\{isExternalBrowserUseFeatureEnabled:[A-Za-z_$][\w$]*,isExternalBrowserUseFeatureLoading:[A-Za-z_$][\w$]*,isExternalBrowserUseGateEnabled:[A-Za-z_$][\w$]*,runCodexInWsl:[A-Za-z_$][\w$]*,windowType:([A-Za-z_$][\w$]*)\}\)\{return )\2===`chrome-extension`\?`available`:/;
+
+function patchCurrentExternalBrowserUseAvailabilitySource(currentSource) {
+  if (externalBrowserUseAvailabilityPatchedPattern.test(currentSource)) {
     return currentSource;
   }
-
-  const browserUseTabIdsKeyVar = keyMatch[1];
-  const componentStartIndex = currentSource.lastIndexOf("function ", keyMatch.index);
-  const componentOpenIndex = currentSource.indexOf("{", componentStartIndex);
-  const componentCloseIndex =
-    componentOpenIndex === -1
-      ? -1
-      : findMatchingBrace(currentSource, componentOpenIndex);
-  const componentSource =
-    componentStartIndex === -1 || componentCloseIndex === -1
-      ? ""
-      : currentSource.slice(componentStartIndex, componentCloseIndex + 1);
-  const parsedTabIdsMatch = new RegExp(
-    `${escapeRegExp(browserUseTabIdsKeyVar)}\\.split\\(\`\\\\0\`\\)\\.map\\(([A-Za-z_$][\\w$]*)\\)\\.filter`,
-    "u",
-  ).exec(componentSource);
-  const guardMatch =
-    /if\(!([A-Za-z_$][\w$]*)&&([A-Za-z_$][\w$]*)\.size>0(?:&&([A-Za-z_$][\w$]*)\.split\(`\\0`\)\.map\(([A-Za-z_$][\w$]*)\)\.every\(([A-Za-z_$][\w$]*)=>\2\.has\(\5\)\))?\)return null;/u.exec(
-      componentSource,
-    );
-
-  if (
-    guardMatch != null &&
-    guardMatch[3] === browserUseTabIdsKeyVar &&
-    guardMatch[4] === parsedTabIdsMatch?.[1]
-  ) {
-    return currentSource;
-  }
-  if (
-    componentStartIndex === -1 ||
-    componentCloseIndex === -1 ||
-    parsedTabIdsMatch == null ||
-    guardMatch == null
-  ) {
-    console.warn(
-      "WARN: Could not find hidden Browser Use host ownership guard — skipping Linux inactive-route host patch",
-    );
-    return currentSource;
-  }
-
-  const [guardNeedle, routeOwnerVar, visibleTabIdsVar] = guardMatch;
-  const parseBrowserTabIdVar = parsedTabIdsMatch[1];
-  const visibleTabIdVar = "codexLinuxBrowserUseTabId";
-  const guardPatch =
-    `if(!${routeOwnerVar}&&${visibleTabIdsVar}.size>0&&` +
-    `${browserUseTabIdsKeyVar}.split(\`\\0\`).map(${parseBrowserTabIdVar}).every(` +
-    `${visibleTabIdVar}=>${visibleTabIdsVar}.has(${visibleTabIdVar})))return null;`;
-  const patchedComponent = componentSource.replace(guardNeedle, guardPatch);
-  return (
-    `${currentSource.slice(0, componentStartIndex)}${patchedComponent}` +
-    `${currentSource.slice(componentCloseIndex + 1)}`
+  const patchedSource = currentSource.replace(
+    externalBrowserUseAvailabilityCurrentPattern,
+    (match, prefix, windowTypeVar) =>
+      `${prefix}${windowTypeVar}===\`chrome-extension\`||navigator.userAgent.includes(\`Linux\`)?\`available\`:`,
   );
+  return patchedSource === currentSource ? null : patchedSource;
 }
 
 function applyLinuxBrowserUseExternalAvailabilityPatch(currentSource) {
   const externalFeatureNeedle = "featureName:`browser_use_external`";
   const statsigNeedle = "410065390";
-  let changed = false;
-
-  const alreadyPatched = () =>
-    /featureName:`browser_use_external`[\s\S]{0,900}?navigator\.userAgent\.includes\(`Linux`\)/.test(currentSource);
-
-  const availabilityPattern =
-    /let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\),([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)===`chrome-extension`\|\|([A-Za-z_$][\w$]*)&&\1\.enabled&&!\1\.isLoading,([A-Za-z_$][\w$]*)=\5===`chrome-extension`\?!1:\1\.isLoading,/g;
-
-  let patchedSource = currentSource.replace(
-    availabilityPattern,
-    (
-      match,
-      featureQueryVar,
-      featureQueryFn,
-      featureQueryArg,
-      availableVar,
-      windowTypeVar,
-      statsigVar,
-      loadingVar,
-      offset,
-    ) => {
-      const contextStart = Math.max(0, offset - 700);
-      const context = currentSource.slice(contextStart, offset + match.length);
-      if (!context.includes(externalFeatureNeedle) || !context.includes(statsigNeedle)) {
-        return match;
-      }
-
-      changed = true;
-      return `let ${featureQueryVar}=${featureQueryFn}(${featureQueryArg}),${availableVar}=${windowTypeVar}===\`chrome-extension\`||navigator.userAgent.includes(\`Linux\`)||${statsigVar}&&${featureQueryVar}.enabled&&!${featureQueryVar}.isLoading,${loadingVar}=${windowTypeVar}===\`chrome-extension\`||navigator.userAgent.includes(\`Linux\`)?!1:${featureQueryVar}.isLoading,`;
-    },
-  );
-
-  if (!changed) {
-    // 26.623 refactored the inline availability gate into a status-string helper:
-    //   function X({isExternalBrowserUseFeatureEnabled:e,isExternalBrowserUseFeatureLoading:t,
-    //     isExternalBrowserUseGateEnabled:n,windowType:r}){return r===`chrome-extension`?`available`:...}
-    // Treat Linux like chrome-extension so the resolved status is `available`.
-    const statusFnPattern =
-      /(function [A-Za-z_$][\w$]*\(\{isExternalBrowserUseFeatureEnabled:[A-Za-z_$][\w$]*,isExternalBrowserUseFeatureLoading:[A-Za-z_$][\w$]*,isExternalBrowserUseGateEnabled:[A-Za-z_$][\w$]*,windowType:([A-Za-z_$][\w$]*)\}\)\{return )\2===`chrome-extension`\?`available`:/;
-    patchedSource = patchedSource.replace(
-      statusFnPattern,
-      (match, prefix, windowTypeVar) => {
-        changed = true;
-        return `${prefix}${windowTypeVar}===\`chrome-extension\`||navigator.userAgent.includes(\`Linux\`)?\`available\`:`;
-      },
-    );
-  }
-
-  if (changed || alreadyPatched()) {
+  const patchedSource = patchCurrentExternalBrowserUseAvailabilitySource(currentSource);
+  if (patchedSource != null) {
     return patchedSource;
   }
 
@@ -1124,6 +1150,179 @@ function applyLinuxBrowserUseExternalAvailabilityPatch(currentSource) {
   }
 
   return currentSource;
+}
+
+function currentNativeBrowserUseRegistryContract(source, registryVar, checkerVar) {
+  const exactLinuxRegistries = [
+    CURRENT_BROWSER_USE_CHROME_LINUX_REGISTRY,
+    CURRENT_BROWSER_USE_EDGE_LINUX_REGISTRY,
+    CURRENT_BROWSER_USE_BRAVE_LINUX_REGISTRY,
+    CURRENT_BROWSER_USE_OPERA_LINUX_REGISTRY,
+    CURRENT_BROWSER_USE_VIVALDI_LINUX_REGISTRY,
+  ];
+  return source.includes(
+    `${registryVar}={chrome:{backendCompatibilityKey:\`chrome\`,displayName:\`Google Chrome\``,
+  ) &&
+    source.includes("},edge:{backendCompatibilityKey:`chrome`,displayName:`Microsoft Edge`") &&
+    source.includes("},brave:{backendCompatibilityKey:`chrome`,displayName:`Brave`") &&
+    source.includes("},opera:{backendCompatibilityKey:`chrome`,displayName:`Opera`") &&
+    source.includes("},vivaldi:{backendCompatibilityKey:`chrome`,displayName:`Vivaldi`") &&
+    exactLinuxRegistries.every(
+      (registry) => source.split(registry).length - 1 === 1,
+    ) &&
+    source.includes(`function ${checkerVar}(e){return Object.hasOwn(${registryVar},e)}`);
+}
+
+function currentBrowserUseMainCallerContract(source) {
+  return source.includes("async function mne({browserFamily:") &&
+    source.includes("function Ol({browserFamily:") &&
+    source.includes("async function hne({browserFamily:") &&
+    source.includes("async function gne({browserFamily:") &&
+    source.includes("function jl(e,t){let r=n.Eo[e].linux.installations;") &&
+    source.includes(
+      "getInstalledBrowserFamilies(){let e=Object.keys(n.Eo).filter(n.ko);",
+    ) &&
+    source.includes(
+      "async openUrl({browserFamily:e,url:t}){await gne({browserFamily:",
+    );
+}
+
+function currentBrowserUseMainRegistryContract(source) {
+  return currentNativeBrowserUseRegistryContract(source, "Oy", "Iy") &&
+    source.includes(
+      "Object.defineProperty(exports,\"Eo\",{enumerable:!0,get:function(){return Oy}})",
+    ) &&
+    source.includes(
+      "Object.defineProperty(exports,\"ko\",{enumerable:!0,get:function(){return Iy}})",
+    ) &&
+    source.includes("Object.keys(Oy).filter(Iy)");
+}
+
+function currentBrowserUseRendererContract(source) {
+  return currentNativeBrowserUseRegistryContract(source, "Fu", "Pu") &&
+    source.includes("featureName:`browser_use_external`") &&
+    source.includes("410065390") &&
+    source.includes("Object.keys(Fu).filter(Pu)") &&
+    (externalBrowserUseAvailabilityCurrentPattern.test(source) ||
+      externalBrowserUseAvailabilityPatchedPattern.test(source));
+}
+
+function findUniqueCurrentBrowserUseAsset(directory, fileNamePattern, contract) {
+  if (!fs.existsSync(directory)) {
+    return null;
+  }
+  const matches = fs.readdirSync(directory)
+    .filter((fileName) => fileNamePattern.test(fileName))
+    .sort()
+    .map((fileName) => {
+      const filePath = path.join(directory, fileName);
+      return { filePath, source: fs.readFileSync(filePath, "utf8") };
+    })
+    .filter(({ source }) => contract(source));
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function writeCurrentBrowserUseAssetCandidates(candidates, writeFileSync, readFileSync) {
+  const attempted = [];
+  try {
+    for (const candidate of candidates) {
+      attempted.push(candidate);
+      writeFileSync(candidate.filePath, candidate.patched, "utf8");
+    }
+  } catch (error) {
+    const rollbackWriteFailures = [];
+    for (const candidate of attempted.reverse()) {
+      try {
+        writeFileSync(candidate.filePath, candidate.source, "utf8");
+      } catch (rollbackError) {
+        rollbackWriteFailures.push(rollbackError);
+      }
+    }
+    const rollbackVerificationFailures = [];
+    for (const candidate of attempted) {
+      try {
+        if (readFileSync(candidate.filePath, "utf8") !== candidate.source) {
+          rollbackVerificationFailures.push(
+            new Error(`rollback byte verification failed for ${candidate.filePath}`),
+          );
+        }
+      } catch (rollbackError) {
+        rollbackVerificationFailures.push(rollbackError);
+      }
+    }
+    if (rollbackVerificationFailures.length > 0) {
+      const writeFailureContext = rollbackWriteFailures[0] == null
+        ? ""
+        : `; rollback write also failed: ${rollbackWriteFailures[0].message}`;
+      throw new PatchIntegrityError(
+        `Browser Use external availability rollback could not restore original bytes: ${rollbackVerificationFailures[0].message}${writeFailureContext}`,
+      );
+    }
+    throw error;
+  }
+}
+
+function patchLinuxBrowserUseExternalAvailabilityAssets(extractedDir, {
+  writeFileSync = fs.writeFileSync,
+  readFileSync = fs.readFileSync,
+} = {}) {
+  const buildDir = path.join(extractedDir, ".vite", "build");
+  const assetsDir = path.join(extractedDir, "webview", "assets");
+  const mainCaller = findUniqueCurrentBrowserUseAsset(
+    buildDir,
+    /^main-[^.]+\.js$/u,
+    currentBrowserUseMainCallerContract,
+  );
+  const mainRegistry = findUniqueCurrentBrowserUseAsset(
+    buildDir,
+    /^src-[^.]+\.js$/u,
+    currentBrowserUseMainRegistryContract,
+  );
+  const renderer = findUniqueCurrentBrowserUseAsset(
+    assetsDir,
+    /^app-initial-[^.]+\.js$/u,
+    currentBrowserUseRendererContract,
+  );
+  if (mainCaller == null || mainRegistry == null || renderer == null) {
+    console.warn(
+      `WARN: ${CURRENT_BROWSER_USE_CONTRACT_MISSING_REASON} — skipping Linux external Browser Use availability patch`,
+    );
+    return {
+      matched: 0,
+      changed: 0,
+      reason: CURRENT_BROWSER_USE_CONTRACT_MISSING_REASON,
+    };
+  }
+
+  const patchedRenderer = patchCurrentExternalBrowserUseAvailabilitySource(renderer.source);
+  if (patchedRenderer == null) {
+    console.warn(
+      `WARN: ${CURRENT_BROWSER_USE_CONTRACT_MISSING_REASON} — skipping Linux external Browser Use availability patch`,
+    );
+    return {
+      matched: 0,
+      changed: 0,
+      reason: CURRENT_BROWSER_USE_CONTRACT_MISSING_REASON,
+    };
+  }
+
+  const candidates = [
+    { ...renderer, patched: patchedRenderer },
+  ].filter(({ source, patched }) => source !== patched);
+  if (candidates.length === 0) {
+    return { matched: 3, changed: 0 };
+  }
+  try {
+    writeCurrentBrowserUseAssetCandidates(candidates, writeFileSync, readFileSync);
+  } catch (error) {
+    if (error?.code === "PATCH_INTEGRITY_FAILURE") {
+      throw error;
+    }
+    const reason = `Could not write complete current Browser Use external availability assets: ${error.message}`;
+    console.warn(`WARN: ${reason} — leaving Browser Use assets unchanged`);
+    return { matched: 3, changed: 0, reason };
+  }
+  return { matched: 3, changed: candidates.length };
 }
 
 function applyLinuxAppServerFeatureEnablementPatch(currentSource) {
@@ -1246,7 +1445,7 @@ function applyLinuxAppServerFeatureEnablementPatch(currentSource) {
 const AUTOMATION_UPDATE_EAGER_MARKER_PATTERN =
   /[A-Za-z_$][\w$]*\.name===`automation_update`&&delete [A-Za-z_$][\w$]*\.deferLoading/u;
 const AUTOMATION_UPDATE_DYNAMIC_TOOLS_PATTERN =
-  /\.map\(([A-Za-z_$][\w$]*)=>\(\{type:`function`,\.\.\.\1,\.\.\.([A-Za-z_$][\w$]*)\.has\(\1\.name\)\?\{\}:\{deferLoading:!0\}\}\)\)/u;
+  /\.map\(([A-Za-z_$][\w$]*)=>\(\{type:`function`,\.\.\.\1,\.\.\.([A-Za-z_$][\w$]*)&&!([A-Za-z_$][\w$]*)\.has\(\1\.name\)\?\{deferLoading:!0\}:\{\}\}\)\)/u;
 
 function matchesAutomationUpdateEagerToolContract(currentSource) {
   return (
@@ -1271,9 +1470,9 @@ function applyAutomationUpdateEagerToolPatch(currentSource) {
 
   return currentSource.replace(
     AUTOMATION_UPDATE_DYNAMIC_TOOLS_PATTERN,
-    (_match, toolVar, eagerToolsVar) => {
+    (_match, toolVar, namespaceFlagVar, eagerToolsVar) => {
       const descriptorVar = toolVar === "t" ? "codexLinuxAutomationDescriptor" : "t";
-      return `.map(${toolVar}=>{let ${descriptorVar}={type:\`function\`,...${toolVar},...${eagerToolsVar}.has(${toolVar}.name)?{}:{deferLoading:!0}};return ${toolVar}.name===\`automation_update\`&&delete ${descriptorVar}.deferLoading,${descriptorVar}})`;
+      return `.map(${toolVar}=>{let ${descriptorVar}={type:\`function\`,...${toolVar},...${namespaceFlagVar}&&!${eagerToolsVar}.has(${toolVar}.name)?{deferLoading:!0}:{}};return ${toolVar}.name===\`automation_update\`&&delete ${descriptorVar}.deferLoading,${descriptorVar}})`;
     },
   );
 }
@@ -1730,13 +1929,13 @@ function applyLocalEnvironmentActionModalDraftPatch(currentSource) {
 
 function applyBrowserAnnotationScreenshotPatch(currentSource) {
   const storedAnchorRegex =
-    /if\([A-Za-z_$][\w$]*&&([A-Za-z_$][\w$]*)\?\.annotation\.anchor\.kind===`element`\)\{[^;{}]+;let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\1\.annotation\.anchor\);([A-Za-z_$][\w$]*)=void 0,/;
+    /if\([A-Za-z_$][\w$]*&&([A-Za-z_$][\w$]*)\?\.annotation\.anchor\.kind===`element`\)\{let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\1\.annotation\.anchor\);([A-Za-z_$][\w$]*)=void 0,/;
   if (storedAnchorRegex.test(currentSource)) {
     return currentSource;
   }
 
   const liveAnchorRegex =
-    /(if\([A-Za-z_$][\w$]*&&([A-Za-z_$][\w$]*)\?\.annotation\.anchor\.kind===`element`\)\{[^;{}]+;)let e=([A-Za-z_$][\w$]*)==null\?null:[A-Za-z_$][\w$]*\(\3\),([A-Za-z_$][\w$]*)=e\?\.rect\?\?([A-Za-z_$][\w$]*)\(\2\.annotation\.anchor\);([A-Za-z_$][\w$]*)=e\?\.borderRadius,/;
+    /(if\([A-Za-z_$][\w$]*&&([A-Za-z_$][\w$]*)\?\.annotation\.anchor\.kind===`element`\)\{)let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)==null\?null:[A-Za-z_$][\w$]*\(\4\),([A-Za-z_$][\w$]*)=\3\?\.rect\?\?([A-Za-z_$][\w$]*)\(\2\.annotation\.anchor\);([A-Za-z_$][\w$]*)=\3\?\.borderRadius,/;
   const match = currentSource.match(liveAnchorRegex);
   if (match == null) {
     console.warn(
@@ -1745,7 +1944,7 @@ function applyBrowserAnnotationScreenshotPatch(currentSource) {
     return currentSource;
   }
 
-  const [, prefix, selectedAnnotationVar, , rectVar, anchorRectFn, radiusVar] = match;
+  const [, prefix, selectedAnnotationVar, , , rectVar, anchorRectFn, radiusVar] = match;
   return currentSource.replace(
     liveAnchorRegex,
     `${prefix}let ${rectVar}=${anchorRectFn}(${selectedAnnotationVar}.annotation.anchor);${radiusVar}=void 0,`,
@@ -2283,19 +2482,24 @@ function applyLinuxSkillsListDedupePatch(currentSource) {
     .replace("function IJ(e){return e.skills}", `${helper}function IJ(e){return e.skills}`);
 }
 
-function patchCommentPreloadBundle(extractedDir) {
-  const commentPreloadBundle = path.join(extractedDir, ".vite", "build", "comment-preload.js");
-  if (!fs.existsSync(commentPreloadBundle)) {
+function patchBrowserPagePreloadBundle(extractedDir) {
+  const browserPagePreloadBundle = path.join(
+    extractedDir,
+    ".vite",
+    "build",
+    "browser-page-preload.js",
+  );
+  if (!fs.existsSync(browserPagePreloadBundle)) {
     console.warn(
-      `WARN: Could not find comment preload bundle in ${path.dirname(commentPreloadBundle)} — skipping annotation screenshot patch`,
+      `WARN: Could not find browser page preload bundle in ${path.dirname(browserPagePreloadBundle)} — skipping annotation screenshot patch`,
     );
     return { matched: false, changed: false };
   }
 
-  const source = fs.readFileSync(commentPreloadBundle, "utf8");
+  const source = fs.readFileSync(browserPagePreloadBundle, "utf8");
   const patchedSource = applyBrowserAnnotationScreenshotPatch(source);
   if (patchedSource !== source) {
-    fs.writeFileSync(commentPreloadBundle, patchedSource, "utf8");
+    fs.writeFileSync(browserPagePreloadBundle, patchedSource, "utf8");
     return { matched: true, changed: true };
   }
   return { matched: true, changed: false };
@@ -2310,7 +2514,7 @@ module.exports = {
   applyLinuxChatSearchHydrationPatch,
   applyLinuxBrowserUseAvailabilityPatch,
   applyLinuxBrowserUseExternalAvailabilityPatch,
-  applyLinuxBrowserUseHiddenHostOwnershipPatch,
+  patchLinuxBrowserUseExternalAvailabilityAssets,
   applyLinuxBrowserUseNonLocalNavigationPatch,
   applyLinuxBrowserUseWebviewHostRecoveryPatch,
   applyLinuxBrowserUseWebviewRemountStorePatch,
@@ -2329,5 +2533,5 @@ module.exports = {
   applyLocalEnvironmentActionModalDraftPatch,
   applySubagentNicknameMetadataPatch,
   codexLinuxWatchBrowserWebviewAttachment,
-  patchCommentPreloadBundle,
+  patchBrowserPagePreloadBundle,
 };

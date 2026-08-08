@@ -72,6 +72,24 @@ test("rejects required patch and post-patch integrity failures", () => withFixtu
   assert.ok(decision.blockers.some((item) => item.code === "post-patch-integrity"));
 }));
 
+test("rejects a fatal descriptor integrity failure regardless of optional policy", () => withFixture(({ root, dmg }) => {
+  const core = requiredCoreReport();
+  core.patches.push(patch("optional-transaction", {
+    status: "failed-integrity",
+    ciPolicy: "optional",
+    reason: "rollback could not restore original bytes",
+  }));
+  const decision = evaluate(root, dmg, { core });
+  assert.equal(decision.verdict, "rejected");
+  assert.ok(
+    decision.blockers.some(
+      (item) =>
+        item.name === "optional-transaction" &&
+        item.reason.includes("failed-integrity"),
+    ),
+  );
+}));
+
 test("rejects drift from a user-enabled feature", () => withFixture(({ root, dmg }) => {
   const core = requiredCoreReport();
   core.enabledFeatures = ["ui-tweaks"];
@@ -149,6 +167,31 @@ test("a structured rejection wins over incomplete checks", () => withFixture(({ 
   assert.equal(decision.verdict, "rejected");
 }));
 
+test("preserves packaged builder source metadata when a build fails before build info", () => withFixture(({ root, dmg }) => {
+  const commit = "a".repeat(40);
+  writeJson(root, ".codex-linux/source-info.json", {
+    commit,
+    shortCommit: commit.slice(0, 12),
+    version: "0.10.1",
+    branch: "main",
+    remote: "https://github.com/ilysenko/codex-desktop-linux.git",
+    provenance: "packaged-update-builder",
+  });
+  const core = requiredCoreReport();
+  core.patches[0].status = "failed-required";
+  core.patches[0].reason = "current upstream contract did not match";
+
+  const decision = evaluate(root, dmg, {
+    core,
+    buildStatus: "failure",
+  });
+
+  assert.equal(decision.verdict, "rejected");
+  assert.equal(decision.source?.commit, commit);
+  assert.equal(decision.source?.version, "0.10.1");
+  assert.equal(decision.source?.provenance, "packaged-update-builder");
+}));
+
 test("HTTP identity requires an ETag or Last-Modified plus Content-Length", () => {
   assert.equal(httpIdentity({ contentLength: 42 }), null);
   assert.equal(httpIdentity({ lastModified: "today" }), null);
@@ -168,10 +211,112 @@ test("upstream workflow concurrency is isolated per PR or ref", () => {
   );
   assert.doesNotMatch(workflow, /group: upstream-dmg-acceptance-\$\{\{ github\.event_name \}\}\s*$/m);
   assert.equal((workflow.match(/- linux-features\/\*\*/g) ?? []).length, 2);
+  assert.equal((workflow.match(/- scripts\/ci\/download-upstream-dmg\.sh/g) ?? []).length, 2);
   assert.equal((workflow.match(/- scripts\/lib\/linux-features\.js/g) ?? []).length, 2);
   assert.doesNotMatch(workflow, /uses:\s+[^\s]+@v\d/);
   assert.match(workflow, /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/);
   assert.match(workflow, /persist-credentials: false/);
+  assert.match(
+    workflow,
+    /scripts\/ci\/download-upstream-dmg\.sh[\s\S]*--reuse-existing/,
+  );
+});
+
+test("CI DMG downloader retries empty responses and promotes only non-empty files", () => withFixture(({ root }) => {
+  const bin = path.join(root, "bin");
+  const destination = path.join(root, "Codex.dmg");
+  const attempts = path.join(root, "attempts");
+  const curl = path.join(bin, "curl");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(curl, `#!/usr/bin/env bash
+set -euo pipefail
+output=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) output="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+count=0
+[ ! -f "$TEST_ATTEMPTS" ] || count="$(cat "$TEST_ATTEMPTS")"
+count=$((count + 1))
+printf '%s\\n' "$count" > "$TEST_ATTEMPTS"
+if [ "$count" -eq 1 ]; then
+  : > "$output"
+else
+  printf '%s' 'complete dmg' > "$output"
+fi
+`);
+  fs.chmodSync(curl, 0o755);
+
+  const result = spawnSync("bash", [
+    path.resolve(__dirname, "download-upstream-dmg.sh"),
+    "https://example.test/Codex.dmg",
+    destination,
+  ], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      TEST_ATTEMPTS: attempts,
+      CODEX_DMG_RETRY_DELAY_SECONDS: "0",
+    },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.readFileSync(attempts, "utf8").trim(), "2");
+  assert.equal(fs.readFileSync(destination, "utf8"), "complete dmg");
+  assert.equal(fs.existsSync(`${destination}.part`), false);
+}));
+
+test("CI DMG downloader preserves the previous file when every response is empty", () => withFixture(({ root }) => {
+  const bin = path.join(root, "bin");
+  const destination = path.join(root, "Codex.dmg");
+  const curl = path.join(bin, "curl");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(destination, "previous dmg");
+  fs.writeFileSync(curl, `#!/usr/bin/env bash
+set -euo pipefail
+output=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) output="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+: > "$output"
+`);
+  fs.chmodSync(curl, 0o755);
+
+  const result = spawnSync("bash", [
+    path.resolve(__dirname, "download-upstream-dmg.sh"),
+    "https://example.test/Codex.dmg",
+    destination,
+  ], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      CODEX_DMG_DOWNLOAD_ATTEMPTS: "2",
+      CODEX_DMG_RETRY_DELAY_SECONDS: "0",
+    },
+  });
+
+  assert.equal(result.status, 1);
+  assert.equal(fs.readFileSync(destination, "utf8"), "previous dmg");
+  assert.equal(fs.existsSync(`${destination}.part`), false);
+}));
+
+test("all CI upstream DMG consumers use the non-empty atomic downloader", () => {
+  for (const relativePath of [
+    "container-entrypoint.sh",
+    "update-nix-hashes.sh",
+    "validate-nix-pins.sh",
+  ]) {
+    const source = fs.readFileSync(path.resolve(__dirname, relativePath), "utf8");
+    assert.match(source, /scripts\/ci\/download-upstream-dmg\.sh/);
+    assert.doesNotMatch(source, /curl -fL --retry 3 -o [^\n]*UPSTREAM_DMG/);
+  }
 });
 
 test("Nix refresh serializes campaigns and deduplicates refresh and exact-head CI", () => {
@@ -217,6 +362,7 @@ test("Nix hash refresh accepts a validated focused output override", () => {
 
   assert.deepEqual(watchdogProfile.enabled, [
     "appshots",
+    "codex-micro",
     "codex-wrapper-updater",
     "directory-only-working-tree-watch",
     "frameless-titlebar",

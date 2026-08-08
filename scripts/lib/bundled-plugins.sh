@@ -1114,6 +1114,7 @@ stage_chrome_plugin_from_upstream() {
     patch_browser_use_node_repl_process_env_import "$target_plugin/scripts/browser-client.mjs"
     patch_browser_use_node_repl_env_guard "$target_plugin/scripts/browser-client.mjs"
     patch_browser_use_node_repl_config_shim "$target_plugin/scripts/browser-client.mjs"
+    patch_browser_use_node_repl_runtime_clone_shim "$target_plugin/scripts/browser-client.mjs"
     patch_browser_use_native_pipe_import_meta_bridge "$target_plugin/scripts/browser-client.mjs"
     patch_browser_use_site_status_allowlist_fallback "$target_plugin/scripts/browser-client.mjs"
     patch_browser_client_linux_socket_dir "$target_plugin/scripts/browser-client.mjs"
@@ -1253,7 +1254,7 @@ PY
 patch_browser_use_node_repl_env_guard() {
     local client="$1"
 
-    if grep -Eq 'globalThis\.nodeRepl\?\.env\?\.\[[^]]+\]' "$client"; then
+    if grep -q "codexLinuxBrowserUseNodeReplEnvGuard" "$client"; then
         return 0
     fi
 
@@ -1264,28 +1265,53 @@ import sys
 
 path = Path(sys.argv[1])
 source = path.read_text(encoding="utf-8")
-pattern = re.compile(
+helper_pattern = re.compile(
     r'function (?P<helper>[A-Za-z_$][\w$]*)\((?P<key>[A-Za-z_$][\w$]*)\)\{'
     r'let (?P<value>[A-Za-z_$][\w$]*)=globalThis\.nodeRepl\?\.env\[(?P=key)\];'
     r'return typeof (?P=value)=="string"\?(?P=value):void 0\}'
 )
-match = pattern.search(source)
-if match is None:
+helper_match = helper_pattern.search(source)
+if helper_match is not None:
+    helper = helper_match.group("helper")
+    key = helper_match.group("key")
+    value = helper_match.group("value")
+    replacement = (
+        f'function {helper}({key}){{'
+        f'let {value}=globalThis.nodeRepl?.env?.[{key}];'
+        f'return typeof {value}=="string"?{value}:void 0}}'
+    )
+    source = source[:helper_match.start()] + replacement + source[helper_match.end():]
+
+# Newer Browser clients snapshot privileged node_repl state before creating the
+# browser agent. Older Linux node_repl runtimes do not expose `env`, so every
+# direct property read must preserve the upstream default behavior when it is
+# absent. Keep the object identity comparison itself unchanged.
+direct_env_pattern = re.compile(
+    r'(?P<object>\b[A-Za-z_$][\w$]*)\.env\[(?P<key>[^\]]+)\]'
+)
+source, direct_env_count = direct_env_pattern.subn(
+    r'\g<object>.env?.[\g<key>]',
+    source,
+)
+
+if helper_match is None and direct_env_count == 0:
     print(
         "WARN: Could not find Browser Use nodeRepl env guard insertion point — leaving browser-client.mjs unchanged",
         file=sys.stderr,
     )
     raise SystemExit(0)
 
-helper = match.group("helper")
-key = match.group("key")
-value = match.group("value")
-replacement = (
-    f'function {helper}({key}){{'
-    f'let {value}=globalThis.nodeRepl?.env?.[{key}];'
-    f'return typeof {value}=="string"?{value}:void 0}}'
+marker_target = (
+    "globalThis.nodeRepl?.env?.["
+    if "globalThis.nodeRepl?.env?.[" in source
+    else ".env?.["
 )
-path.write_text(source[:match.start()] + replacement + source[match.end():], encoding="utf-8")
+source = source.replace(
+    marker_target,
+    f"/*codexLinuxBrowserUseNodeReplEnvGuard*/{marker_target}",
+    1,
+)
+path.write_text(source, encoding="utf-8")
 PY
 }
 
@@ -1481,6 +1507,57 @@ path.write_text(source[:match.start()] + replacement + source[match.end():], enc
 PY
 }
 
+patch_browser_use_node_repl_runtime_clone_shim() {
+    local client="$1"
+
+    if grep -q "codexLinuxBrowserUseRuntimeCloneShim" "$client"; then
+        return 0
+    fi
+
+    python3 - "$client" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
+if "codexLinuxBrowserUseNodeReplMethodShim" not in source:
+    print(
+        "WARN: Browser Use nodeRepl method shim is unavailable — leaving the runtime clone unchanged",
+        file=sys.stderr,
+    )
+    raise SystemExit(0)
+
+pattern = re.compile(
+    r'(?P<declaration>'
+    r'let (?P<elicitation>[A-Za-z_$][\w$]*)='
+    r'(?P<source>[A-Za-z_$][\w$]*)\.createElicitation\.bind\((?P=source)\),'
+    r'(?P<runtime>[A-Za-z_$][\w$]*)=\{\.\.\.(?P=source),.{1,2048}?\}'
+    r')'
+    r',(?P<next>'
+    r'[A-Za-z_$][\w$]*=await [A-Za-z_$][\w$]*\((?P=source),(?P=runtime)\);return'
+    r')',
+    re.DOTALL,
+)
+match = pattern.search(source)
+if match is None:
+    print(
+        "WARN: Could not find Browser Use nodeRepl runtime clone — leaving browser-client.mjs unchanged",
+        file=sys.stderr,
+    )
+    raise SystemExit(0)
+
+runtime = match.group("runtime")
+replacement = (
+    match.group("declaration")
+    + ";/*codexLinuxBrowserUseRuntimeCloneShim*/"
+    + f"codexLinuxBrowserUseNodeReplMethodShim({runtime});let "
+    + match.group("next")
+)
+path.write_text(source[:match.start()] + replacement + source[match.end():], encoding="utf-8")
+PY
+}
+
 patch_browser_use_native_pipe_import_meta_bridge() {
     local client="$1"
 
@@ -1601,6 +1678,7 @@ stage_browser_plugin_from_upstream() {
     patch_browser_use_node_repl_process_env_import "$target_client"
     patch_browser_use_node_repl_env_guard "$target_client"
     patch_browser_use_node_repl_config_shim "$target_client"
+    patch_browser_use_node_repl_runtime_clone_shim "$target_client"
     patch_browser_use_native_pipe_import_meta_bridge "$target_client"
     patch_browser_use_site_status_allowlist_fallback "$target_client"
     patch_browser_use_file_url_policy "$target_client"

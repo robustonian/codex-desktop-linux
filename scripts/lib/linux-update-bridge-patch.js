@@ -1,11 +1,6 @@
 const fs = require("fs");
 const path = require("path");
 
-function requireName(source, moduleName) {
-  const escaped = moduleName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return source.match(new RegExp(`([A-Za-z_$][\\w$]*)=require\\([\\\`'"]${escaped}[\\\`'"]\\)`))?.[1] ?? null;
-}
-
 function buildUpdateManagerEnvSource() {
   return "function codexLinuxUpdateManagerEnv(){let e={...process.env},t=process.env.CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_STATE,n=t==null?void 0:process.env.CODEX_LINUX_HOST_LD_LIBRARY_PATH_STATE??t,r=process.env.CODEX_LINUX_HOST_LD_LIBRARY_PATH_STATE==null?process.env.CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_VALUE:process.env.CODEX_LINUX_HOST_LD_LIBRARY_PATH_VALUE;n===`unset`?delete e.LD_LIBRARY_PATH:n===`empty`?e.LD_LIBRARY_PATH=``:n===`value`&&typeof r==`string`&&(e.LD_LIBRARY_PATH=r);for(let t of[`CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_STATE`,`CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_VALUE`,`CODEX_LINUX_HOST_LD_LIBRARY_PATH_STATE`,`CODEX_LINUX_HOST_LD_LIBRARY_PATH_VALUE`])delete e[t];return e}";
 }
@@ -28,11 +23,11 @@ function buildBridgeSource({ childProcessVar, fsVar, pathVar }) {
     `async function codexLinuxShowUpdateMessage(codexLinuxMessage,codexLinuxDetail){try{let e=codexLinuxGetElectronModule();if(!e)return;await e.dialog?.showMessageBox({type:\`info\`,buttons:[\`OK\`],defaultId:0,noLink:!0,message:codexLinuxMessage,detail:codexLinuxDetail})}catch{}}`;
   const installAfterQuit = buildInstallAfterQuitSource(childProcessVar);
   const quitForUpdate = buildQuitForUpdateSource(true);
-  return `${buildElectronResolverSource()}${buildUpdateManagerEnvSource()}function codexLinuxUpdateStatePath(){let e=process.env.XDG_STATE_HOME||process.env.HOME&&(0,${pathVar}.join)(process.env.HOME,\`.local\`,\`state\`);return e?(0,${pathVar}.join)(e,\`codex-update-manager\`,\`state.json\`):null}function codexLinuxReadUpdateState(){let e=codexLinuxUpdateStatePath();if(!e||!${fsVar}.existsSync(e))return null;try{let t=JSON.parse(${fsVar}.readFileSync(e,\`utf8\`));return t&&typeof t===\`object\`&&!Array.isArray(t)?t:null}catch{return null}}function codexLinuxUpdateLifecycleState(e){switch(e){case\`ready_to_install\`:case\`waiting_for_app_exit\`:return\`ready\`;case\`installing\`:return\`installing\`;case\`checking_upstream\`:case\`update_detected\`:case\`downloading_dmg\`:case\`preparing_workspace\`:case\`patching_app\`:case\`building_package\`:return\`checking\`;default:return\`idle\`}}function codexLinuxUpdateManagerPath(){let e=process.env.CODEX_UPDATE_MANAGER_PATH;return typeof e===\`string\`&&e.trim().length>0?e:\`codex-update-manager\`}${showUpdateMessage}${installAfterQuit}${quitForUpdate}function codexLinuxRunUpdateManager(e){return new Promise((t,n)=>{${childProcessVar}.execFile(codexLinuxUpdateManagerPath(),e,{encoding:\`utf8\`,windowsHide:!0,env:codexLinuxUpdateManagerEnv()},(e,r,i)=>{if(e){e.stdout=r,e.stderr=i,n(e);return}t({stdout:r??\`\`,stderr:i??\`\`})})})}async function codexLinuxProbeUpdateManager(){await codexLinuxRunUpdateManager([\`--help\`])}async function codexLinuxRefreshUpdateState(){return codexLinuxReadUpdateState()}`;
+  return `${buildElectronResolverSource()}${buildUpdateManagerEnvSource()}function codexLinuxUpdateStatePath(){let e=process.env.XDG_STATE_HOME||process.env.HOME&&(0,${pathVar}.join)(process.env.HOME,\`.local\`,\`state\`);return e?(0,${pathVar}.join)(e,\`codex-update-manager\`,\`state.json\`):null}function codexLinuxReadUpdateState(){let e=codexLinuxUpdateStatePath();if(!e||!${fsVar}.existsSync(e))return null;try{let t=JSON.parse(${fsVar}.readFileSync(e,\`utf8\`));return t&&typeof t===\`object\`&&!Array.isArray(t)?t:null}catch{return null}}function codexLinuxUpdateLifecycleState(e,t){if(e===\`update_detected\`&&t?.deferred_build===!0)return\`idle\`;switch(e){case\`ready_to_install\`:case\`waiting_for_app_exit\`:return\`ready\`;case\`installing\`:return\`installing\`;case\`checking_upstream\`:case\`update_detected\`:case\`downloading_dmg\`:case\`preparing_workspace\`:case\`patching_app\`:case\`building_package\`:return\`checking\`;default:return\`idle\`}}function codexLinuxUpdateManagerPath(){let e=process.env.CODEX_UPDATE_MANAGER_PATH;return typeof e===\`string\`&&e.trim().length>0?e:\`codex-update-manager\`}${showUpdateMessage}${installAfterQuit}${quitForUpdate}function codexLinuxRunUpdateManager(e){return new Promise((t,n)=>{${childProcessVar}.execFile(codexLinuxUpdateManagerPath(),e,{encoding:\`utf8\`,windowsHide:!0,env:codexLinuxUpdateManagerEnv()},(e,r,i)=>{if(e){e.stdout=r,e.stderr=i,n(e);return}t({stdout:r??\`\`,stderr:i??\`\`})})})}async function codexLinuxProbeUpdateManager(){await codexLinuxRunUpdateManager([\`--help\`])}async function codexLinuxRefreshUpdateState(){return codexLinuxReadUpdateState()}`;
 }
 
 function buildBootstrapBridgeSource({ childProcessVar, fsVar, pathVar }) {
-  return `${buildBridgeSource({ childProcessVar, fsVar, pathVar })};function codexLinuxCreatePackageUpdateManager(e){let t=!1,n=\`idle\`,r=null,i=()=>{try{let e=codexLinuxReadUpdateState(),r=e?.status;t=r===\`ready_to_install\`||r===\`waiting_for_app_exit\`,n=codexLinuxUpdateLifecycleState(r);return e}catch{return null}},a=()=>{try{e.send({type:\`app-update-ready-changed\`,isUpdateReady:t}),e.send({type:\`app-update-lifecycle-state-changed\`,lifecycleState:n}),e.send({type:\`app-update-install-progress-changed\`,installProgressPercent:r})}catch{}},s=!1,c=codexLinuxProbeUpdateManager().then(()=>{s=!0,i(),a();return!0}).catch(()=>{s=!1,t=!1,n=\`idle\`,a();return!1});let o=()=>{e.allowQuit?.();codexLinuxQuitForUpdate()};return{manager:{setAutomaticBackgroundDownloadsEnabled:()=>{},getIsUpdateReady:()=>s&&t,getUpdateLifecycleState:()=>s?n:\`idle\`,getInstallProgressPercent:()=>r,checkForUpdates:async()=>{if(!await c)return;n=\`checking\`,a();try{await codexLinuxRunUpdateManager([\`check-now\`]),i(),a()}catch(e){n=t?\`ready\`:\`idle\`,a();throw e}},installUpdatesIfAvailable:async()=>{if(!await c){a();return}i();if(!t){a();return}r=0,n=\`installing\`,a();try{let e=await codexLinuxRunUpdateManager([\`install-ready\`]),s=i();if(s?.status===\`waiting_for_app_exit\`){r=null,n=\`ready\`,a(),o();return}r=null,a(),e.stdout?.includes(\`Manual install required:\`)?await codexLinuxShowUpdateMessage(\`ChatGPT Desktop update\`,e.stdout.trim()):e.stdout?.includes(\`already installed\`)?await codexLinuxShowUpdateMessage(\`ChatGPT Desktop update\`,\`The ready update is already installed.\`):e.stdout?.includes(\`No update is ready to install\`)&&await codexLinuxShowUpdateMessage(\`ChatGPT Desktop update\`,\`There is no rebuilt update waiting to install.\`)}catch(e){r=null,n=t?\`ready\`:\`idle\`,a();throw e}}},quitForUpdate:o,refresh:async()=>{if(await c){try{await codexLinuxRefreshUpdateState()}catch{}i()}else t=!1,n=\`idle\`;a()}}}`;
+  return `${buildBridgeSource({ childProcessVar, fsVar, pathVar })};function codexLinuxCreatePackageUpdateManager(e){let t=!1,n=\`idle\`,r=null,i=()=>{try{let e=codexLinuxReadUpdateState(),r=e?.status;t=r===\`ready_to_install\`||r===\`waiting_for_app_exit\`,n=codexLinuxUpdateLifecycleState(r,e);return e}catch{return null}},a=()=>{try{e.send({type:\`app-update-ready-changed\`,isUpdateReady:t}),e.send({type:\`app-update-lifecycle-state-changed\`,lifecycleState:n}),e.send({type:\`app-update-install-progress-changed\`,installProgressPercent:r})}catch{}},s=!1,c=codexLinuxProbeUpdateManager().then(()=>{s=!0,i(),a();return!0}).catch(()=>{s=!1,t=!1,n=\`idle\`,a();return!1});let o=()=>{e.allowQuit?.();codexLinuxQuitForUpdate()};return{manager:{latchInAppUpdatesEnabledForLaunch:async()=>{},setAutomaticBackgroundDownloadsEnabled:()=>{},setSparkleQueryParams:()=>{},getDownloadProgressPercent:()=>null,getDownloadedUpdateAppBrand:()=>null,getIsUpdateReady:()=>s&&t,getUpdateLifecycleState:()=>s?n:\`idle\`,getInstallProgressPercent:()=>r,getRelaunchNotice:()=>null,hasUpdater:()=>s,getUnavailableReason:()=>s?null:\`Linux package update manager unavailable\`,checkForUpdates:async()=>{if(!await c)return;n=\`checking\`,a();try{await codexLinuxRunUpdateManager([\`check-now\`]),i(),a()}catch(e){n=t?\`ready\`:\`idle\`,a();throw e}},installUpdatesIfAvailable:async()=>{if(!await c){a();return}i();if(!t){a();return}r=0,n=\`installing\`,a();try{let e=await codexLinuxRunUpdateManager([\`install-ready\`]),s=i();if(s?.status===\`waiting_for_app_exit\`){r=null,n=\`ready\`,a(),o();return}r=null,a(),e.stdout?.includes(\`Manual install required:\`)?await codexLinuxShowUpdateMessage(\`ChatGPT Desktop update\`,e.stdout.trim()):e.stdout?.includes(\`already installed\`)?await codexLinuxShowUpdateMessage(\`ChatGPT Desktop update\`,\`The ready update is already installed.\`):e.stdout?.includes(\`No update is ready to install\`)&&await codexLinuxShowUpdateMessage(\`ChatGPT Desktop update\`,\`There is no rebuilt update waiting to install.\`)}catch(e){r=null,n=t?\`ready\`:\`idle\`,a();throw e}}},quitForUpdate:o,refresh:async()=>{if(await c){try{await codexLinuxRefreshUpdateState()}catch{}i()}else t=!1,n=\`idle\`;a()}}}`;
 }
 
 function applyCurrentBootstrapUpdaterBridgePatch(currentSource) {
@@ -44,13 +39,9 @@ function applyCurrentBootstrapUpdaterBridgePatch(currentSource) {
     return currentSource;
   }
 
-  const childProcessVar = requireName(currentSource, "node:child_process");
-  const fsVar = requireName(currentSource, "node:fs");
-  const pathVar = requireName(currentSource, "node:path");
-  if (childProcessVar == null || fsVar == null || pathVar == null) {
-    console.warn("WARN: Could not find updater bridge module bindings - skipping Linux updater bridge patch");
-    return currentSource;
-  }
+  const childProcessVar = "require(`node:child_process`)";
+  const fsVar = "require(`node:fs`)";
+  const pathVar = "require(`node:path`)";
 
   let patchedSource = currentSource;
   if (!patchedSource.includes("function codexLinuxCreatePackageUpdateManager(")) {
@@ -69,7 +60,7 @@ function applyCurrentBootstrapUpdaterBridgePatch(currentSource) {
   }
 
   const destructureRegex =
-    /let\{startedAtMs:([A-Za-z_$][\w$]*),buildFlavor:([A-Za-z_$][\w$]*),desktopSentry:([A-Za-z_$][\w$]*),sparkleManager:([A-Za-z_$][\w$]*),productionAppcastStateStore:[A-Za-z_$][\w$]*,setSparkleBridgeHandlers:([A-Za-z_$][\w$]*),setSecondInstanceArgsHandler:([A-Za-z_$][\w$]*)\}=([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\(\),/;
+    /let\{startedAtMs:([A-Za-z_$][\w$]*),buildFlavor:([A-Za-z_$][\w$]*),desktopSentry:([A-Za-z_$][\w$]*),sparkleManager:([A-Za-z_$][\w$]*),startupPhases:[A-Za-z_$][\w$]*,productionAppcastStateStore:[A-Za-z_$][\w$]*,setSparkleBridgeHandlers:([A-Za-z_$][\w$]*),setSecondInstanceArgsHandler:([A-Za-z_$][\w$]*)\}=([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\(\),/;
   const destructureMatch = patchedSource.match(destructureRegex);
   const sparkleVar = destructureMatch?.[4] ?? null;
   const setSparkleBridgeHandlersVar = destructureMatch?.[5] ?? null;
@@ -96,7 +87,7 @@ function applyCurrentBootstrapUpdaterBridgePatch(currentSource) {
 
   if (!patchedSource.includes("codexLinuxPackageUpdateBridge=process.platform===`linux`")) {
     const currentBridgeRegex =
-      /let ([A-Za-z_$][\w$]*)=new [A-Za-z_$][\w$]*,(?:[A-Za-z_$][\w$]*=null,){2}([A-Za-z_$][\w$]*)=[A-Za-z_$][\w$]*=>\{[^]*?\},(?=[A-Za-z_$][\w$]*=)/;
+      /let ([A-Za-z_$][\w$]*)=new [A-Za-z_$][\w$]*,[A-Za-z_$][\w$]*=null,([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)=>\{if\(\3\?\.quitImmediately===!1\)\{\1\.allowQuitTemporarilyForUpdateInstall\(\);return\}\1\.allowQuitTemporarilyForUpdateInstall\(\),[A-Za-z_$][\w$]*\.app\.quit\(\)\},(?=[A-Za-z_$][\w$]*=)/;
     const currentBridgeMatch = patchedSource.match(currentBridgeRegex);
     if (currentBridgeMatch == null) {
       console.warn("WARN: Could not find current updater callback bridge - skipping Linux updater bridge patch");

@@ -2,6 +2,110 @@
 
 const { requireName } = require("../../lib/minified-js.js");
 
+function findMatchingParenthesis(source, openIndex) {
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+
+  for (let index = openIndex; index < source.length; index += 1) {
+    const char = source[index];
+    if (quote != null) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+    } else if (char === "(") {
+      depth += 1;
+    } else if (char === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        return index;
+      }
+    }
+  }
+
+  return -1;
+}
+
+function findTopLevelArgumentSeparator(source) {
+  let parentheses = 0;
+  let brackets = 0;
+  let braces = 0;
+  let quote = null;
+  let escaped = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (quote != null) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+    } else if (char === "(") {
+      parentheses += 1;
+    } else if (char === ")") {
+      parentheses -= 1;
+    } else if (char === "[") {
+      brackets += 1;
+    } else if (char === "]") {
+      brackets -= 1;
+    } else if (char === "{") {
+      braces += 1;
+    } else if (char === "}") {
+      braces -= 1;
+    } else if (char === "," && parentheses === 0 && brackets === 0 && braces === 0) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function findTrayConstructor(source) {
+  const retainedPattern =
+    /([A-Za-z_$][\w$]*)=codexLinuxRegisterTray\(new ([A-Za-z_$][\w$]*)\.Tray\(/g;
+  const unwrappedPattern =
+    /([A-Za-z_$][\w$]*)=new ([A-Za-z_$][\w$]*)\.Tray\(/g;
+
+  for (const [pattern, retained] of [[retainedPattern, true], [unwrappedPattern, false]]) {
+    const match = pattern.exec(source);
+    if (match == null) {
+      continue;
+    }
+    const openIndex = match.index + match[0].length - 1;
+    const closeIndex = findMatchingParenthesis(source, openIndex);
+    if (closeIndex === -1 || (retained && source[closeIndex + 1] !== ")")) {
+      return null;
+    }
+    return {
+      args: source.slice(openIndex + 1, closeIndex),
+      closeIndex,
+      electronVar: match[2],
+      retained,
+      startIndex: match.index,
+      trayVar: match[1],
+    };
+  }
+
+  return null;
+}
+
 function applyLinuxTrayPatch(currentSource, iconPathExpression) {
   let patchedSource = currentSource;
 
@@ -70,16 +174,7 @@ function applyLinuxTrayPatch(currentSource, iconPathExpression) {
     );
   }
 
-  const conditionalTrayConstructorPattern =
-    /([A-Za-z_$][\w$]*)=typeof codexLinuxRegisterTray===`function`\?codexLinuxRegisterTray\(new ([A-Za-z_$][\w$]*)\.Tray\(([^;]+?)\)\):new \2\.Tray\(\3\)/;
-  const retainedTrayConstructorPattern =
-    /([A-Za-z_$][\w$]*)=codexLinuxRegisterTray\(new ([A-Za-z_$][\w$]*)\.Tray\(([^;]+?)\)\)/;
-  const trayConstructorPattern =
-    /([A-Za-z_$][\w$]*)=new ([A-Za-z_$][\w$]*)\.Tray\(([^;)]+)\)/;
-  const constructorMatch =
-    patchedSource.match(conditionalTrayConstructorPattern) ??
-    patchedSource.match(retainedTrayConstructorPattern) ??
-    patchedSource.match(trayConstructorPattern);
+  const constructorMatch = findTrayConstructor(patchedSource);
   if (
     constructorMatch == null ||
     !patchedSource.includes("if(process.platform===`linux`){") ||
@@ -89,13 +184,25 @@ function applyLinuxTrayPatch(currentSource, iconPathExpression) {
     return currentSource;
   }
 
-  const [, trayVar, electronVar, constructorArgs] = constructorMatch;
+  const {
+    args: constructorArgs,
+    closeIndex: constructorCloseIndex,
+    electronVar,
+    retained,
+    startIndex: constructorStartIndex,
+    trayVar,
+  } = constructorMatch;
+  const argumentSeparator = findTopLevelArgumentSeparator(constructorArgs);
+  const trayConstructor = argumentSeparator === -1
+    ? `new ${electronVar}.Tray(${constructorArgs})`
+    : `new ${electronVar}.Tray(...(process.platform===\`linux\`?[${constructorArgs.slice(0, argumentSeparator)}]:[${constructorArgs}]))`;
   const retainedConstructor =
-    `${trayVar}=codexLinuxRegisterTray(new ${electronVar}.Tray(${constructorArgs}))`;
-  if (conditionalTrayConstructorPattern.test(patchedSource)) {
-    patchedSource = patchedSource.replace(conditionalTrayConstructorPattern, retainedConstructor);
-  } else if (!retainedTrayConstructorPattern.test(patchedSource)) {
-    patchedSource = patchedSource.replace(trayConstructorPattern, retainedConstructor);
+    `${trayVar}=codexLinuxRegisterTray(${trayConstructor})`;
+  if (!retained) {
+    patchedSource =
+      patchedSource.slice(0, constructorStartIndex) +
+      retainedConstructor +
+      patchedSource.slice(constructorCloseIndex + 1);
   }
 
   if (!patchedSource.includes("codexLinuxRegisterTray=e=>")) {
@@ -189,12 +296,11 @@ function applyLinuxBuildInfoTrayPatch(currentSource) {
   }
   const trayMenuRegex = /getNativeTrayMenuItems\(\)\{[^]*?return\[/g;
   const classRegex = /var [A-Za-z_$][\w$]*=class\{[^]*?getNativeTrayMenuItems\(\)\{[^]*?return\[/;
-  const helpMenuPattern = /\{role:`help`,id:[A-Za-z_$][\w$]*\.bn\.help,submenu:\[/;
-  const currentHelpMenuPattern = /\{role:`help`,id:[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\.help,submenu:\[/;
+  const helpMenuPattern = /role:`help`,id:[A-Za-z_$][\w$]*\.help,submenu:\[/;
   const helperInsertionIndex = findLinuxBuildInfoHelperInsertionIndex(
     currentSource,
     currentSource.match(classRegex),
-    currentSource.match(helpMenuPattern) ?? currentSource.match(currentHelpMenuPattern),
+    currentSource.match(helpMenuPattern),
   );
   const canInstallHelper = hasHelper || helperInsertionIndex != null;
   const trayMenuMatch = patchedSource.match(trayMenuRegex);
@@ -210,9 +316,9 @@ function applyLinuxBuildInfoTrayPatch(currentSource) {
     changed = true;
   }
 
-  const helpMenuRegex = /\{role:`help`,id:[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\.help,submenu:\[/g;
+  const helpMenuRegex = /role:`help`,id:[A-Za-z_$][\w$]*\.help,submenu:\[/g;
   if (
-    !/\{role:`help`,id:[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\.help,submenu:\[\.\.\.process\.platform===`linux`\?\[\{label:`Build Information`,click:\(\)=>\{codexLinuxShowBuildInfo\(\)\}\},\{type:`separator`\}\]:\[\],/.test(patchedSource)
+    !/role:`help`,id:[A-Za-z_$][\w$]*\.help,submenu:\[\.\.\.process\.platform===`linux`\?\[\{label:`Build Information`,click:\(\)=>\{codexLinuxShowBuildInfo\(\)\}\},\{type:`separator`\}\]:\[\],/.test(patchedSource)
   ) {
     if (canInstallHelper) {
       let patchedHelpMenu = false;
@@ -238,7 +344,7 @@ function applyLinuxBuildInfoTrayPatch(currentSource) {
   }
 
   const classMatch = patchedSource.match(classRegex);
-  const helpMenuMatch = patchedSource.match(helpMenuPattern) ?? patchedSource.match(currentHelpMenuPattern);
+  const helpMenuMatch = patchedSource.match(helpMenuPattern);
   const helperIndex = findLinuxBuildInfoHelperInsertionIndex(patchedSource, classMatch, helpMenuMatch);
   if (helperIndex == null) {
     console.warn("WARN: Could not find build info helper insertion point — skipping Linux build info patch");

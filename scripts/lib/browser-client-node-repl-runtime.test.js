@@ -2,8 +2,9 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const readline = require("node:readline");
 const test = require("node:test");
@@ -108,6 +109,121 @@ function runNodeReplImport(runtime, clients) {
     });
   });
 }
+
+test("guards every Browser client nodeRepl env read", () => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "browser-client-env-guard-"));
+  const clientPath = path.join(fixtureRoot, "browser-client.mjs");
+  const patcher = path.join(__dirname, "bundled-plugins.sh");
+  const client = [
+    'var Es="BROWSER_USE_SECURITY_MODE",Bl="BROWSER_USE_AUTOMATED_SAFETY_PRECHECKS_ENABLED",Ai;',
+    'function ye(){return globalThis.nodeRepl}',
+    'function sT(e){if(Ai!=null)return()=>{};let t=Object.freeze({nodeRepl:e,createElicitation:e.createElicitation,env:e.env,securityMode:e.env[Es],enabled:e.env[Bl]==="1"});return Ai=t,()=>{Ai===t&&(Ai=void 0)}}',
+    'function Bm(){let e=Ai;if(e==null)return!0;let t=ye();return t===e.nodeRepl&&t.env===e.env&&t.createElicitation===e.createElicitation&&t.env[Es]===e.securityMode&&t.env[Bl]==="1"===e.enabled}',
+    'function Ou(e){let t=globalThis.nodeRepl?.env[e];return typeof t=="string"?t:void 0}',
+  ].join("");
+
+  try {
+    fs.writeFileSync(clientPath, client, "utf8");
+    const applyGuard = () =>
+      spawnSync(
+        "bash",
+        [
+          "-c",
+          'source "$1"; patch_browser_use_node_repl_env_guard "$2"',
+          "browser-client-env-guard",
+          patcher,
+          clientPath,
+        ],
+        { encoding: "utf8" },
+      );
+
+    const first = applyGuard();
+    assert.equal(first.status, 0, first.stderr);
+    const patched = fs.readFileSync(clientPath, "utf8");
+    assert.match(patched, /codexLinuxBrowserUseNodeReplEnvGuard/);
+    assert.match(patched, /globalThis\.nodeRepl\?\.env\?\.\[e\]/);
+    assert.doesNotMatch(patched, /\b[A-Za-z_$][\w$]*\.env\[[^\]]+\]/);
+    assert.equal((patched.match(/\.env\?\.\[/g) ?? []).length, 5);
+
+    const second = applyGuard();
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(fs.readFileSync(clientPath, "utf8"), patched);
+
+    const previousNodeRepl = globalThis.nodeRepl;
+    try {
+      globalThis.nodeRepl = {};
+      const initializeSecurityState = new Function(
+        `${patched};return {dispose:sT(globalThis.nodeRepl),valid:Bm()}`,
+      );
+      const securityState = initializeSecurityState();
+      assert.equal(securityState.valid, true);
+      assert.equal(typeof securityState.dispose, "function");
+      securityState.dispose();
+    } finally {
+      globalThis.nodeRepl = previousNodeRepl;
+    }
+  } finally {
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("keeps Browser notification hooks on the cloned nodeRepl runtime", async () => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "browser-client-runtime-clone-"));
+  const clientPath = path.join(fixtureRoot, "browser-client.mjs");
+  const patcher = path.join(__dirname, "bundled-plugins.sh");
+  const client = [
+    "function bb(){let e=globalThis.nodeRepl;return e?.config==null?void 0:e}",
+    "async function cM(e){let t=e.createElicitation.bind(e),r={...e,platform:`linux`,setResponseMeta:e.setResponseMeta,get requestMeta(){return e.requestMeta},async createElicitation(o){return await t(o)}},n=await $K(e,r);return n!=null&&(r.gaas=n),r}",
+    "async function $K(){return null}",
+  ].join("");
+
+  try {
+    fs.writeFileSync(clientPath, client, "utf8");
+    const applyShim = () =>
+      spawnSync(
+        "bash",
+        [
+          "-c",
+          'source "$1"; patch_browser_use_node_repl_config_shim "$2"; patch_browser_use_node_repl_runtime_clone_shim "$2"',
+          "browser-client-runtime-clone",
+          patcher,
+          clientPath,
+        ],
+        { encoding: "utf8" },
+      );
+
+    const first = applyShim();
+    assert.equal(first.status, 0, first.stderr);
+    const patched = fs.readFileSync(clientPath, "utf8");
+    const previousNodeRepl = globalThis.nodeRepl;
+    const prototype = {};
+    const nodeRepl = Object.preventExtensions(
+      Object.assign(Object.create(prototype), {
+        createElicitation: async () => ({ action: "decline" }),
+        requestMeta: {},
+        setResponseMeta() {},
+      }),
+    );
+
+    try {
+      globalThis.nodeRepl = nodeRepl;
+      const initialize = new Function(`${patched};return {clone:cM,resolve:bb}`);
+      const runtime = initialize();
+      const resolved = runtime.resolve();
+      assert.equal(typeof resolved.addAfterSubmittedCodeHook, "function");
+      const cloned = await runtime.clone(resolved);
+      assert.equal(typeof cloned.addAfterSubmittedCodeHook, "function");
+    } finally {
+      globalThis.nodeRepl = previousNodeRepl;
+    }
+
+    const second = applyShim();
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(fs.readFileSync(clientPath, "utf8"), patched);
+  } finally {
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
 
 test(
   "staged Browser and Chrome clients import through the real node_repl runtime",

@@ -8,6 +8,8 @@ It:
 - checks upstream `Codex.dmg` on daemon startup, every 6 hours, and in the
   background on app launch when stale
 - rebuilds a local native package with `/opt/codex-desktop/update-builder`
+  after detection; users who enable the opt-in deferred-build feature can
+  instead wait for an explicit update check
 - waits for Electron to exit before installing a ready update
 - runs unprivileged; the final package install uses `pkexec` when a graphical
   polkit authentication agent is available, or keeps the package ready and
@@ -21,6 +23,59 @@ under `~/.codex/packages/standalone` are updated with the official standalone
 installer instead of being replaced through npm. Homebrew/Linuxbrew installs
 are reused and reported, but the updater does not replace them with an
 npm-managed install.
+
+If an interrupted npm upgrade leaves a stale Arborist retirement directory,
+automatic daemon, status, and launcher paths record the exact condition but do
+not remove it or retry npm. A functional existing Codex CLI remains selected,
+and updater status directs the user to the read-only diagnostic command:
+
+```bash
+codex-update-manager diagnose
+```
+
+The diagnostic output explains the stale npm condition and prints the explicit
+repair command:
+
+```bash
+codex-update-manager repair-cli
+```
+
+`repair-cli` acquires the shared CLI install lock, reloads the dedicated repair
+journal, derives and revalidates the managed npm paths, and records each planned
+quarantine before moving the stale directory. It then retries npm once with a
+bounded subprocess. Quarantines are preserved and reported after both
+successful and failed repairs, including when npm recreates the same retirement
+directory during a later explicit retry. A failed or interrupted repair remains
+visible in later `diagnose` output and can be retried explicitly.
+
+Mutating npm commands run under an internal bounded supervisor that retains the
+CLI install lock while preventing npm and its descendants from inheriting the
+lock descriptor. The supervisor and npm share one dedicated process group; the
+supervisor terminates remaining npm members before it exits, and the updater
+keeps the supervisor unreaped while applying the same cleanup if the supervisor
+itself fails. If the updater parent exits abruptly, the supervisor cleans the
+group before releasing the lock. Its own timeout remains active independently
+of the updater parent. When an entrypoint first encounters contention, its PID
+is recorded in the updater log.
+
+CLI maintenance and the updater lifecycle merge their separately owned fields
+under a shared state lock. Concurrent daemon, status, and launcher processes
+therefore cannot overwrite a newer CLI result with an older full-state
+snapshot. Before routine CLI state writes, the process acquires the CLI install
+lock and reloads the repair journal so a late registry result cannot hide a
+newer actionable repair condition. The final state write also compares the CLI
+fields with the caller's original snapshot; if another CLI writer completed
+while the caller was waiting, the caller reloads that result instead of
+overwriting it. A pending journal overrides only CLI status and error text on
+top of the latest persisted CLI identity. Operations that need both locks
+acquire the CLI install lock first and hold the state lock only for the final
+reload, comparison, merge, and atomic write.
+
+Missing-CLI launcher preflight acquires the install lock before changing state
+or consulting the npm registry. After contention, it reloads the latest
+CLI-owned state and re-resolves both the requested and persisted CLI paths. If
+another entrypoint completed installation or repair while it waited, preflight
+uses that CLI without a second registry lookup or install attempt.
 
 The updater scopes permission hardening to the official standalone installer
 process. New managed releases use the caller's existing umask plus the
@@ -113,11 +168,44 @@ Runtime files:
 ```text
 ~/.config/codex-update-manager/config.toml
 ~/.local/state/codex-update-manager/state.json
+~/.local/state/codex-update-manager/state.lock
+~/.local/state/codex-update-manager/cli-install.lock
+~/.local/state/codex-update-manager/cli-repair.json
 ~/.local/state/codex-update-manager/service.log
 ~/.cache/codex-update-manager/
 ~/.cache/codex-desktop/launcher.log
 ~/.local/state/codex-desktop/app.pid
 ```
+
+## Update Preferences
+
+Core Linux updater behavior builds detected updates automatically. The Linux
+desktop settings page always exposes **Install updates when you close
+ChatGPT**, which controls only installation after a package has been built.
+When off, a ready package waits for the user to choose **Update**.
+
+The disabled-by-default `deferred-update-build` Linux feature adds a separate
+**Build updates automatically** toggle. When off, background checks detect,
+download, and notify about the newest upstream DMG without starting the local
+package build. Choosing **Check for updates** revalidates upstream and builds
+the current DMG. If upstream replaced the candidate or the cached file was
+removed, that same check downloads the current DMG before building it.
+Fresh app-launch checks keep a deferred candidate without an upstream DMG
+request. Once the normal check interval expires, the updater uses HEAD to confirm
+its identity and reuses the cached DMG without downloading it again; an offline
+background check leaves the deferred candidate pending.
+
+Detection still downloads the DMG because its content hash is the updater's
+authoritative release identity. Disabling automatic builds avoids Electron,
+native-module, and package rebuild work; it does not turn update checks into a
+metadata-only request. Disabling the feature itself immediately restores core
+automatic-build behavior, including for a previously deferred candidate.
+
+Deferred candidates keep the existing serialized `update_detected` status and
+add an optional `deferred_build` marker. Updater 0.10.x ignores the marker and
+continues its earlier automatic-build behavior if it reads state written by
+0.11.x. Prerelease state that used `update_available` is accepted and rewritten
+as `update_detected`.
 
 ## Generated Artifact Cleanup
 

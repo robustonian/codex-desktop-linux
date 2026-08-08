@@ -2,6 +2,7 @@
 let
   supportedFeatureIds = [
     "appshots"
+    "codex-micro"
     "codex-wrapper-updater"
     "directory-only-working-tree-watch"
     "frameless-titlebar"
@@ -14,6 +15,7 @@ let
     "remote-control-ui"
     "remote-mobile-control"
     "shallow-repository-watches"
+    "ssh-command-wrapper"
     "ui-tweaks"
   ];
 
